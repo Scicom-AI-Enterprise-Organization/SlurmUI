@@ -1,0 +1,18 @@
+---
+slurm_version: "21.08.5"
+slurm_user: slurm
+slurm_uid: 1001
+slurm_group: slurm
+slurm_gid: 1001
+
+munge_user: munge
+munge_uid: 1002
+munge_group: munge
+munge_gid: 1002
+
+slurm_config_dir: /etc/slurm
+slurm_log_dir: /var/log/slurm
+slurm_spool_dir: /var/spool/slurm
+
+mgmt_nfs_path: /mgmt
+data_nfs_path: /aura-usrdata

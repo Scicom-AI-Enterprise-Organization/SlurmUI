@@ -1,0 +1,3 @@
+---
+# Worker-specific vars can be added here as needed.
+# Currently inherits all from group_vars/all.yml.

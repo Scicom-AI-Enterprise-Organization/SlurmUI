@@ -1,0 +1,5 @@
+---
+slurmdbd_storage_host: localhost
+slurmdbd_storage_user: slurm
+slurmdbd_storage_pass: "{{ vault_slurmdbd_storage_pass }}"
+slurmdbd_storage_db: slurm_acct_db
