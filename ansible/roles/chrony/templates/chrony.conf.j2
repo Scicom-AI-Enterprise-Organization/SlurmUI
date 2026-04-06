@@ -1,0 +1,15 @@
+{% if inventory_hostname in groups['slurm_controllers'] %}
+# Master node — sync from internet, serve to cluster
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+allow {{ nfs_allowed_network }}
+local stratum 10
+{% else %}
+# Worker node — sync from master
+server {{ slurm_controller_host }} iburst
+{% endif %}
+
+driftfile /var/lib/chrony/drift
+makestep 1.0 3
+rtcsync
+logdir /var/log/chrony
