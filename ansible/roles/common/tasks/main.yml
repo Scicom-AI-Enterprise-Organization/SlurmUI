@@ -1,0 +1,43 @@
+---
+- name: Create munge group
+  ansible.builtin.group:
+    name: "{{ munge_group }}"
+    gid: "{{ munge_gid }}"
+    state: present
+
+- name: Create slurm group
+  ansible.builtin.group:
+    name: "{{ slurm_group }}"
+    gid: "{{ slurm_gid }}"
+    state: present
+
+- name: Create munge user
+  ansible.builtin.user:
+    name: "{{ munge_user }}"
+    uid: "{{ munge_uid }}"
+    group: "{{ munge_group }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+    state: present
+
+- name: Create slurm user
+  ansible.builtin.user:
+    name: "{{ slurm_user }}"
+    uid: "{{ slurm_uid }}"
+    group: "{{ slurm_group }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+    state: present
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - vim
+      - python3
+      - python3-pip
+    state: present
+    update_cache: true

@@ -1,0 +1,46 @@
+---
+- name: Verify common role
+  hosts: all
+  become: true
+  tasks:
+    - name: Check slurm group exists with gid 1001
+      ansible.builtin.command: getent group slurm
+      register: slurm_group
+      changed_when: false
+      failed_when: slurm_group.rc != 0
+
+    - name: Assert slurm gid is 1001
+      ansible.builtin.assert:
+        that:
+          - "'1001' in slurm_group.stdout"
+
+    - name: Check slurm user exists with uid 1001
+      ansible.builtin.command: id -u slurm
+      register: slurm_uid
+      changed_when: false
+
+    - name: Assert slurm uid
+      ansible.builtin.assert:
+        that:
+          - slurm_uid.stdout == '1001'
+
+    - name: Check munge group exists with gid 1002
+      ansible.builtin.command: getent group munge
+      register: munge_group
+      changed_when: false
+      failed_when: munge_group.rc != 0
+
+    - name: Assert munge gid is 1002
+      ansible.builtin.assert:
+        that:
+          - "'1002' in munge_group.stdout"
+
+    - name: Check munge user exists with uid 1002
+      ansible.builtin.command: id -u munge
+      register: munge_uid
+      changed_when: false
+
+    - name: Assert munge uid
+      ansible.builtin.assert:
+        that:
+          - munge_uid.stdout == '1002'

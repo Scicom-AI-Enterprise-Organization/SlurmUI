@@ -1,0 +1,15 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  vars:
+    munge_group: munge
+    munge_gid: 1002
+    munge_user: munge
+    munge_uid: 1002
+    slurm_group: slurm
+    slurm_gid: 1001
+    slurm_user: slurm
+    slurm_uid: 1001
+  roles:
+    - role: common
