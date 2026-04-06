@@ -1,0 +1,29 @@
+---
+- name: Install SSSD and IPA client packages
+  ansible.builtin.apt:
+    name:
+      - sssd
+      - sssd-ipa
+      - sssd-tools
+      - libsss-idmap0
+    state: present
+    update_cache: true
+
+- name: Write sssd.conf
+  ansible.builtin.template:
+    src: sssd.conf.j2
+    dest: /etc/sssd/sssd.conf
+    owner: root
+    group: root
+    mode: '0600'
+  notify: restart sssd
+
+- name: Enable and start SSSD
+  ansible.builtin.service:
+    name: sssd
+    state: started
+    enabled: true
+
+- name: Enable mkhomedir in PAM
+  ansible.builtin.command: pam-auth-update --enable mkhomedir
+  changed_when: false

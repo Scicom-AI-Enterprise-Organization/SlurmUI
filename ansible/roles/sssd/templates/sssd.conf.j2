@@ -1,0 +1,15 @@
+[sssd]
+services = nss, pam
+domains = {{ freeipa_domain }}
+config_file_version = 2
+
+[domain/{{ freeipa_domain }}]
+id_provider = ipa
+auth_provider = ipa
+access_provider = ipa
+chpass_provider = ipa
+ipa_domain = {{ freeipa_domain }}
+ipa_server = {{ freeipa_server }}
+ipa_hostname = {{ ansible_fqdn }}
+enumerate = true
+cache_credentials = true
