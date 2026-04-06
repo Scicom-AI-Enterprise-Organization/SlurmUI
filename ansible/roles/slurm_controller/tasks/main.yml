@@ -1,0 +1,117 @@
+---
+- name: Install Slurm controller packages
+  ansible.builtin.apt:
+    name:
+      - slurmctld
+      - slurmdbd
+      - slurm-client
+      - munge
+      - libmunge-dev
+    state: present
+    update_cache: true
+
+- name: Install MySQL and Python MySQL binding
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - python3-mysqldb
+    state: present
+    update_cache: true
+
+- name: Enable and start MySQL
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Create slurm accounting database
+  community.mysql.mysql_db:
+    name: "{{ slurmdbd_storage_db }}"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create slurm MySQL user
+  community.mysql.mysql_user:
+    name: "{{ slurmdbd_storage_user }}"
+    password: "{{ slurmdbd_storage_pass }}"
+    priv: "{{ slurmdbd_storage_db }}.*:ALL"
+    host: localhost
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+
+- name: Create slurm directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0755'
+  loop:
+    - "{{ slurm_config_dir }}"
+    - "{{ slurm_log_dir }}"
+    - "{{ slurm_spool_dir }}/slurmctld"
+
+- name: Write slurm.conf
+  ansible.builtin.template:
+    src: slurm.conf.j2
+    dest: "{{ slurm_config_dir }}/slurm.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+  notify: restart slurmctld
+
+- name: Copy slurm.conf to mgmt FS
+  ansible.builtin.copy:
+    src: "{{ slurm_config_dir }}/slurm.conf"
+    dest: "{{ mgmt_nfs_path }}/slurm.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+    remote_src: true
+
+- name: Write slurmdbd.conf
+  ansible.builtin.template:
+    src: slurmdbd.conf.j2
+    dest: "{{ slurm_config_dir }}/slurmdbd.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0600'
+  notify: restart slurmdbd
+
+- name: Write cgroup.conf
+  ansible.builtin.template:
+    src: cgroup.conf.j2
+    dest: "{{ slurm_config_dir }}/cgroup.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+  notify: restart slurmctld
+
+- name: Write gres.conf (GPU nodes only)
+  ansible.builtin.template:
+    src: gres.conf.j2
+    dest: "{{ slurm_config_dir }}/gres.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+  when: slurm_nodes | selectattr('gpus', 'gt', 0) | list | length > 0
+  notify: restart slurmctld
+
+- name: Set permissions on slurm config directory
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    recurse: true
+
+- name: Enable and start slurmdbd
+  ansible.builtin.service:
+    name: slurmdbd
+    state: started
+    enabled: true
+
+- name: Enable and start slurmctld
+  ansible.builtin.service:
+    name: slurmctld
+    state: started
+    enabled: true
