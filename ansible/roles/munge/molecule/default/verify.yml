@@ -1,0 +1,36 @@
+---
+- name: Verify munge role
+  hosts: all
+  become: true
+  tasks:
+    - name: Check munge package is installed
+      ansible.builtin.command: dpkg -s munge
+      changed_when: false
+      failed_when: false
+      register: munge_pkg
+
+    - name: Assert munge is installed
+      ansible.builtin.assert:
+        that:
+          - munge_pkg.rc == 0
+
+    - name: Check munge service is enabled
+      ansible.builtin.command: systemctl is-enabled munge
+      register: munge_enabled
+      changed_when: false
+
+    - name: Assert munge is enabled
+      ansible.builtin.assert:
+        that:
+          - munge_enabled.stdout == 'enabled'
+
+    - name: Check munge key exists
+      ansible.builtin.stat:
+        path: /etc/munge/munge.key
+      register: munge_key
+
+    - name: Assert munge key exists
+      ansible.builtin.assert:
+        that:
+          - munge_key.stat.exists
+          - munge_key.stat.mode == '0400'

@@ -1,0 +1,70 @@
+---
+- name: Install munge
+  ansible.builtin.apt:
+    name:
+      - munge
+      - libmunge-dev
+    state: present
+    update_cache: true
+
+- name: Ensure /etc/munge directory exists with correct ownership
+  ansible.builtin.file:
+    path: /etc/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0711'
+
+# Controller: generate key if not already in /mgmt
+- name: Check if munge key exists in mgmt FS
+  ansible.builtin.stat:
+    path: "{{ mgmt_nfs_path }}/munge.key"
+  register: mgmt_munge_key
+  when: inventory_hostname in groups['slurm_controllers']
+
+- name: Generate munge key on controller
+  ansible.builtin.command: mungekey --create --keyfile /etc/munge/munge.key
+  become_user: "{{ munge_user }}"
+  args:
+    creates: /etc/munge/munge.key
+  when:
+    - inventory_hostname in groups['slurm_controllers']
+    - not mgmt_munge_key.stat.exists
+
+- name: Set munge key permissions
+  ansible.builtin.file:
+    path: /etc/munge/munge.key
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+  when: inventory_hostname in groups['slurm_controllers']
+
+- name: Copy munge key to mgmt FS
+  ansible.builtin.copy:
+    src: /etc/munge/munge.key
+    dest: "{{ mgmt_nfs_path }}/munge.key"
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+    remote_src: true
+  when:
+    - inventory_hostname in groups['slurm_controllers']
+    - not mgmt_munge_key.stat.exists
+
+# Workers: copy key from /mgmt
+- name: Copy munge key from mgmt FS on workers
+  ansible.builtin.copy:
+    src: "{{ mgmt_nfs_path }}/munge.key"
+    dest: /etc/munge/munge.key
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+    remote_src: true
+  when: inventory_hostname in groups['slurm_workers']
+  notify: restart munge
+
+- name: Enable and start munge
+  ansible.builtin.service:
+    name: munge
+    state: started
+    enabled: true

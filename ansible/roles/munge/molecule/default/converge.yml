@@ -1,0 +1,23 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  pre_tasks:
+    - name: Create /mgmt dir
+      ansible.builtin.file:
+        path: /mgmt
+        state: directory
+        mode: '0755'
+    - name: Add instance to slurm_controllers group
+      ansible.builtin.add_host:
+        name: instance
+        groups: slurm_controllers
+  vars:
+    munge_user: munge
+    munge_uid: 1002
+    munge_group: munge
+    munge_gid: 1002
+    mgmt_nfs_path: /mgmt
+  roles:
+    - role: common
+    - role: munge
