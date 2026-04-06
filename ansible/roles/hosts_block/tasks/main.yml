@@ -1,0 +1,16 @@
+---
+- name: Build hosts block content
+  ansible.builtin.set_fact:
+    hosts_block_content: |
+      {% for entry in slurm_hosts_entries %}
+      {{ entry.ip }} {{ entry.hostname }}
+      {% endfor %}
+
+- name: Manage slurm hosts block in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "#### {mark} slurm hosts ####"
+    marker_begin: "start"
+    marker_end: "end"
+    block: "{{ hosts_block_content }}"
+    create: false

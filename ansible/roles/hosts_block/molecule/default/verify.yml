@@ -1,0 +1,28 @@
+---
+- name: Verify hosts_block role
+  hosts: all
+  become: true
+  tasks:
+    - name: Read /etc/hosts
+      ansible.builtin.slurp:
+        src: /etc/hosts
+      register: hosts_file
+
+    - name: Decode hosts content
+      ansible.builtin.set_fact:
+        hosts_content: "{{ hosts_file.content | b64decode }}"
+
+    - name: Assert start marker exists
+      ansible.builtin.assert:
+        that:
+          - "'#### start slurm hosts ####' in hosts_content"
+
+    - name: Assert end marker exists
+      ansible.builtin.assert:
+        that:
+          - "'#### end slurm hosts ####' in hosts_content"
+
+    - name: Assert test entry exists
+      ansible.builtin.assert:
+        that:
+          - "'192.168.1.10 slm-node-01' in hosts_content"

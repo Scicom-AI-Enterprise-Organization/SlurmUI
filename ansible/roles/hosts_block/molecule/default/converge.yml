@@ -1,0 +1,12 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  vars:
+    slurm_hosts_entries:
+      - hostname: slm-node-01
+        ip: "192.168.1.10"
+      - hostname: slm-node-02
+        ip: "192.168.1.11"
+  roles:
+    - role: hosts_block
