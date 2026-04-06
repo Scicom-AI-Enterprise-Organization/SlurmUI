@@ -1,0 +1,37 @@
+---
+- name: Install NFS server
+  ansible.builtin.apt:
+    name: nfs-kernel-server
+    state: present
+    update_cache: true
+
+- name: Create mgmt directory
+  ansible.builtin.file:
+    path: "{{ mgmt_nfs_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ data_nfs_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Write NFS exports
+  ansible.builtin.template:
+    src: exports.j2
+    dest: /etc/exports
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload nfs exports
+
+- name: Enable and start NFS server
+  ansible.builtin.service:
+    name: nfs-kernel-server
+    state: started
+    enabled: true
