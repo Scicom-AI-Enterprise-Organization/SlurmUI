@@ -1,0 +1,38 @@
+---
+- name: Install NFS client
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+    update_cache: true
+
+- name: Create mgmt mount point
+  ansible.builtin.file:
+    path: "{{ mgmt_nfs_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create data mount point
+  ansible.builtin.file:
+    path: "{{ data_nfs_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Mount mgmt FS
+  ansible.posix.mount:
+    path: "{{ mgmt_nfs_path }}"
+    src: "{{ mgmt_nfs_server }}:{{ mgmt_nfs_path }}"
+    fstype: nfs
+    opts: "rw,sync,hard,intr"
+    state: mounted
+
+- name: Mount data FS
+  ansible.posix.mount:
+    path: "{{ data_nfs_path }}"
+    src: "{{ data_nfs_server }}:{{ data_nfs_path }}"
+    fstype: nfs
+    opts: "rw,sync,hard,intr"
+    state: mounted
