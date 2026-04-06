@@ -1,0 +1,6 @@
+# Managed by Aura — do not edit manually
+{% for node in slurm_nodes %}
+{% if node.gpus is defined and node.gpus > 0 %}
+Name=gpu File=/dev/nvidia[0-{{ node.gpus - 1 }}] NodeName={{ node.expression }} Count={{ node.gpus }}
+{% endif %}
+{% endfor %}

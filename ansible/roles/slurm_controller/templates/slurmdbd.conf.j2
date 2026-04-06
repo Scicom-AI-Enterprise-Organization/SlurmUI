@@ -1,0 +1,12 @@
+# Managed by Aura — do not edit manually
+AuthType=auth/munge
+DbdHost=localhost
+DbdPort=6819
+SlurmUser={{ slurm_user }}
+LogFile={{ slurm_log_dir }}/slurmdbd.log
+PidFile=/var/run/slurm/slurmdbd.pid
+StorageType=accounting_storage/mysql
+StorageHost={{ slurmdbd_storage_host }}
+StorageUser={{ slurmdbd_storage_user }}
+StoragePass={{ slurmdbd_storage_pass }}
+StorageDB={{ slurmdbd_storage_db }}
