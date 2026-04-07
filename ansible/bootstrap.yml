@@ -1,0 +1,36 @@
+---
+# Bootstrap a new Slurm cluster from scratch.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini -e @cluster-config.json bootstrap.yml
+#
+# Required vars (via cluster-config.json):
+#   slurm_cluster_name, slurm_controller_host, mgmt_nfs_server, data_nfs_server,
+#   nfs_allowed_network, freeipa_server, freeipa_domain,
+#   aura_agent_nats_url, aura_agent_binary_src,
+#   slurm_nodes, slurm_partitions, slurm_hosts_entries,
+#   vault_slurmdbd_storage_pass
+
+- name: Bootstrap master node
+  hosts: slurm_controllers
+  become: true
+  roles:
+    - common
+    - chrony
+    - nfs_server
+    - munge
+    - sssd
+    - hosts_block
+    - slurm_controller
+    - aura_agent
+
+- name: Bootstrap worker nodes
+  hosts: slurm_workers
+  become: true
+  roles:
+    - common
+    - chrony
+    - nfs_client
+    - munge
+    - sssd
+    - hosts_block
+    - slurm_worker
