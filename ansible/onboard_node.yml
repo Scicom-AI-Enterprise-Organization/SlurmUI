@@ -1,0 +1,27 @@
+---
+# Onboard a single worker node into an existing cluster.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e target_node=slm-node-03 \
+#     onboard_node.yml
+#
+# Required extra var: target_node (hostname as defined in inventory)
+
+- name: Onboard worker node
+  hosts: "{{ target_node }}"
+  become: true
+  roles:
+    - common
+    - chrony
+    - nfs_client
+    - munge
+    - sssd
+    - slurm_worker
+
+  post_tasks:
+    - name: Verify slurmd is running
+      ansible.builtin.command: systemctl is-active slurmd
+      register: slurmd_status
+      changed_when: false
+      failed_when: slurmd_status.stdout != 'active'
