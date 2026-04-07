@@ -1,0 +1,24 @@
+{
+  "slurm_cluster_name": "test-cluster",
+  "slurm_controller_host": "slm-master",
+  "mgmt_nfs_server": "192.168.56.10",
+  "data_nfs_server": "192.168.56.10",
+  "mgmt_nfs_path": "/mgmt",
+  "data_nfs_path": "/aura-usrdata",
+  "nfs_allowed_network": "192.168.56.0/24",
+  "freeipa_server": "192.168.56.10",
+  "freeipa_domain": "test.local",
+  "aura_agent_nats_url": "nats://localhost:4222",
+  "aura_agent_binary_src": "/tmp/aura-agent-stub",
+  "vault_slurmdbd_storage_pass": "testpass123",
+  "slurm_nodes": [
+    {"expression": "slm-node-01", "cpus": 1, "gpus": 0, "memory_mb": 1024}
+  ],
+  "slurm_partitions": [
+    {"name": "test", "nodes": ["slm-node-01"], "max_time": "1:00:00", "default": true}
+  ],
+  "slurm_hosts_entries": [
+    {"hostname": "slm-master", "ip": "192.168.56.10"},
+    {"hostname": "slm-node-01", "ip": "192.168.56.11"}
+  ]
+}
