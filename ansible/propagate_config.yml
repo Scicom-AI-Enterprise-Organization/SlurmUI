@@ -1,0 +1,47 @@
+---
+# Propagate updated slurm configs from /mgmt to all cluster nodes.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini -e @cluster-config.json propagate_config.yml
+#
+# Pre-condition: Agent has already written updated configs to {{ mgmt_nfs_path }}/
+
+- name: Propagate slurm config to all nodes
+  hosts: slurm
+  become: true
+  tasks:
+    - name: Copy slurm.conf from mgmt FS
+      ansible.builtin.copy:
+        src: "{{ mgmt_nfs_path }}/slurm.conf"
+        dest: "{{ slurm_config_dir }}/slurm.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+        remote_src: true
+      notify:
+        - restart slurmctld
+        - restart slurmd
+
+    - name: Copy cgroup.conf from mgmt FS
+      ansible.builtin.copy:
+        src: "{{ mgmt_nfs_path }}/cgroup.conf"
+        dest: "{{ slurm_config_dir }}/cgroup.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+        remote_src: true
+      notify:
+        - restart slurmctld
+        - restart slurmd
+
+  handlers:
+    - name: restart slurmctld
+      ansible.builtin.service:
+        name: slurmctld
+        state: restarted
+      when: inventory_hostname in groups['slurm_controllers']
+
+    - name: restart slurmd
+      ansible.builtin.service:
+        name: slurmd
+        state: restarted
+      when: inventory_hostname in groups['slurm_workers']

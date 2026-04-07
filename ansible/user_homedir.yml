@@ -1,0 +1,23 @@
+---
+# Create user home directory on the data NFS server.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e user_uid=10001 \
+#     -e user_gid=10001 \
+#     -e username=jdoe \
+#     user_homedir.yml
+#
+# Required extra vars: user_uid, user_gid, username
+
+- name: Create user home directory on data FS
+  hosts: "{{ data_nfs_server_host | default(groups['slurm_controllers'][0]) }}"
+  become: true
+  tasks:
+    - name: Create user home directory
+      ansible.builtin.file:
+        path: "{{ data_nfs_path }}/{{ username }}"
+        state: directory
+        owner: "{{ user_uid }}"
+        group: "{{ user_gid }}"
+        mode: '0700'
