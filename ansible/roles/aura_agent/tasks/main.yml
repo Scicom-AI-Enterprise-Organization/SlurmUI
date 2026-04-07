@@ -1,0 +1,52 @@
+---
+- name: Create aura-agent config directory
+  ansible.builtin.file:
+    path: /etc/aura-agent
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Copy Aura Agent binary
+  ansible.builtin.copy:
+    src: "{{ aura_agent_binary_src }}"
+    dest: /usr/local/bin/aura-agent
+    owner: root
+    group: root
+    mode: '0755'
+  notify: restart aura-agent
+
+- name: Copy ansible playbooks to node
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/"
+    dest: "{{ aura_agent_playbook_dir | default('/opt/aura/ansible') }}/"
+    owner: root
+    group: root
+    mode: '0644'
+    directory_mode: '0755'
+
+- name: Write agent environment file
+  ansible.builtin.template:
+    src: aura-agent.env.j2
+    dest: /etc/aura-agent/agent.env
+    owner: root
+    group: root
+    mode: '0640'
+  notify: restart aura-agent
+
+- name: Install aura-agent systemd service
+  ansible.builtin.template:
+    src: aura-agent.service.j2
+    dest: /etc/systemd/system/aura-agent.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart aura-agent
+
+- name: Enable and start aura-agent
+  ansible.builtin.service:
+    name: aura-agent
+    state: started
+    enabled: true

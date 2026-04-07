@@ -1,0 +1,17 @@
+[Unit]
+Description=Aura Agent
+After=network.target munge.service
+Requires=munge.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/aura-agent/agent.env
+ExecStart=/usr/local/bin/aura-agent
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aura-agent
+
+[Install]
+WantedBy=multi-user.target
