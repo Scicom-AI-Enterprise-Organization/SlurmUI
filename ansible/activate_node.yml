@@ -1,0 +1,35 @@
+---
+# Activate a FUTURE node within the declared range.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e target_node=slm-node-03 \
+#     activate_node.yml
+#
+# Required extra var: target_node
+
+- name: Activate FUTURE node
+  hosts: "{{ target_node }}"
+  become: true
+  roles:
+    - common
+    - chrony
+    - nfs_client
+    - munge
+    - sssd
+    - slurm_worker
+
+  post_tasks:
+    - name: Verify slurmd registered with slurmctld
+      ansible.builtin.command: >
+        sinfo -N -n {{ target_node }} --noheader --format="%T"
+      delegate_to: "{{ groups['slurm_controllers'][0] }}"
+      register: node_state
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: node_state.stdout | trim in ['idle', 'idle~', 'down', 'allocated']
+
+    - name: Print node state
+      ansible.builtin.debug:
+        msg: "Node {{ target_node }} state: {{ node_state.stdout | trim }}"

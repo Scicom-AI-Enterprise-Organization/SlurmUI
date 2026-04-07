@@ -1,0 +1,68 @@
+---
+# Add a new node outside the originally declared range.
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e target_node=slm-node-11 \
+#     add_node.yml
+#
+# Required extra vars: target_node
+# cluster-config.json must include the new node in slurm_nodes,
+# slurm_hosts_entries, and the updated slurm_partitions (pre-updated by Aura Web)
+
+- name: Update hosts block on all existing cluster nodes
+  hosts: slurm
+  become: true
+  roles:
+    - hosts_block
+
+- name: Onboard new worker node
+  hosts: "{{ target_node }}"
+  become: true
+  roles:
+    - common
+    - chrony
+    - nfs_client
+    - munge
+    - sssd
+    - slurm_worker
+
+- name: Update slurm.conf on controller and restart
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Write updated slurm.conf
+      ansible.builtin.template:
+        src: roles/slurm_controller/templates/slurm.conf.j2
+        dest: "{{ slurm_config_dir }}/slurm.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+
+    - name: Copy updated slurm.conf to mgmt FS
+      ansible.builtin.copy:
+        src: "{{ slurm_config_dir }}/slurm.conf"
+        dest: "{{ mgmt_nfs_path }}/slurm.conf"
+        remote_src: true
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+
+    - name: Restart slurmctld to pick up new node
+      ansible.builtin.service:
+        name: slurmctld
+        state: restarted
+
+  post_tasks:
+    - name: Confirm new node visible in sinfo
+      ansible.builtin.command: sinfo -N -n {{ target_node }} --noheader --format="%T"
+      register: node_state
+      changed_when: false
+      retries: 6
+      delay: 5
+      until: node_state.stdout | trim in ['idle', 'idle~', 'down', 'allocated', 'future']
+      failed_when: node_state.stdout | trim == ''
+
+    - name: Print node state
+      ansible.builtin.debug:
+        msg: "Node {{ target_node }} state: {{ node_state.stdout | trim }}"
