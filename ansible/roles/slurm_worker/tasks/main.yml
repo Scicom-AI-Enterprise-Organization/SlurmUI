@@ -1,0 +1,53 @@
+---
+- name: Install slurmd
+  ansible.builtin.apt:
+    name:
+      - slurmd
+      - slurm-client
+    state: present
+    update_cache: true
+
+- name: Create slurm directories on worker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0755'
+  loop:
+    - "{{ slurm_config_dir }}"
+    - "{{ slurm_log_dir }}"
+    - "{{ slurm_spool_dir }}/slurmd"
+
+- name: Copy slurm.conf from mgmt FS
+  ansible.builtin.copy:
+    src: "{{ mgmt_nfs_path }}/slurm.conf"
+    dest: "{{ slurm_config_dir }}/slurm.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+    remote_src: true
+  notify: restart slurmd
+
+- name: Copy cgroup.conf from mgmt FS
+  ansible.builtin.copy:
+    src: "{{ mgmt_nfs_path }}/cgroup.conf"
+    dest: "{{ slurm_config_dir }}/cgroup.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+    remote_src: true
+  notify: restart slurmd
+
+- name: Set permissions on slurm config directory
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    recurse: true
+
+- name: Enable and start slurmd
+  ansible.builtin.service:
+    name: slurmd
+    state: started
+    enabled: true
