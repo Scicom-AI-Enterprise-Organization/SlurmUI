@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write        # create GitHub releases + upload assets
+  id-token: write        # OIDC → AWS ECR
+  packages: write
+
+env:
+  AWS_REGION: ap-southeast-5
+  AWS_ACCOUNT_ID: "865626945255"
+  ECR_WEB_REPO: scicom/aura-web
+
+jobs:
+  # ── 1. Build & push web image to ECR ──────────────────────────────────────
+  build-web:
+    name: Build web image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive image tag
+        id: meta
+        run: |
+          TAG=${GITHUB_REF_NAME}          # e.g. v1.2.3
+          REGISTRY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE="${REGISTRY}/${{ env.ECR_WEB_REPO }}"
+          echo "tag=${TAG}"       >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}"   >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # ── 2. Build agent binary → GitHub Release ────────────────────────────────
+  build-agent:
+    name: Build agent binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Build linux/amd64
+        run: |
+          cd agent
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME}" \
+            -o ../aura-agent-linux-amd64 ./cmd/aura-agent
+
+      - name: Build linux/arm64
+        run: |
+          cd agent
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.Version=${GITHUB_REF_NAME}" \
+            -o ../aura-agent-linux-arm64 ./cmd/aura-agent
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            aura-agent-linux-amd64
+            aura-agent-linux-arm64
+
+  # ── 3. Update image tag in aies-argocd ────────────────────────────────────
+  update-argocd:
+    name: Update ArgoCD manifest
+    needs: [build-web, build-agent]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aies-argocd
+        uses: actions/checkout@v4
+        with:
+          repository: AIES-Infra/aies-argocd
+          token: ${{ secrets.AIES_ARGOCD_PAT }}
+          path: aies-argocd
+
+      - name: Update image tag in kustomization.yaml
+        run: |
+          cd aies-argocd/apps/scicom-aura
+          IMAGE="${{ needs.build-web.outputs.image }}"
+          TAG="${{ needs.build-web.outputs.tag }}"
+          # Use kustomize edit to update the image tag
+          kustomize edit set image "${IMAGE}=${IMAGE}:${TAG}"
+
+      - name: Commit and push
+        run: |
+          cd aies-argocd
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps/scicom-aura/kustomization.yaml
+          git commit -m "chore(scicom-aura): bump image to ${{ needs.build-web.outputs.tag }}"
+          git push
