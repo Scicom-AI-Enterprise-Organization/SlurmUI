@@ -1,0 +1,72 @@
+---
+# Simplified bootstrap for local E2E testing.
+# Targets a Docker container with fake Slurm commands already installed.
+# Skips NFS, Munge, FreeIPA, Slurm installation.
+#
+# Usage (run by the web bootstrap route, not directly):
+#   ansible-playbook -i inventory.ini -e @cluster-config.json test-bootstrap.yml
+
+- name: Install Aura Agent on test cluster node
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Create agent config directory
+      ansible.builtin.file:
+        path: /etc/aura-agent
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    - name: Copy Aura Agent binary
+      ansible.builtin.copy:
+        src: "{{ aura_agent_binary_src }}"
+        dest: /usr/local/bin/aura-agent
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create Ansible playbooks directory on node
+      ansible.builtin.file:
+        path: /opt/aura/ansible
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Write agent environment file
+      ansible.builtin.copy:
+        dest: /etc/aura-agent/agent.env
+        owner: root
+        group: root
+        mode: '0640'
+        content: |
+          NATS_URL={{ aura_agent_nats_url }}
+          CLUSTER_ID={{ aura_cluster_id | default(slurm_cluster_name) }}
+          ANSIBLE_PLAYBOOK_DIR=/opt/aura/ansible
+          SLURM_USER=root
+
+    - name: Start aura-agent in background
+      ansible.builtin.shell: |
+        export $(grep -v '^#' /etc/aura-agent/agent.env | xargs)
+        nohup /usr/local/bin/aura-agent > /var/log/aura-agent.log 2>&1 &
+        echo $! > /var/run/aura-agent.pid
+      args:
+        creates: /var/run/aura-agent.pid
+
+    - name: Wait for agent to connect (poll log)
+      ansible.builtin.wait_for:
+        path: /var/log/aura-agent.log
+        search_regex: "aura-agent running"
+        timeout: 30
+      ignore_errors: true
+
+    - name: Show agent log tail
+      ansible.builtin.command: tail -20 /var/log/aura-agent.log
+      register: agent_log
+      ignore_errors: true
+
+    - name: Print agent log
+      ansible.builtin.debug:
+        msg: "{{ agent_log.stdout_lines }}"
+      when: agent_log is defined

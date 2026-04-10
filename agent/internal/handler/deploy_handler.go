@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/scicom/aura/agent/internal/ansible"
 	"github.com/scicom/aura/agent/internal/message"
@@ -29,6 +30,38 @@ func NewDeployHandler(publisher *agentNats.Publisher, runner *ansible.Runner, pl
 	}
 }
 
+// writeTempConfig writes inline config JSON to a temp file and returns the path.
+// The caller is responsible for removing the file when done.
+func writeTempConfig(config json.RawMessage) (string, error) {
+	f, err := os.CreateTemp("", "aura-cluster-config-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	if _, err := f.Write(config); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("failed to write temp config: %w", err)
+	}
+	f.Close()
+	return f.Name(), nil
+}
+
+// resolveVarsFile returns the vars file path, writing a temp file if inline config is provided.
+// Returns the path and a cleanup function (may be a no-op).
+func resolveVarsFile(varsFile string, config json.RawMessage) (string, func(), error) {
+	if varsFile != "" {
+		return varsFile, func() {}, nil
+	}
+	if len(config) > 0 {
+		path, err := writeTempConfig(config)
+		if err != nil {
+			return "", func() {}, err
+		}
+		return path, func() { os.Remove(path) }, nil
+	}
+	return "", func() {}, nil
+}
+
 // HandleActivateNode runs the activate_node.yml playbook.
 func (h *DeployHandler) HandleActivateNode(ctx context.Context, cmd *message.Command) error {
 	var payload message.ActivateNodePayload
@@ -41,10 +74,16 @@ func (h *DeployHandler) HandleActivateNode(ctx context.Context, cmd *message.Com
 		"target_node", payload.TargetNode,
 	)
 
+	varsFile, cleanup, err := resolveVarsFile(payload.VarsFile, payload.Config)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer cleanup()
+
 	opts := &ansible.RunOpts{
 		PlaybookDir: h.playbookDir,
 		Playbook:    "activate_node.yml",
-		VarsFile:    payload.VarsFile,
+		VarsFile:    varsFile,
 		ExtraVars: map[string]string{
 			"target_node": payload.TargetNode,
 		},
@@ -65,10 +104,16 @@ func (h *DeployHandler) HandleAddNode(ctx context.Context, cmd *message.Command)
 		"target_node", payload.TargetNode,
 	)
 
+	varsFile, cleanup, err := resolveVarsFile(payload.VarsFile, payload.Config)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer cleanup()
+
 	opts := &ansible.RunOpts{
 		PlaybookDir: h.playbookDir,
 		Playbook:    "add_node.yml",
-		VarsFile:    payload.VarsFile,
+		VarsFile:    varsFile,
 		ExtraVars: map[string]string{
 			"target_node": payload.TargetNode,
 		},
@@ -86,10 +131,16 @@ func (h *DeployHandler) HandlePropagateConfig(ctx context.Context, cmd *message.
 
 	h.logger.Info("propagating config", "request_id", cmd.RequestID)
 
+	varsFile, cleanup, err := resolveVarsFile(payload.VarsFile, payload.Config)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer cleanup()
+
 	opts := &ansible.RunOpts{
 		PlaybookDir: h.playbookDir,
 		Playbook:    "propagate_config.yml",
-		VarsFile:    payload.VarsFile,
+		VarsFile:    varsFile,
 	}
 
 	return h.runPlaybook(ctx, cmd.RequestID, opts)
@@ -107,10 +158,16 @@ func (h *DeployHandler) HandleCreateHomedir(ctx context.Context, cmd *message.Co
 		"username", payload.Username,
 	)
 
+	varsFile, cleanup, err := resolveVarsFile(payload.VarsFile, payload.Config)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer cleanup()
+
 	opts := &ansible.RunOpts{
 		PlaybookDir: h.playbookDir,
 		Playbook:    "user_homedir.yml",
-		VarsFile:    payload.VarsFile,
+		VarsFile:    varsFile,
 		ExtraVars: map[string]string{
 			"username": payload.Username,
 			"user_uid": fmt.Sprintf("%d", payload.UserUID),

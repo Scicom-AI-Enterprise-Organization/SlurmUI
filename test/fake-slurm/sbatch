@@ -1,0 +1,17 @@
+#!/bin/bash
+# Fake sbatch — increments a counter in /tmp for realistic job IDs
+COUNTER_FILE=/tmp/aura-fake-job-counter
+COUNT=0
+if [ -f "$COUNTER_FILE" ]; then
+  COUNT=$(cat "$COUNTER_FILE")
+fi
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNTER_FILE"
+
+JOB_ID=$((1000 + COUNT))
+
+# Simulate some work
+sleep 0.2
+
+echo "Submitted batch job $JOB_ID"
+exit 0

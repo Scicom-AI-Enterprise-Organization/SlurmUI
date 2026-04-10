@@ -8,6 +8,7 @@ interface StepBasicsProps {
     clusterName: string;
     controllerHost: string;
     controllerIp: string;
+    controllerSshPort: number;
     freeipaServer: string;
     freeipaDomain: string;
   };
@@ -15,7 +16,7 @@ interface StepBasicsProps {
 }
 
 export function StepBasics({ data, onChange }: StepBasicsProps) {
-  const update = (field: keyof StepBasicsProps["data"], value: string) => {
+  const update = (field: keyof StepBasicsProps["data"], value: string | number) => {
     onChange({ ...data, [field]: value });
   };
 
@@ -44,14 +45,26 @@ export function StepBasics({ data, onChange }: StepBasicsProps) {
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="controllerIp">Controller IP</Label>
-        <Input
-          id="controllerIp"
-          placeholder="192.168.1.1"
-          value={data.controllerIp}
-          onChange={(e) => update("controllerIp", e.target.value)}
-        />
+      <div className="grid grid-cols-3 gap-4">
+        <div className="col-span-2 space-y-2">
+          <Label htmlFor="controllerIp">Controller IP</Label>
+          <Input
+            id="controllerIp"
+            placeholder="192.168.1.1"
+            value={data.controllerIp}
+            onChange={(e) => update("controllerIp", e.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="controllerSshPort">SSH Port</Label>
+          <Input
+            id="controllerSshPort"
+            type="number"
+            placeholder="22"
+            value={data.controllerSshPort}
+            onChange={(e) => update("controllerSshPort", parseInt(e.target.value) || 22)}
+          />
+        </div>
       </div>
 
       <div className="space-y-2">

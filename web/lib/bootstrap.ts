@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { prisma } from "@/lib/prisma";
-import { getNatsConnection, jsonCodec } from "@/lib/nats";
+import { getNatsConnection, jc } from "@/lib/nats";
 import { randomUUID } from "crypto";
 import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
@@ -61,7 +61,7 @@ export async function runBootstrap(options: BootstrapOptions): Promise<void> {
     const lines = data.toString().split("\n");
     for (const line of lines) {
       if (line.trim()) {
-        nc.publish(streamSubject, jsonCodec.encode(line));
+        nc.publish(streamSubject, jc.encode(line));
       }
     }
   });
@@ -71,7 +71,7 @@ export async function runBootstrap(options: BootstrapOptions): Promise<void> {
     const lines = data.toString().split("\n");
     for (const line of lines) {
       if (line.trim()) {
-        nc.publish(streamSubject, jsonCodec.encode(`[stderr] ${line}`));
+        nc.publish(streamSubject, jc.encode(`[stderr] ${line}`));
       }
     }
   });
@@ -91,7 +91,7 @@ export async function runBootstrap(options: BootstrapOptions): Promise<void> {
     // Publish result
     nc.publish(
       replySubject,
-      jsonCodec.encode({
+      jc.encode({
         success,
         exitCode: code,
         message: success
@@ -107,7 +107,7 @@ export async function runBootstrap(options: BootstrapOptions): Promise<void> {
     console.error("[Bootstrap] Process error:", err);
     nc.publish(
       replySubject,
-      jsonCodec.encode({
+      jc.encode({
         success: false,
         exitCode: -1,
         message: `Bootstrap process error: ${err.message}`,

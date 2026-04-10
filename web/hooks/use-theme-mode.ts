@@ -1,39 +1,30 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
-/**
- * Hook to manage dark/light mode state.
- * Syncs with document.documentElement.classList ("dark") and persists to localStorage.
- */
 export function useThemeMode() {
   const [isDark, setIsDark] = useState(false);
 
+  // On mount: read saved preference and sync state + class
   useEffect(() => {
-    // On mount: check saved preference, then system preference
     const saved = localStorage.getItem("theme");
     const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-
-    if (saved === "dark" || (!saved && systemPrefersDark)) {
-      setIsDark(true);
-      document.documentElement.classList.add("dark");
-    } else {
-      setIsDark(false);
-      document.documentElement.classList.remove("dark");
-    }
+    // Default to dark when no preference saved
+    const shouldBeDark = saved ? saved === "dark" : (systemPrefersDark || true);
+    setIsDark(shouldBeDark);
+    document.documentElement.classList.toggle("dark", shouldBeDark);
   }, []);
 
-  useEffect(() => {
-    if (isDark) {
-      document.documentElement.classList.add("dark");
-      localStorage.setItem("theme", "dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-      localStorage.setItem("theme", "light");
-    }
-  }, [isDark]);
+  // Toggle handler: directly update both DOM and state (no effect race)
+  const applyTheme = useCallback((dark: boolean) => {
+    setIsDark(dark);
+    document.documentElement.classList.toggle("dark", dark);
+    localStorage.setItem("theme", dark ? "dark" : "light");
+  }, []);
 
-  const toggleTheme = () => setIsDark((prev) => !prev);
+  const toggleTheme = useCallback(() => {
+    applyTheme(!isDark);
+  }, [isDark, applyTheme]);
 
-  return { isDark, setIsDark, toggleTheme };
+  return { isDark, setIsDark: applyTheme, toggleTheme };
 }

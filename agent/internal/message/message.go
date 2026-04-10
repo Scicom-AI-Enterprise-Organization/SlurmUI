@@ -97,27 +97,31 @@ type ListJobsPayload struct {
 
 // ActivateNodePayload is the payload for activate_node commands.
 type ActivateNodePayload struct {
-	TargetNode string `json:"target_node"`
-	VarsFile   string `json:"vars_file"` // path to cluster-config.json on disk
+	TargetNode string          `json:"target_node"`
+	VarsFile   string          `json:"vars_file,omitempty"` // path to cluster-config.json on disk
+	Config     json.RawMessage `json:"config,omitempty"`    // inline config (alternative to VarsFile)
 }
 
 // AddNodePayload is the payload for add_node commands.
 type AddNodePayload struct {
-	TargetNode string `json:"target_node"`
-	VarsFile   string `json:"vars_file"`
+	TargetNode string          `json:"target_node"`
+	VarsFile   string          `json:"vars_file,omitempty"`
+	Config     json.RawMessage `json:"config,omitempty"`
 }
 
 // PropagateConfigPayload is the payload for propagate_config commands.
 type PropagateConfigPayload struct {
-	VarsFile string `json:"vars_file"`
+	VarsFile string          `json:"vars_file,omitempty"`
+	Config   json.RawMessage `json:"config,omitempty"`
 }
 
 // CreateHomedirPayload is the payload for create_homedir commands.
 type CreateHomedirPayload struct {
-	Username string `json:"username"`
-	UserUID  int    `json:"user_uid"`
-	UserGID  int    `json:"user_gid"`
-	VarsFile string `json:"vars_file"`
+	Username string          `json:"username"`
+	UserUID  int             `json:"user_uid"`
+	UserGID  int             `json:"user_gid"`
+	VarsFile string          `json:"vars_file,omitempty"`
+	Config   json.RawMessage `json:"config,omitempty"`
 }
 
 // ParseCommand parses a raw JSON message into a Command.

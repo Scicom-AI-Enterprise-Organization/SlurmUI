@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getNatsConnection, jsonCodec } from "@/lib/nats";
+import { getNatsConnection, jc } from "@/lib/nats";
 import type { Subscription } from "nats";
 
 const HEARTBEAT_TIMEOUT_MS = 30_000; // 30 seconds without heartbeat = DEGRADED
@@ -77,7 +77,7 @@ async function subscribeToCluster(clusterId: string): Promise<void> {
       for await (const msg of sub) {
         hb.lastSeen = Date.now();
         try {
-          const data = jsonCodec.decode(msg.data) as Record<string, unknown>;
+          const data = jc.decode(msg.data) as Record<string, unknown>;
           // Heartbeat payload may include agent version, load, etc.
           console.log(`[Heartbeat] ${clusterId}: ${JSON.stringify(data)}`);
         } catch {

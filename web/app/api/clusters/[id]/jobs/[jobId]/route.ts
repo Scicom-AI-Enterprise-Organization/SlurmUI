@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { sendCommand } from "@/lib/nats";
+import { sendCommandAndWait } from "@/lib/nats";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -36,10 +36,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // If job is running, optionally fetch latest status from agent
   if (job.status === "RUNNING" && job.slurmJobId && job.cluster.status !== "OFFLINE") {
     try {
-      const result = await sendCommand(id, {
+      const result = await sendCommandAndWait(id, {
         request_id: randomUUID(),
-        command: "scontrol_show_job",
-        args: { slurm_job_id: job.slurmJobId },
+        type: "job_info",
+        payload: { job_id: String(job.slurmJobId) },
       }, 10000) as { state?: string; exit_code?: number };
 
       // Update local status if changed
@@ -99,13 +99,13 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Send cancel command to agent
+  // Send cancel command to agent (best effort)
   if (job.slurmJobId) {
     try {
-      await sendCommand(id, {
+      await sendCommandAndWait(id, {
         request_id: randomUUID(),
-        command: "scancel",
-        args: { slurm_job_id: job.slurmJobId },
+        type: "cancel_job",
+        payload: { job_id: String(job.slurmJobId) },
       }, 15000);
     } catch {
       // Best effort — still mark as cancelled locally

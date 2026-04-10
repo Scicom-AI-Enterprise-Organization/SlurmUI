@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { getNatsConnection, jsonCodec } from "@/lib/nats";
+import { getNatsConnection, jc } from "@/lib/nats";
 import type { Subscription } from "nats";
 
 interface WebSocketClient {
@@ -78,7 +78,7 @@ async function subscribeToStream(
     let seq = 0;
     for await (const msg of streamSub) {
       try {
-        const line = jsonCodec.decode(msg.data) as string;
+        const line = jc.decode(msg.data) as string;
         seq++;
         client.ws.send(
           JSON.stringify({
@@ -102,7 +102,7 @@ async function subscribeToStream(
   (async () => {
     for await (const msg of replySub) {
       try {
-        const result = jsonCodec.decode(msg.data);
+        const result = jc.decode(msg.data);
         client.ws.send(
           JSON.stringify({
             type: "complete",

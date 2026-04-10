@@ -1,0 +1,9 @@
+#!/bin/bash
+# Fake squeue — returns JSON matching SLURM's squeue --json format
+cat <<'EOF'
+{
+  "meta": {"slurm": {"version": {"major": 21, "minor": 8, "micro": 5}}},
+  "errors": [],
+  "jobs": []
+}
+EOF

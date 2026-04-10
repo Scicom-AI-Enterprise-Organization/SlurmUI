@@ -1,0 +1,128 @@
+{
+  "id": "scicom",
+  "realm": "scicom",
+  "displayName": "SciCom",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "clients": [
+    {
+      "id": "aura-web",
+      "clientId": "aura-web",
+      "name": "Aura Web",
+      "description": "Aura Web UI",
+      "rootUrl": "http://localhost:3000",
+      "adminUrl": "http://localhost:3000",
+      "baseUrl": "http://localhost:3000",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "aura-web-secret",
+      "redirectUris": [
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "id": "groups-mapper",
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "id": "admin-group",
+      "name": "admin",
+      "path": "/admin",
+      "subGroups": []
+    },
+    {
+      "id": "user-group",
+      "name": "user",
+      "path": "/user",
+      "subGroups": []
+    }
+  ],
+  "users": [
+    {
+      "id": "admin-user-id",
+      "username": "admin@aura.local",
+      "email": "admin@aura.local",
+      "firstName": "Admin",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/admin"
+      ]
+    },
+    {
+      "id": "regular-user-id",
+      "username": "user@aura.local",
+      "email": "user@aura.local",
+      "firstName": "Regular",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "user",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/user"
+      ]
+    }
+  ]
+}

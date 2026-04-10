@@ -1,0 +1,40 @@
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install SSH + Python 3 (required by Ansible) + tini for process management
+RUN apt-get update && apt-get install -y \
+    openssh-server \
+    python3 \
+    python3-pip \
+    tini \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure SSH: allow root login with key auth only
+RUN mkdir -p /var/run/sshd /root/.ssh && chmod 700 /root/.ssh
+RUN sed -i \
+    -e 's/#PermitRootLogin.*/PermitRootLogin yes/' \
+    -e 's/PasswordAuthentication yes/PasswordAuthentication no/' \
+    /etc/ssh/sshd_config
+
+# Inject test public key at build time
+ARG TEST_PUBKEY
+RUN echo "${TEST_PUBKEY}" >> /root/.ssh/authorized_keys && \
+    chmod 600 /root/.ssh/authorized_keys
+
+# ---- Fake Slurm commands ----
+COPY fake-slurm/sinfo    /usr/bin/sinfo
+COPY fake-slurm/sbatch   /usr/bin/sbatch
+COPY fake-slurm/scontrol /usr/bin/scontrol
+COPY fake-slurm/scancel  /usr/bin/scancel
+COPY fake-slurm/squeue   /usr/bin/squeue
+RUN chmod +x /usr/bin/sinfo /usr/bin/sbatch /usr/bin/scontrol /usr/bin/scancel /usr/bin/squeue
+
+# ---- Entrypoint ----
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/entrypoint.sh"]

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { WizardShell } from "@/components/wizard/wizard-shell";
 import { StepBasics } from "@/components/wizard/step-basics";
 import { StepStorage } from "@/components/wizard/step-storage";
@@ -20,12 +19,11 @@ const steps = [
 ];
 
 export default function NewClusterPage() {
-  const router = useRouter();
-
   const [basics, setBasics] = useState({
     clusterName: "",
     controllerHost: "",
     controllerIp: "",
+    controllerSshPort: 22,
     freeipaServer: "ipa.scicom.internal",
     freeipaDomain: "scicom.internal",
   });
@@ -43,7 +41,7 @@ export default function NewClusterPage() {
   const [partitions, setPartitions] = useState<PartitionDefinition[]>([]);
 
   const [clusterId, setClusterId] = useState<string | null>(null);
-  const [requestId, setRequestId] = useState<string | null>(null);
+  const [bootstrapConfig, setBootstrapConfig] = useState<Record<string, unknown> | null>(null);
 
   const buildConfig = () => ({
     slurm_cluster_name: basics.clusterName,
@@ -70,32 +68,26 @@ export default function NewClusterPage() {
       default: p.isDefault,
     })),
     slurm_hosts_entries: [
-      { hostname: basics.controllerHost, ip: basics.controllerIp },
+      { hostname: basics.controllerHost, ip: basics.controllerIp, port: basics.controllerSshPort !== 22 ? basics.controllerSshPort : undefined },
       ...hosts,
     ],
   });
 
   const canProgress = (step: number): boolean => {
     switch (step) {
-      case 0:
-        return !!(basics.clusterName && basics.controllerHost && basics.controllerIp);
-      case 1:
-        return !!(storage.mgmtNfsServer && storage.dataNfsServer && storage.nfsAllowedNetwork);
-      case 2:
-        return nodes.length > 0 && hosts.length > 0;
-      case 3:
-        return partitions.length > 0;
-      case 4:
-        return true; // Review step: always allowed
-      case 5:
-        return false; // Bootstrap step: never "next" — user watches log
-      default:
-        return true;
+      case 0: return !!(basics.clusterName && basics.controllerHost && basics.controllerIp);
+      case 1: return !!(storage.mgmtNfsServer && storage.dataNfsServer && storage.nfsAllowedNetwork);
+      case 2: return nodes.length > 0 && hosts.length > 0;
+      case 3: return partitions.length > 0;
+      case 4: return true;
+      case 5: return false; // Bootstrap step: user watches log
+      default: return true;
     }
   };
 
+  // Called when Review step's "Complete" is clicked.
+  // Creates the cluster record, then the Bootstrap step starts streaming automatically.
   const handleComplete = async () => {
-    // When step 4 (Review) completes, create cluster and start bootstrap
     const config = buildConfig();
 
     try {
@@ -117,24 +109,10 @@ export default function NewClusterPage() {
 
       const cluster = await res.json();
       setClusterId(cluster.id);
-
-      // Trigger bootstrap
-      const bootstrapRes = await fetch(`/api/clusters/${cluster.id}/command`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: "bootstrap",
-          args: { config },
-          timeout: 600000,
-        }),
-      });
-
-      if (bootstrapRes.ok) {
-        const bootstrapData = await bootstrapRes.json();
-        setRequestId(bootstrapData.request_id);
-      }
+      setBootstrapConfig(config); // StepLiveLog will start bootstrap on mount
     } catch (err) {
-      console.error("Failed to start bootstrap:", err);
+      console.error("Failed to create cluster:", err);
+      alert("Failed to create cluster");
     }
   };
 
@@ -144,19 +122,14 @@ export default function NewClusterPage() {
       <WizardShell steps={steps} onComplete={handleComplete} canProgress={canProgress}>
         <StepBasics data={basics} onChange={setBasics} />
         <StepStorage data={storage} onChange={setStorage} />
-        <StepNodes
-          nodes={nodes}
-          hosts={hosts}
-          onNodesChange={setNodes}
-          onHostsChange={setHosts}
-        />
+        <StepNodes nodes={nodes} hosts={hosts} onNodesChange={setNodes} onHostsChange={setHosts} />
         <StepPartitions
           partitions={partitions}
           availableNodeExpressions={nodes.map((n) => n.expression).filter(Boolean)}
           onChange={setPartitions}
         />
         <StepReview config={buildConfig()} />
-        <StepLiveLog requestId={requestId} clusterId={clusterId} />
+        <StepLiveLog clusterId={clusterId} config={bootstrapConfig} />
       </WizardShell>
     </div>
   );

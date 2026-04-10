@@ -1,0 +1,34 @@
+#!/bin/bash
+# Fake sinfo that returns JSON matching SLURM's sinfo --json format
+# The agent calls: sinfo --json
+cat <<'EOF'
+{
+  "meta": {"slurm": {"version": {"major": 21, "minor": 8, "micro": 5}, "release": "21.08.5"}},
+  "errors": [],
+  "nodes": [
+    {
+      "name": "test-ctrl",
+      "state": "idle",
+      "cpus": 8,
+      "real_memory": 16384,
+      "memory": 16384,
+      "partitions": ["compute"],
+      "reason": "none",
+      "cores": 4,
+      "threads": 2,
+      "arch": "x86_64",
+      "operating_system": "Linux"
+    }
+  ],
+  "partitions": [
+    {
+      "name": "compute",
+      "state": "up",
+      "total_cpus": 8,
+      "total_nodes": 1,
+      "nodes": "test-ctrl",
+      "time_limit": {"infinite": true}
+    }
+  ]
+}
+EOF

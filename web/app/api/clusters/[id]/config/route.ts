@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { sendCommand } from "@/lib/nats";
+import { publishCommand } from "@/lib/nats";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -37,17 +37,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     data: { config },
   });
 
-  // Propagate to agent
+  // Propagate to agent (non-blocking — long-running Ansible operation)
+  const requestId = randomUUID();
   try {
-    const result = await sendCommand(id, {
-      request_id: randomUUID(),
-      command: "propagate_config",
-      args: { config },
-    }, 120000);
+    await publishCommand(id, {
+      request_id: requestId,
+      type: "propagate_config",
+      payload: { config },
+    });
 
     return NextResponse.json({
       cluster: updatedCluster,
-      propagation: result,
+      request_id: requestId,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -55,8 +56,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json(
       {
         cluster: updatedCluster,
-        propagation: { error: message },
-        warning: "Config saved but propagation to cluster failed. Retry propagation.",
+        warning: `Config saved but failed to queue propagation: ${message}`,
       },
       { status: 207 }
     );

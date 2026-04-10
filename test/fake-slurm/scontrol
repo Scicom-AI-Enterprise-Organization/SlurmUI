@@ -1,0 +1,32 @@
+#!/bin/bash
+# Fake scontrol — handles: scontrol show job <id> --json
+# Also handles: scontrol update NodeName=<n> State=RESUME (activate node)
+if [[ "$*" == *"show job"* ]] && [[ "$*" == *"--json"* ]]; then
+  JOB_ID=$(echo "$@" | grep -oP '\d+' | head -1)
+  cat <<EOF
+{
+  "meta": {"slurm": {"version": {"major": 21, "minor": 8, "micro": 5}}},
+  "errors": [],
+  "jobs": [
+    {
+      "job_id": ${JOB_ID:-1001},
+      "name": "aura-test",
+      "job_state": "COMPLETED",
+      "exit_code": {"status": "SUCCESS", "return_code": 0},
+      "partition": "compute",
+      "user_name": "root",
+      "submit_time": {"number": $(date +%s)},
+      "start_time": {"number": $(date +%s)},
+      "end_time": {"number": $(date +%s)}
+    }
+  ]
+}
+EOF
+elif [[ "$*" == *"update"* ]] && [[ "$*" == *"State=RESUME"* ]]; then
+  NODE=$(echo "$@" | grep -oP 'NodeName=\K\S+')
+  echo "Node ${NODE} updated state to RESUME"
+  exit 0
+else
+  echo "scontrol: unrecognised command: $*" >&2
+  exit 0
+fi

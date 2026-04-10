@@ -1,94 +1,105 @@
-import { connect, NatsConnection, JSONCodec, StringCodec, Subscription } from "nats";
+import { connect, NatsConnection, JSONCodec, Subscription } from "nats";
 
-const jc = JSONCodec();
-const sc = StringCodec();
+export const jc = JSONCodec();
 
-let natsConnection: NatsConnection | null = null;
+let _conn: NatsConnection | null = null;
 
 export async function getNatsConnection(): Promise<NatsConnection> {
-  if (natsConnection && !natsConnection.isClosed()) {
-    return natsConnection;
-  }
+  if (_conn && !_conn.isClosed()) return _conn;
 
-  natsConnection = await connect({
+  _conn = await connect({
     servers: process.env.NATS_URL ?? "nats://localhost:4222",
     name: "aura-web",
     reconnect: true,
-    maxReconnectAttempts: -1, // infinite
+    maxReconnectAttempts: -1,
     reconnectTimeWait: 2000,
   });
 
-  // Monitor connection status
   (async () => {
-    for await (const status of natsConnection!.status()) {
-      console.log(`[NATS] ${status.type}: ${JSON.stringify(status.data)}`);
+    for await (const s of _conn!.status()) {
+      console.log(`[NATS] ${s.type}:`, s.data);
     }
   })();
 
-  console.log("[NATS] Connected to", process.env.NATS_URL);
-  return natsConnection;
+  console.log("[NATS] Connected to", process.env.NATS_URL ?? "nats://localhost:4222");
+  return _conn;
+}
+
+export interface AgentCommand {
+  request_id: string;
+  type: string;
+  payload?: Record<string, unknown>;
 }
 
 /**
- * Send a command to a cluster agent and wait for a reply.
- * Uses request-reply pattern with timeout.
+ * Send a command to the cluster agent and wait for the reply.
+ * Uses JetStream publish for guaranteed delivery + core NATS subscribe for reply.
+ * Suitable for fast commands (submit_job, node_status, list_jobs, job_info, cancel_job).
  */
-export async function sendCommand(
+export async function sendCommandAndWait(
   clusterId: string,
-  command: Record<string, unknown>,
-  timeoutMs: number = 30000
+  cmd: AgentCommand,
+  timeoutMs = 30_000
 ): Promise<unknown> {
   const nc = await getNatsConnection();
-  const subject = `aura.cluster.${clusterId}.command`;
+  const js = nc.jetstream();
 
-  const reply = await nc.request(subject, jc.encode(command), {
-    timeout: timeoutMs,
+  const replySubject = `aura.cluster.${clusterId}.reply.${cmd.request_id}`;
+  const commandSubject = `aura.cluster.${clusterId}.command`;
+
+  // Subscribe BEFORE publishing to prevent race condition.
+  const sub = nc.subscribe(replySubject, { max: 1 });
+
+  try {
+    await js.publish(commandSubject, jc.encode(cmd));
+  } catch (err) {
+    sub.unsubscribe();
+    throw new Error(`Failed to publish command to cluster ${clusterId}: ${err instanceof Error ? err.message : err}`);
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      sub.unsubscribe();
+      reject(new Error(`Command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    (async () => {
+      try {
+        for await (const msg of sub) {
+          clearTimeout(timer);
+          resolve(jc.decode(msg.data));
+          return;
+        }
+      } catch (err) {
+        clearTimeout(timer);
+        reject(err);
+      }
+    })();
   });
-
-  return jc.decode(reply.data);
 }
 
 /**
- * Send a command to a cluster agent and return a subscription
- * for streaming replies. Used for long-running operations.
+ * Publish a command to the cluster agent without waiting for a reply.
+ * Returns the request_id so the caller can subscribe to the stream endpoint.
+ * Suitable for long-running commands (activate_node, add_node, etc.).
  */
-export async function sendCommandWithStream(
+export async function publishCommand(
   clusterId: string,
-  command: Record<string, unknown> & { request_id: string }
-): Promise<{ reply: Promise<unknown>; streamSub: Subscription }> {
+  cmd: AgentCommand
+): Promise<void> {
   const nc = await getNatsConnection();
+  const js = nc.jetstream();
   const commandSubject = `aura.cluster.${clusterId}.command`;
-  const streamSubject = `aura.cluster.${clusterId}.stream.${command.request_id}`;
-  const replySubject = `aura.cluster.${clusterId}.reply.${command.request_id}`;
 
-  // Subscribe to stream before sending command
-  const streamSub = nc.subscribe(streamSubject);
-
-  // Subscribe to reply (one-shot)
-  const replyPromise = new Promise<unknown>((resolve, reject) => {
-    const replySub = nc.subscribe(replySubject, { max: 1 });
-    (async () => {
-      for await (const msg of replySub) {
-        resolve(jc.decode(msg.data));
-      }
-    })().catch(reject);
-
-    // Timeout after 10 minutes for long operations
-    setTimeout(() => {
-      replySub.unsubscribe();
-      reject(new Error("Command reply timeout"));
-    }, 600000);
-  });
-
-  // Publish command
-  nc.publish(commandSubject, jc.encode(command));
-
-  return { reply: replyPromise, streamSub };
+  try {
+    await js.publish(commandSubject, jc.encode(cmd));
+  } catch (err) {
+    throw new Error(`Failed to publish command to cluster ${clusterId}: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 /**
  * Subscribe to heartbeats for a cluster.
- * Returns a subscription that yields heartbeat messages.
  */
 export async function subscribeHeartbeat(clusterId: string): Promise<Subscription> {
   const nc = await getNatsConnection();
@@ -96,14 +107,15 @@ export async function subscribeHeartbeat(clusterId: string): Promise<Subscriptio
 }
 
 /**
- * Publish a deploy job to a cluster agent.
+ * Subscribe to a stream + reply subject pair for a specific request.
+ * Used by the SSE stream route to forward NATS messages to the browser.
  */
-export async function publishDeploy(
+export async function subscribeCommandStream(
   clusterId: string,
-  payload: Record<string, unknown>
-): Promise<void> {
+  requestId: string
+): Promise<{ streamSub: Subscription; replySub: Subscription }> {
   const nc = await getNatsConnection();
-  nc.publish(`aura.deploy.${clusterId}`, jc.encode(payload));
+  const streamSub = nc.subscribe(`aura.cluster.${clusterId}.stream.${requestId}`);
+  const replySub = nc.subscribe(`aura.cluster.${clusterId}.reply.${requestId}`, { max: 1 });
+  return { streamSub, replySub };
 }
-
-export { jc as jsonCodec, sc as stringCodec };

@@ -1,1 +1,26 @@
 .worktrees/
+.superpowers/
+.DS_Store
+
+# SSH private keys (test/keys/aura_test.pub is fine to commit)
+test/keys/aura_test
+
+# Compiled agent binaries
+agent/bin/
+
+# Web — local env and build artifacts
+web/.env.local
+web/.env*.local
+web/node_modules/
+web/.next/
+web/out/
+web/coverage/
+
+# Ansible inventory and temp files (generated at runtime)
+ansible/inventory/hosts.ini
+ansible/*.retry
+
+# Python / Ansible
+__pycache__/
+*.pyc
+.ansible/

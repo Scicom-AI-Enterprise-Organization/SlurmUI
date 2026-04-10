@@ -22,6 +22,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { LiveLogDialog } from "@/components/ui/live-log-dialog";
 import { toast } from "sonner";
 import { RefreshCw, Plus, Zap } from "lucide-react";
 
@@ -39,15 +40,22 @@ export default function NodesPage() {
 
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activating, setActivating] = useState<string | null>(null);
+
+  // Activate node state
+  const [activatingNode, setActivatingNode] = useState<string | null>(null);
+  const [activateRequestId, setActivateRequestId] = useState<string | null>(null);
+  const [activateLogOpen, setActivateLogOpen] = useState(false);
 
   // Add node form state
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [newNodeName, setNewNodeName] = useState("");
   const [newNodeIp, setNewNodeIp] = useState("");
   const [newNodeCpus, setNewNodeCpus] = useState(32);
   const [newNodeGpus, setNewNodeGpus] = useState(0);
   const [newNodeMemory, setNewNodeMemory] = useState(262144);
   const [addingNode, setAddingNode] = useState(false);
+  const [addRequestId, setAddRequestId] = useState<string | null>(null);
+  const [addLogOpen, setAddLogOpen] = useState(false);
 
   const fetchNodes = async () => {
     setLoading(true);
@@ -58,9 +66,7 @@ export default function NodesPage() {
         setNodes(data.nodes ?? data ?? []);
       }
     } catch {
-      toast.error("Error", {
-        description: "Failed to fetch nodes",
-      });
+      toast.error("Failed to fetch nodes");
     } finally {
       setLoading(false);
     }
@@ -71,7 +77,7 @@ export default function NodesPage() {
   }, [clusterId]);
 
   const handleActivate = async (nodeName: string) => {
-    setActivating(nodeName);
+    setActivatingNode(nodeName);
     try {
       const res = await fetch(`/api/clusters/${clusterId}/nodes/activate`, {
         method: "POST",
@@ -80,16 +86,15 @@ export default function NodesPage() {
       });
 
       if (res.ok) {
-        toast.success("Success", { description: `Node ${nodeName} activated.` });
-        fetchNodes();
+        const data = await res.json();
+        setActivateRequestId(data.request_id);
+        setActivateLogOpen(true);
       } else {
         const err = await res.json();
-        toast.error("Error", {
-          description: err.error ?? "Failed to activate node",
-        });
+        toast.error(err.error ?? "Failed to start activation");
       }
     } finally {
-      setActivating(null);
+      setActivatingNode(null);
     }
   };
 
@@ -109,15 +114,15 @@ export default function NodesPage() {
       });
 
       if (res.ok) {
-        toast.success("Success", { description: `Node ${newNodeName} added.` });
+        const data = await res.json();
+        setAddDialogOpen(false);
+        setAddRequestId(data.request_id);
+        setAddLogOpen(true);
         setNewNodeName("");
         setNewNodeIp("");
-        fetchNodes();
       } else {
         const err = await res.json();
-        toast.error("Error", {
-          description: err.error ?? "Failed to add node",
-        });
+        toast.error(err.error ?? "Failed to start add-node");
       }
     } finally {
       setAddingNode(false);
@@ -125,11 +130,10 @@ export default function NodesPage() {
   };
 
   const stateColor = (state: string) => {
-    const lower = state.toLowerCase();
-    if (lower.includes("idle")) return "bg-green-100 text-green-800";
-    if (lower.includes("alloc") || lower.includes("mix")) return "bg-blue-100 text-blue-800";
-    if (lower.includes("down") || lower.includes("drain")) return "bg-red-100 text-red-800";
-    if (lower.includes("future")) return "bg-gray-100 text-gray-800";
+    const s = state.toLowerCase();
+    if (s.includes("idle")) return "bg-green-100 text-green-800";
+    if (s.includes("alloc") || s.includes("mix")) return "bg-blue-100 text-blue-800";
+    if (s.includes("down") || s.includes("drain")) return "bg-red-100 text-red-800";
     return "bg-gray-100 text-gray-800";
   };
 
@@ -138,16 +142,14 @@ export default function NodesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Node Management</h1>
-          <p className="text-muted-foreground">
-            View, activate, and add nodes to this cluster
-          </p>
+          <p className="text-muted-foreground">View, activate, and add nodes to this cluster</p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={fetchNodes} disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
-          <Dialog>
+          <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
             <DialogTrigger render={<Button />}>
               <Plus className="mr-2 h-4 w-4" />
               Add Node
@@ -204,7 +206,7 @@ export default function NodesPage() {
                   disabled={addingNode || !newNodeName || !newNodeIp}
                   className="w-full"
                 >
-                  {addingNode ? "Adding..." : "Add Node"}
+                  {addingNode ? "Queuing..." : "Add Node"}
                 </Button>
               </div>
             </DialogContent>
@@ -251,10 +253,10 @@ export default function NodesPage() {
                           variant="outline"
                           size="sm"
                           onClick={() => handleActivate(node.name)}
-                          disabled={activating === node.name}
+                          disabled={activatingNode === node.name}
                         >
                           <Zap className="mr-1 h-3 w-3" />
-                          {activating === node.name ? "Activating..." : "Activate"}
+                          {activatingNode === node.name ? "Queuing..." : "Activate"}
                         </Button>
                       )}
                     </TableCell>
@@ -265,6 +267,25 @@ export default function NodesPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Live log dialogs for async operations */}
+      <LiveLogDialog
+        open={activateLogOpen}
+        onOpenChange={setActivateLogOpen}
+        title={`Activating node: ${activatingNode ?? ""}`}
+        clusterId={clusterId}
+        requestId={activateRequestId}
+        onSuccess={() => { toast.success("Node activated successfully"); fetchNodes(); }}
+      />
+
+      <LiveLogDialog
+        open={addLogOpen}
+        onOpenChange={setAddLogOpen}
+        title="Adding new node"
+        clusterId={clusterId}
+        requestId={addRequestId}
+        onSuccess={() => { toast.success("Node added successfully"); fetchNodes(); }}
+      />
     </div>
   );
 }

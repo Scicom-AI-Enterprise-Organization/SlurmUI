@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 
 	"github.com/scicom/aura/agent/internal/message"
 	agentNats "github.com/scicom/aura/agent/internal/nats"
@@ -58,7 +60,30 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("sbatch execution failed: %w", err))
 	}
 
-	return h.publisher.SendResult(cmd.RequestID, result)
+	if result.ExitCode != 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("sbatch failed (exit %d): %s", result.ExitCode, result.Stderr))
+	}
+
+	// Parse slurm job ID from "Submitted batch job XXXXX"
+	slurmJobID := parseSlurmJobID(result.Stdout)
+	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
+		"slurm_job_id": slurmJobID,
+		"stdout":       result.Stdout,
+	})
+}
+
+// parseSlurmJobID extracts the integer job ID from sbatch output like "Submitted batch job 12345".
+func parseSlurmJobID(stdout string) int {
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Submitted batch job ") {
+			idStr := strings.TrimPrefix(line, "Submitted batch job ")
+			if id, err := strconv.Atoi(strings.TrimSpace(idStr)); err == nil {
+				return id
+			}
+		}
+	}
+	return 0
 }
 
 // HandleCancelJob processes a cancel_job command.

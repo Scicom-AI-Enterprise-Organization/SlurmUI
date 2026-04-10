@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake scancel — always succeeds
+JOB_ID=$(echo "$@" | grep -oP '\d+' | head -1)
+echo "scancel: Killed job ${JOB_ID:-?}"
+exit 0

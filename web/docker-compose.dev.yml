@@ -1,0 +1,83 @@
+# Local development infrastructure only.
+# Run this, then `npm run dev` separately.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   npm run dev
+#
+# Services:
+#   Postgres     → localhost:5432
+#   NATS         → localhost:4222
+#   Keycloak     → localhost:8080  (admin: admin/admin)
+#   test-cluster → localhost:2222  (SSH for Ansible bootstrap testing)
+#
+# Test accounts (created by realm import):
+#   admin@aura.local / admin  → ADMIN role
+#   user@aura.local  / user   → USER role
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: aura
+      POSTGRES_PASSWORD: aura
+      POSTGRES_DB: aura
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aura"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    volumes:
+      - natsdata:/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/scicom/.well-known/openid-configuration || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  # Simulated Slurm cluster node for local E2E testing.
+  # Has fake sinfo/sbatch/scontrol/scancel and will run the aura-agent
+  # after the bootstrap playbook deploys it.
+  test-cluster:
+    build:
+      context: ../test
+      dockerfile: Dockerfile.cluster-node
+      args:
+        TEST_PUBKEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFUwbKku+CDxa/NOJMmlr1YXrmzi1Ce2SMWKvEWe9oJz aura-local-test"
+    ports:
+      - "2222:22"
+    # The agent inside the container needs to reach NATS.
+    # On Mac Docker Desktop, host.docker.internal resolves to the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  natsdata:
