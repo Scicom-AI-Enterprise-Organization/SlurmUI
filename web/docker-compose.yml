@@ -1,0 +1,74 @@
+version: "3.8"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://aura:aura@postgres:5432/aura?schema=public
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - KEYCLOAK_ID=${KEYCLOAK_ID}
+      - KEYCLOAK_SECRET=${KEYCLOAK_SECRET}
+      - KEYCLOAK_ISSUER=${KEYCLOAK_ISSUER}
+      - NATS_URL=nats://nats:4222
+      - FREEIPA_URL=${FREEIPA_URL}
+      - FREEIPA_USER=${FREEIPA_USER}
+      - FREEIPA_PASSWORD=${FREEIPA_PASSWORD}
+      - ANSIBLE_PLAYBOOKS_DIR=/opt/aura/ansible
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    volumes:
+      - ansible-playbooks:/opt/aura/ansible
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: aura
+      POSTGRES_PASSWORD: aura
+      POSTGRES_DB: aura
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aura"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # monitoring
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    volumes:
+      - natsdata:/data
+    restart: unless-stopped
+
+  # Run database migrations on startup
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: deps
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      - DATABASE_URL=postgresql://aura:aura@postgres:5432/aura?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  natsdata:
+  ansible-playbooks:
