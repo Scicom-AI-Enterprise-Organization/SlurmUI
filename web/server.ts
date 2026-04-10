@@ -4,6 +4,7 @@ import next from "next";
 import { WebSocketServer, WebSocket } from "ws";
 import { handleWebSocket } from "./lib/ws";
 import { auth } from "./lib/auth";
+import { startHeartbeatMonitor } from "./lib/heartbeat";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
@@ -60,5 +61,9 @@ app.prepare().then(() => {
 
   server.listen(port, hostname, () => {
     console.log(`> Ready on http://${hostname}:${port}`);
+  });
+
+  startHeartbeatMonitor().catch((err) => {
+    console.error("[Heartbeat] Failed to start monitor:", err);
   });
 });
