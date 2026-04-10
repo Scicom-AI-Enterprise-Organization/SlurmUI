@@ -148,11 +148,9 @@ export default function NodesPage() {
             Refresh
           </Button>
           <Dialog>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="mr-2 h-4 w-4" />
-                Add Node
-              </Button>
+            <DialogTrigger render={<Button />}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add Node
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>

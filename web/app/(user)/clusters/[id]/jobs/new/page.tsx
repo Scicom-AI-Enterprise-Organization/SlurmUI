@@ -82,7 +82,7 @@ export default function NewJobPage() {
         <CardContent className="space-y-6">
           <div className="space-y-2">
             <Label>Partition</Label>
-            <Select value={partition} onValueChange={setPartition}>
+            <Select value={partition} onValueChange={(v) => { if (v !== null) setPartition(v); }}>
               <SelectTrigger>
                 <SelectValue placeholder="Select a partition" />
               </SelectTrigger>

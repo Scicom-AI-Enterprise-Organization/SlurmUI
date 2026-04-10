@@ -21,7 +21,7 @@ declare module "next-auth" {
   }
 }
 
-declare module "next-auth/jwt" {
+declare module "@auth/core/jwt" {
   interface JWT {
     role?: UserRole;
     keycloakId?: string;
@@ -54,13 +54,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (user) {
         // First login — upsert user in database
         const dbUser = await prisma.user.upsert({
-          where: { keycloakId: user.keycloakId ?? user.id },
+          where: { keycloakId: user.keycloakId ?? user.id! },
           update: {
             name: user.name,
             email: user.email!,
           },
           create: {
-            keycloakId: user.keycloakId ?? user.id,
+            keycloakId: user.keycloakId ?? user.id!,
             email: user.email!,
             name: user.name,
             role: user.role ?? "USER",

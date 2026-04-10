@@ -49,7 +49,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // Save updated config
   await prisma.cluster.update({
     where: { id },
-    data: { config },
+    data: { config: config as any },
   });
 
   try {

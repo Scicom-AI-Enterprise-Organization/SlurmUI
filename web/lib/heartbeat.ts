@@ -49,7 +49,7 @@ async function refreshSubscriptions(): Promise<void> {
   }
 
   // Unsubscribe from removed clusters
-  for (const [id, hb] of heartbeats) {
+  for (const [id, hb] of Array.from(heartbeats.entries())) {
     if (!activeIds.has(id)) {
       hb.subscription.unsubscribe();
       heartbeats.delete(id);
@@ -95,7 +95,7 @@ async function subscribeToCluster(clusterId: string): Promise<void> {
 async function checkHeartbeats(): Promise<void> {
   const now = Date.now();
 
-  for (const [clusterId, hb] of heartbeats) {
+  for (const [clusterId, hb] of Array.from(heartbeats.entries())) {
     if (hb.lastSeen === 0) continue; // Never received a heartbeat yet
 
     const elapsed = now - hb.lastSeen;
