@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/nav/sidebar";
 import { UserMenu } from "@/components/nav/user-menu";
 
-export default async function UserLayout({
+export default async function AdminLayout({
   children,
 }: {
   children: React.ReactNode;
@@ -14,6 +14,7 @@ export default async function UserLayout({
     redirect("/api/auth/signin");
   }
 
+  // Middleware handles role enforcement for /admin/* routes.
   return (
     <div className="flex h-screen bg-background">
       <Sidebar role={(session.user as any).role} />
