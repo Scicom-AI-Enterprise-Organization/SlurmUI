@@ -1,0 +1,70 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Cluster {
+  id              String        @id @default(uuid())
+  name            String        @unique
+  controllerHost  String
+  natsCredentials String        // encrypted at rest
+  status          ClusterStatus @default(PROVISIONING)
+  config          Json          // full cluster-config.json
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  jobs            Job[]
+}
+
+enum ClusterStatus {
+  PROVISIONING
+  ACTIVE
+  DEGRADED
+  OFFLINE
+}
+
+model Job {
+  id         String    @id @default(uuid())
+  slurmJobId Int?
+  clusterId  String
+  cluster    Cluster   @relation(fields: [clusterId], references: [id])
+  userId     String
+  script     String
+  partition  String
+  status     JobStatus @default(PENDING)
+  exitCode   Int?
+  output     String?   @db.Text
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([clusterId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id         String   @id @default(uuid())
+  keycloakId String   @unique
+  email      String   @unique
+  name       String?
+  freeipaUid Int?     @unique
+  freeipaGid Int?
+  role       UserRole @default(USER)
+  createdAt  DateTime @default(now())
+}
+
+enum UserRole {
+  ADMIN
+  USER
+}
