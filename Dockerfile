@@ -17,13 +17,14 @@ FROM node:20-alpine AS deps
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 COPY web/prisma ./prisma/
-RUN npm ci
+RUN apk add --no-cache openssl && npm ci
 
 # ---- Next.js build ----
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY web/ .
+RUN apk add --no-cache openssl
 RUN npx prisma generate
 RUN npm run build
 
@@ -33,7 +34,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Install Ansible + SSH client for cluster bootstrap
-RUN apk add --no-cache python3 py3-pip openssh-client git && \
+RUN apk add --no-cache openssl python3 py3-pip openssh-client git && \
     pip3 install --break-system-packages ansible-core==2.16.* && \
     rm -rf /root/.cache/pip
 
