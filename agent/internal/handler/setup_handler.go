@@ -49,26 +49,19 @@ func (h *SetupHandler) HandleTestNfs(ctx context.Context, cmd *message.Command) 
 		seq++
 	}
 
-	emit(fmt.Sprintf("[aura] Testing mgmt NFS: %s:%s", payload.MgmtNfsServer, payload.MgmtNfsPath))
-	// Use timeout(1) to prevent showmount hanging indefinitely on unresponsive hosts.
-	result, err := slurm.RunCommand(ctx, "timeout", "10", "showmount", "-e", payload.MgmtNfsServer)
-	if err != nil {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("mgmt NFS unreachable: %w", err))
+	// Use nc (netcat) to probe TCP port 2049 — avoids showmount/rpcbind hangs.
+	for _, check := range []struct{ label, server, path string }{
+		{"mgmt", payload.MgmtNfsServer, payload.MgmtNfsPath},
+		{"data", payload.DataNfsServer, payload.DataNfsPath},
+	} {
+		emit(fmt.Sprintf("[aura] Testing %s NFS: %s:%s", check.label, check.server, check.path))
+		result, err := slurm.RunCommand(ctx, "nc", "-zw5", check.server, "2049")
+		if err != nil || result.ExitCode != 0 {
+			return h.publisher.SendError(cmd.RequestID,
+				fmt.Errorf("%s NFS server %s is not reachable on port 2049: %s", check.label, check.server, result.Stderr))
+		}
+		emit(fmt.Sprintf("[aura] ✓ %s NFS server %s:2049 reachable", check.label, check.server))
 	}
-	if result.ExitCode != 0 {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("mgmt NFS unreachable: %s", result.Stderr))
-	}
-	emit(result.Stdout)
-
-	emit(fmt.Sprintf("[aura] Testing data NFS: %s:%s", payload.DataNfsServer, payload.DataNfsPath))
-	result, err = slurm.RunCommand(ctx, "timeout", "10", "showmount", "-e", payload.DataNfsServer)
-	if err != nil {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("data NFS unreachable: %w", err))
-	}
-	if result.ExitCode != 0 {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("data NFS unreachable: %s", result.Stderr))
-	}
-	emit(result.Stdout)
 	emit("[aura] NFS connectivity OK")
 
 	return h.publisher.SendResult(cmd.RequestID, map[string]string{"status": "ok"})
