@@ -13,6 +13,8 @@ import (
 type Dispatcher struct {
 	slurm     *SlurmHandler
 	deploy    *DeployHandler
+	setup     *SetupHandler
+	user      *UserHandler
 	publisher *agentNats.Publisher
 	logger    *slog.Logger
 }
@@ -21,12 +23,16 @@ type Dispatcher struct {
 func NewDispatcher(
 	slurmHandler *SlurmHandler,
 	deployHandler *DeployHandler,
+	setupHandler *SetupHandler,
+	userHandler *UserHandler,
 	publisher *agentNats.Publisher,
 	logger *slog.Logger,
 ) *Dispatcher {
 	return &Dispatcher{
 		slurm:     slurmHandler,
 		deploy:    deployHandler,
+		setup:     setupHandler,
+		user:      userHandler,
 		publisher: publisher,
 		logger:    logger,
 	}
@@ -61,6 +67,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cmd *message.Command) error {
 		return d.deploy.HandlePropagateConfig(ctx, cmd)
 	case message.CmdCreateHomedir:
 		return d.deploy.HandleCreateHomedir(ctx, cmd)
+
+	// Setup commands
+	case message.CmdTestNfs:
+		return d.setup.HandleTestNfs(ctx, cmd)
+	case message.CmdSetupNodes:
+		return d.setup.HandleSetupNodes(ctx, cmd)
+	case message.CmdSetupPartitions:
+		return d.setup.HandleSetupPartitions(ctx, cmd)
+
+	// User provisioning commands
+	case message.CmdProvisionUser:
+		return d.user.HandleProvisionUser(ctx, cmd)
 
 	default:
 		err := fmt.Errorf("unknown command type: %s", cmd.Type)

@@ -87,7 +87,9 @@ func main() {
 	ansibleRunner := ansible.NewRunner(logger)
 	slurmHandler := handler.NewSlurmHandler(publisher, logger)
 	deployHandler := handler.NewDeployHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
-	dispatcher := handler.NewDispatcher(slurmHandler, deployHandler, publisher, logger)
+	setupHandler := handler.NewSetupHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
+	userHandler := handler.NewUserHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
+	dispatcher := handler.NewDispatcher(slurmHandler, deployHandler, setupHandler, userHandler, publisher, logger)
 
 	// Start heartbeat.
 	go agentNats.StartHeartbeat(ctx, natsClient.Conn(), cfg, agentID, Version, logger)
