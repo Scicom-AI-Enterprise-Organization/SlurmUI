@@ -3,9 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { SetupStepper } from "@/components/cluster/setup-stepper";
+import { UsersTab } from "@/components/cluster/users-tab";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import Link from "next/link";
 import { Server, Settings, Monitor } from "lucide-react";
 
@@ -90,7 +92,18 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
           <Separator />
 
-          <ConfigEditor clusterId={id} initialConfig={config} />
+          <Tabs defaultValue="config">
+            <TabsList>
+              <TabsTrigger value="config">Configuration</TabsTrigger>
+              <TabsTrigger value="users">Users</TabsTrigger>
+            </TabsList>
+            <TabsContent value="config">
+              <ConfigEditor clusterId={id} initialConfig={config} />
+            </TabsContent>
+            <TabsContent value="users">
+              <UsersTab clusterId={id} />
+            </TabsContent>
+          </Tabs>
         </>
       )}
     </div>
