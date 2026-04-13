@@ -3,7 +3,7 @@
 # For local dev, use web/docker-compose.dev.yml instead.
 
 # ---- Agent binary (linux/amd64 for most K8s nodes) ----
-FROM golang:1.24-alpine AS agent-builder
+FROM golang:1.25-alpine AS agent-builder
 WORKDIR /build
 COPY agent/go.mod agent/go.sum ./
 RUN go mod download
