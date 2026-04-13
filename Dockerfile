@@ -44,7 +44,8 @@ RUN addgroup --system --gid 1001 nodejs && \
 # Production Node.js dependencies (includes nats, ws, prisma runtime)
 COPY web/package.json web/package-lock.json ./
 COPY web/prisma ./prisma/
-RUN npm ci --omit=dev && npx prisma generate
+RUN npm ci --omit=dev && npx prisma generate && \
+    chown -R nextjs:nodejs node_modules/.prisma node_modules/@prisma/engines
 
 # Next.js standalone output + static assets
 COPY --from=builder /app/.next/standalone ./
