@@ -50,7 +50,8 @@ func (h *SetupHandler) HandleTestNfs(ctx context.Context, cmd *message.Command) 
 	}
 
 	emit(fmt.Sprintf("[aura] Testing mgmt NFS: %s:%s", payload.MgmtNfsServer, payload.MgmtNfsPath))
-	result, err := slurm.RunCommand(ctx, "showmount", "-e", payload.MgmtNfsServer)
+	// Use timeout(1) to prevent showmount hanging indefinitely on unresponsive hosts.
+	result, err := slurm.RunCommand(ctx, "timeout", "10", "showmount", "-e", payload.MgmtNfsServer)
 	if err != nil {
 		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("mgmt NFS unreachable: %w", err))
 	}
@@ -60,7 +61,7 @@ func (h *SetupHandler) HandleTestNfs(ctx context.Context, cmd *message.Command) 
 	emit(result.Stdout)
 
 	emit(fmt.Sprintf("[aura] Testing data NFS: %s:%s", payload.DataNfsServer, payload.DataNfsPath))
-	result, err = slurm.RunCommand(ctx, "showmount", "-e", payload.DataNfsServer)
+	result, err = slurm.RunCommand(ctx, "timeout", "10", "showmount", "-e", payload.DataNfsServer)
 	if err != nil {
 		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("data NFS unreachable: %w", err))
 	}

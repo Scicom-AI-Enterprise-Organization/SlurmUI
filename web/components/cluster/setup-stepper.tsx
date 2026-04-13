@@ -344,7 +344,7 @@ export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps)
                   </p>
                 )}
 
-                {state.logs.length > 0 && <LogView lines={state.logs} status={state.status} />}
+                {(state.status === "running" || state.logs.length > 0) && <LogView lines={state.logs} status={state.status} />}
 
                 {state.status !== "running" && (
                   <Button
