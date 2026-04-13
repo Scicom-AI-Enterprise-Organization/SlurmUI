@@ -15,13 +15,25 @@ interface WizardShellProps {
   children: ReactNode[];
   onComplete: () => void;
   canProgress?: (step: number) => boolean;
+  /** Optional async hook called before advancing from a step. Return false to abort. */
+  onBeforeNext?: (step: number) => Promise<boolean | void> | boolean | void;
 }
 
-export function WizardShell({ steps, children, onComplete, canProgress }: WizardShellProps) {
+export function WizardShell({ steps, children, onComplete, canProgress, onBeforeNext }: WizardShellProps) {
   const [currentStep, setCurrentStep] = useState(0);
+  const [advancing, setAdvancing] = useState(false);
   const isLastStep = currentStep === steps.length - 1;
 
-  const goNext = () => {
+  const goNext = async () => {
+    if (onBeforeNext) {
+      setAdvancing(true);
+      try {
+        const result = await onBeforeNext(currentStep);
+        if (result === false) return;
+      } finally {
+        setAdvancing(false);
+      }
+    }
     if (isLastStep) {
       onComplete();
     } else {
@@ -92,7 +104,7 @@ export function WizardShell({ steps, children, onComplete, canProgress }: Wizard
           <ChevronLeft className="mr-2 h-4 w-4" />
           Back
         </Button>
-        <Button onClick={goNext} disabled={!canGoNext}>
+        <Button onClick={goNext} disabled={!canGoNext || advancing}>
           {isLastStep ? "Finish" : "Next"}
           {!isLastStep && <ChevronRight className="ml-2 h-4 w-4" />}
         </Button>
