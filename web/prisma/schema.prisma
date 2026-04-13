@@ -14,9 +14,13 @@ model Cluster {
   natsCredentials String        // encrypted at rest
   status          ClusterStatus @default(PROVISIONING)
   config          Json          // full cluster-config.json
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  jobs            Job[]
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  installToken          String?       @unique
+  installTokenExpiresAt DateTime?
+  installTokenUsedAt    DateTime?
+  jobs                  Job[]
+  clusterUsers          ClusterUser[]
 }
 
 enum ClusterStatus {
@@ -54,17 +58,37 @@ enum JobStatus {
 }
 
 model User {
-  id         String   @id @default(uuid())
-  keycloakId String   @unique
-  email      String   @unique
+  id         String        @id @default(uuid())
+  keycloakId String        @unique
+  email      String        @unique
   name       String?
-  freeipaUid Int?     @unique
-  freeipaGid Int?
-  role       UserRole @default(USER)
-  createdAt  DateTime @default(now())
+  unixUid    Int?          @unique
+  unixGid    Int?
+  role       UserRole      @default(USER)
+  createdAt  DateTime      @default(now())
+  clusters   ClusterUser[]
 }
 
 enum UserRole {
   ADMIN
   USER
+}
+
+model ClusterUser {
+  id            String            @id @default(uuid())
+  userId        String
+  clusterId     String
+  status        ClusterUserStatus @default(PENDING)
+  provisionedAt DateTime?
+  user          User              @relation(fields: [userId], references: [id])
+  cluster       Cluster           @relation(fields: [clusterId], references: [id])
+
+  @@unique([userId, clusterId])
+  @@index([clusterId])
+}
+
+enum ClusterUserStatus {
+  PENDING
+  ACTIVE
+  FAILED
 }
