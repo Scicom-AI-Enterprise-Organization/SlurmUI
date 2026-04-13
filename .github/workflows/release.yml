@@ -13,7 +13,7 @@ permissions:
 env:
   AWS_REGION: ap-southeast-5
   AWS_ACCOUNT_ID: "865626945255"
-  ECR_WEB_REPO: scicom/aura-web
+  ECR_WEB_REPO: scicom/scicom-aura
 
 jobs:
   # ── 1. Build & push web image to ECR ──────────────────────────────────────
