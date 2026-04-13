@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { getNatsConnection, jc } from "@/lib/nats";
+import { getNatsConnection, jc } from "./nats";
 import type { Subscription } from "nats";
 
 interface WebSocketClient {
