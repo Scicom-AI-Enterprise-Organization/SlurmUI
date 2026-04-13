@@ -3,7 +3,6 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { publishCommand } from "@/lib/nats";
 import { randomUUID } from "crypto";
-import { readFileSync } from "fs";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -27,14 +26,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // NATS is currently configured without TLS (nats://), so this key transits the network
   // in plaintext. This is acceptable for a private management network, but TLS should be
   // added before deployment on untrusted networks.
-  let sshPrivateKey = "";
-  const keyPath = process.env.ANSIBLE_SSH_KEY_FILE ?? "/home/nextjs/.ssh/id_ed25519";
-  try {
-    const keyBytes = readFileSync(keyPath);
-    sshPrivateKey = keyBytes.toString("base64");
-  } catch {
-    // SSH key not available — agent will proceed without it (localhost-only ops work)
+  const sshKeySetting = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
+  if (!sshKeySetting) {
+    return NextResponse.json(
+      { error: "No SSH key configured. Go to Admin → Settings and add the cluster SSH key before onboarding nodes." },
+      { status: 412 },
+    );
   }
+  const sshPrivateKey = Buffer.from(sshKeySetting.value).toString("base64");
 
   // Save nodes to config
   const config = {

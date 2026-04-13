@@ -7,13 +7,14 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Check, ChevronRight, Loader2, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Loader2, Plus, Trash2, AlertTriangle } from "lucide-react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 interface NodeRow { hostname: string; ip: string; cpus: number; memoryMb: number; gpus: number }
 interface Partition { name: string; nodes: string; maxTime: string; isDefault: boolean }
 
-interface SetupStepperProps { clusterId: string }
+interface SetupStepperProps { clusterId: string; sshKeyConfigured: boolean }
 
 type StepStatus = "pending" | "running" | "done" | "error";
 
@@ -68,7 +69,7 @@ async function runStreamingCommand(
   });
 }
 
-export function SetupStepper({ clusterId }: SetupStepperProps) {
+export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps) {
   const router = useRouter();
   const [currentStep, setCurrentStep] = useState(0);
   const [stepStates, setStepStates] = useState<StepState[]>([
@@ -160,6 +161,38 @@ export function SetupStepper({ clusterId }: SetupStepperProps) {
   };
 
   const stepTitles = ["NFS Storage", "Nodes", "Partitions", "Health Check"];
+
+  if (!sshKeyConfigured) {
+    return (
+      <div className="rounded-lg border border-destructive/50 bg-destructive/5 p-5 space-y-3">
+        <div className="flex items-center gap-2 text-destructive font-semibold">
+          <AlertTriangle className="h-5 w-5" />
+          SSH key not configured
+        </div>
+        <p className="text-sm text-muted-foreground">
+          An SSH key is required before nodes can be provisioned. Aura uses it to reach cluster
+          nodes via Ansible.
+        </p>
+        <ol className="text-sm space-y-1 list-decimal list-inside text-muted-foreground">
+          <li>
+            Go to{" "}
+            <Link href="/admin/settings" className="underline text-foreground hover:text-primary">
+              Admin → Settings
+            </Link>{" "}
+            and add the cluster SSH private key.
+          </li>
+          <li>Copy the public key shown there.</li>
+          <li>
+            On every cluster node run:{" "}
+            <code className="bg-muted px-1 rounded text-xs">
+              echo "&lt;public-key&gt;" &gt;&gt; /root/.ssh/authorized_keys
+            </code>
+          </li>
+          <li>Return here to continue onboarding.</li>
+        </ol>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

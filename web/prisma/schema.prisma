@@ -93,3 +93,10 @@ enum ClusterUserStatus {
   ACTIVE
   FAILED
 }
+
+// Global key-value settings store (admin-managed).
+model Setting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+}

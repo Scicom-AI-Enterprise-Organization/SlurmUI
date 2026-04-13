@@ -13,6 +13,7 @@ import {
   AppWindow,
   PanelLeftOpen,
   PanelLeftClose,
+  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +38,7 @@ const managementSection: NavSection = {
   links: [
     { href: "/admin/clusters", label: "Manage Clusters", icon: Server },
     { href: "/admin/clusters/new", label: "New Cluster", icon: Plus },
+    { href: "/admin/settings", label: "Settings", icon: Settings },
   ],
 };
 

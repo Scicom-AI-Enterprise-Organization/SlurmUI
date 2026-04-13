@@ -19,16 +19,19 @@ interface PageProps {
 export default async function ClusterDetailPage({ params }: PageProps) {
   const { id } = await params;
 
-  const cluster = await prisma.cluster.findUnique({
-    where: { id },
-    include: {
-      _count: { select: { jobs: true } },
-    },
-  });
+  const [cluster, sshKeySetting] = await Promise.all([
+    prisma.cluster.findUnique({
+      where: { id },
+      include: { _count: { select: { jobs: true } } },
+    }),
+    prisma.setting.findUnique({ where: { key: "ssh_private_key" } }),
+  ]);
 
   if (!cluster) {
     notFound();
   }
+
+  const sshKeyConfigured = !!sshKeySetting;
 
   const config = cluster.config as Record<string, unknown>;
 
@@ -56,7 +59,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       </div>
 
       {cluster.status === "PROVISIONING" ? (
-        <SetupStepper clusterId={cluster.id} />
+        <SetupStepper clusterId={cluster.id} sshKeyConfigured={sshKeyConfigured} />
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-3">
