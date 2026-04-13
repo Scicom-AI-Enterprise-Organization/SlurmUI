@@ -69,8 +69,16 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 		"-M", // don't create home locally
 		payload.Username,
 	)
-	if err == nil && result.ExitCode != 0 && result.ExitCode != 9 {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("useradd failed: %s", result.Stderr))
+	if err == nil && result.ExitCode != 0 {
+		switch result.ExitCode {
+		case 9:
+			// User already exists — idempotent, continue
+		case 4:
+			// UID already used by a different user — this is a UID allocation conflict
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("useradd failed: UID %d is already assigned to a different user: %s", payload.UID, result.Stderr))
+		default:
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("useradd failed (exit %d): %s", result.ExitCode, result.Stderr))
+		}
 	}
 
 	// 3. Create NFS home directory
@@ -116,6 +124,8 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 		invFile.Close()
 		defer os.Remove(invFile.Name())
 
+		// streamFn offsets Ansible's internal seq counter (s, starting at 0) by the current
+		// outer seq so the combined stream is correctly ordered after the preceding emit() calls.
 		streamFn := func(line string, s int) {
 			_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq+s)
 		}
