@@ -73,7 +73,8 @@ func (h *SetupHandler) HandleTestNfs(ctx context.Context, cmd *message.Command) 
 	return h.publisher.SendResult(cmd.RequestID, map[string]string{"status": "ok"})
 }
 
-// HandleSetupNodes writes /etc/hosts, saves SSH key, and runs setup_nodes.yml.
+// HandleSetupNodes writes /etc/hosts, saves SSH key, probes node reachability,
+// and runs setup_nodes.yml on reachable nodes only.
 func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Command) error {
 	var payload message.SetupNodesPayload
 	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
@@ -83,6 +84,7 @@ func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Comman
 	h.logger.Info("setting up nodes", "request_id", cmd.RequestID, "node_count", len(payload.Nodes))
 
 	// Save SSH private key if provided.
+	sshKeyPath := ""
 	if payload.SSHPrivateKey != "" {
 		keyBytes, err := base64.StdEncoding.DecodeString(payload.SSHPrivateKey)
 		if err != nil {
@@ -92,12 +94,44 @@ func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Comman
 		if err := os.MkdirAll(sshDir, 0700); err != nil {
 			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create .ssh dir: %w", err))
 		}
-		keyPath := filepath.Join(sshDir, "aura_cluster_key")
-		if err := os.WriteFile(keyPath, keyBytes, 0600); err != nil {
+		sshKeyPath = filepath.Join(sshDir, "aura_cluster_key")
+		if err := os.WriteFile(sshKeyPath, keyBytes, 0600); err != nil {
 			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to write SSH key: %w", err))
 		}
-		_ = h.publisher.SendStreamLine(cmd.RequestID, "[aura] SSH key saved to "+keyPath, 0)
+		_ = h.publisher.SendStreamLine(cmd.RequestID, "[aura] SSH key saved to "+sshKeyPath, 0)
 	}
+
+	// Probe reachability for worker nodes (skip controller — it's localhost).
+	seq := 1
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+
+	var reachable []message.NodeEntry
+	for _, n := range payload.Nodes {
+		if n.Hostname == payload.ControllerHostname {
+			reachable = append(reachable, n)
+			continue
+		}
+		if h.probeNode(ctx, n.IP, sshKeyPath, emit) {
+			reachable = append(reachable, n)
+		}
+	}
+
+	if len(reachable) == 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf(
+			"no nodes were reachable via SSH — check that the SSH public key is authorized on each node"))
+	}
+	if len(reachable) < len(payload.Nodes) {
+		emit(fmt.Sprintf("[aura] %d/%d nodes reachable — proceeding with reachable nodes only",
+			len(reachable), len(payload.Nodes)))
+	} else {
+		emit(fmt.Sprintf("[aura] All %d nodes reachable", len(reachable)))
+	}
+
+	// Replace payload.Nodes with only the reachable set for Ansible.
+	payload.Nodes = reachable
 
 	// Write vars file for Ansible.
 	type nodeVars struct {
@@ -205,6 +239,38 @@ func (h *SetupHandler) HandleSetupPartitions(ctx context.Context, cmd *message.C
 	}
 
 	return h.publisher.SendResult(cmd.RequestID, result)
+}
+
+// probeNode returns true if ip is reachable via ping AND SSH.
+// It logs progress/result lines via emit.
+func (h *SetupHandler) probeNode(ctx context.Context, ip, sshKeyPath string, emit func(string)) bool {
+	// 1. Ping (1 packet, 3 s timeout).
+	pingResult, err := slurm.RunCommand(ctx, "ping", "-c1", "-W3", ip)
+	if err != nil || pingResult.ExitCode != 0 {
+		emit(fmt.Sprintf("[aura] ✗ %s — unreachable (ping failed), skipping", ip))
+		return false
+	}
+
+	// 2. SSH probe — connect only, no command, 5 s timeout.
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=5",
+		"-o", "BatchMode=yes",
+	}
+	if sshKeyPath != "" {
+		sshArgs = append(sshArgs, "-i", sshKeyPath)
+	}
+	sshArgs = append(sshArgs, "root@"+ip, "exit 0")
+
+	sshResult, err := slurm.RunCommand(ctx, "ssh", sshArgs...)
+	if err != nil || sshResult.ExitCode != 0 {
+		emit(fmt.Sprintf("[aura] ✗ %s — SSH not accessible (key not authorized?), skipping", ip))
+		return false
+	}
+
+	emit(fmt.Sprintf("[aura] ✓ %s — reachable", ip))
+	return true
 }
 
 // buildInventory constructs an Ansible INI inventory from the node list.

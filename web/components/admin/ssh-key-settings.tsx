@@ -86,7 +86,7 @@ export function SshKeySettings({ initialConfigured, initialPublicKey }: SshKeySe
         {configured && publicKey && (
           <div className="space-y-2">
             <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Public Key — add to <code>/root/.ssh/authorized_keys</code> on every cluster node
+              Public Key
             </Label>
             <div className="relative">
               <pre className="rounded-md border bg-muted px-3 py-2 pr-12 text-xs font-mono break-all whitespace-pre-wrap">
@@ -101,6 +101,34 @@ export function SshKeySettings({ initialConfigured, initialPublicKey }: SshKeySe
               >
                 {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
               </Button>
+            </div>
+
+            {/* Hints — not prescriptive */}
+            <div className="rounded-md border bg-muted/40 px-4 py-3 space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                Hint — ways to authorize this key on your nodes
+              </p>
+              <p className="text-xs text-muted-foreground">
+                You can provision nodes however you like. The only requirement is that this public key
+                is in <code className="bg-muted px-1 rounded">/root/.ssh/authorized_keys</code> on every node before onboarding starts.
+              </p>
+              <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
+                <li>
+                  <strong>Manually:</strong>{" "}
+                  <code className="bg-muted px-1 rounded">
+                    echo "&lt;key&gt;" &gt;&gt; /root/.ssh/authorized_keys
+                  </code>
+                </li>
+                <li>
+                  <strong>AWS EC2 User Data:</strong> inject it at launch time so every instance starts
+                  with the key already authorized — no manual step needed.
+                </li>
+                <li>
+                  <strong>Cloud-init / Ansible bootstrap:</strong> write it via{" "}
+                  <code className="bg-muted px-1 rounded">ssh_authorized_keys</code> in your cloud-init
+                  config, or a pre-provisioning playbook.
+                </li>
+              </ul>
             </div>
           </div>
         )}

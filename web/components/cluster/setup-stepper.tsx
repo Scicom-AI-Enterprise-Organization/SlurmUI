@@ -181,12 +181,10 @@ export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps)
             </Link>{" "}
             and add the cluster SSH private key.
           </li>
-          <li>Copy the public key shown there.</li>
           <li>
-            On every cluster node run:{" "}
-            <code className="bg-muted px-1 rounded text-xs">
-              echo "&lt;public-key&gt;" &gt;&gt; /root/.ssh/authorized_keys
-            </code>
+            Copy the public key shown there and make sure it is authorized on every node you plan
+            to onboard — see the hints on the Settings page for different ways to do this (manual,
+            AWS User Data, cloud-init, etc.).
           </li>
           <li>Return here to continue onboarding.</li>
         </ol>
