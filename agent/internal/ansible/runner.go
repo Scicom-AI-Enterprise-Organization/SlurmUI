@@ -47,7 +47,14 @@ func (r *Runner) Run(ctx context.Context, opts *RunOpts, streamFn slurm.StreamFu
 		"vars_file", opts.VarsFile,
 	)
 
-	result, err := slurm.RunCommandStreaming(ctx, streamFn, "ansible-playbook", args...)
+	// Attach extra env vars for cleaner, more verbose streaming output.
+	ansibleCtx := slurm.WithEnv(ctx, map[string]string{
+		"ANSIBLE_STDOUT_CALLBACK": "yaml",
+		"ANSIBLE_FORCE_COLOR":     "0",
+		"PYTHONUNBUFFERED":        "1",
+	})
+
+	result, err := slurm.RunCommandStreaming(ansibleCtx, streamFn, "ansible-playbook", args...)
 	if err != nil {
 		return nil, fmt.Errorf("ansible-playbook %s failed: %w", opts.Playbook, err)
 	}
@@ -87,8 +94,8 @@ func (r *Runner) buildArgs(opts *RunOpts, playbookPath string) []string {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
 	}
 
-	// Always use the YAML stdout callback for cleaner output.
-	args = append(args, "--diff")
+	// Verbose diff output for better streaming visibility.
+	args = append(args, "-v", "--diff")
 
 	// The playbook path must be last.
 	args = append(args, playbookPath)

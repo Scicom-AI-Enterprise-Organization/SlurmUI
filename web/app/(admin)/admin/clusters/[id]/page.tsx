@@ -4,6 +4,7 @@ import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { SetupStepper } from "@/components/cluster/setup-stepper";
 import { UsersTab } from "@/components/cluster/users-tab";
+import { DeleteClusterButton } from "@/components/cluster/delete-cluster-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -43,12 +44,15 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             Controller: {cluster.controllerHost}
           </p>
         </div>
-        <Link href={`/admin/clusters/${id}/nodes`}>
-          <Button variant="outline">
-            <Monitor className="mr-2 h-4 w-4" />
-            Manage Nodes
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link href={`/admin/clusters/${id}/nodes`}>
+            <Button variant="outline">
+              <Monitor className="mr-2 h-4 w-4" />
+              Manage Nodes
+            </Button>
+          </Link>
+          <DeleteClusterButton clusterId={id} clusterName={cluster.name} />
+        </div>
       </div>
 
       {cluster.status === "PROVISIONING" ? (

@@ -6,8 +6,27 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 )
+
+type envCtxKey struct{}
+
+// WithEnv attaches extra environment variables to a context.
+// They are merged on top of the current process environment when executing commands.
+func WithEnv(ctx context.Context, env map[string]string) context.Context {
+	return context.WithValue(ctx, envCtxKey{}, env)
+}
+
+// envFromCtx merges context env vars into os.Environ().
+func envFromCtx(ctx context.Context) []string {
+	base := os.Environ()
+	extra, _ := ctx.Value(envCtxKey{}).(map[string]string)
+	for k, v := range extra {
+		base = append(base, k+"="+v)
+	}
+	return base
+}
 
 // ExecResult holds the output of a command execution.
 type ExecResult struct {
@@ -19,6 +38,7 @@ type ExecResult struct {
 // RunCommand executes a command and returns the combined result.
 func RunCommand(ctx context.Context, name string, args ...string) (*ExecResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = envFromCtx(ctx)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -48,6 +68,7 @@ type StreamFunc func(line string, seq int)
 // Returns the full ExecResult after the command completes.
 func RunCommandStreaming(ctx context.Context, streamFn StreamFunc, name string, args ...string) (*ExecResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = envFromCtx(ctx)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

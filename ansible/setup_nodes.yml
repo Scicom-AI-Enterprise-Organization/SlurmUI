@@ -61,12 +61,14 @@
         path: "{{ mgmt_nfs_path }}"
         state: directory
         mode: "0755"
+      when: mgmt_nfs_path | default('') != ''
 
     - name: Create data mount point on workers
       file:
         path: "{{ data_nfs_path }}"
         state: directory
         mode: "0755"
+      when: data_nfs_path | default('') != ''
 
     - name: Mount mgmt NFS on workers
       mount:
@@ -75,6 +77,11 @@
         fstype: nfs
         opts: defaults,noatime
         state: mounted
+      # Skip if this host IS the NFS server (would deadlock).
+      when:
+        - mgmt_nfs_server | default('') != ''
+        - mgmt_nfs_path | default('') != ''
+        - ansible_host != mgmt_nfs_server
 
     - name: Mount data NFS on workers
       mount:
@@ -83,3 +90,8 @@
         fstype: nfs
         opts: defaults,noatime
         state: mounted
+      # Skip if this host IS the NFS server (would deadlock).
+      when:
+        - data_nfs_server | default('') != ''
+        - data_nfs_path | default('') != ''
+        - ansible_host != data_nfs_server
