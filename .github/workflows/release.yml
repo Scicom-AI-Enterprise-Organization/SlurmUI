@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write        # create GitHub releases + upload assets
   id-token: write        # OIDC → AWS ECR
-  packages: write
 
 env:
   AWS_REGION: ap-southeast-5
@@ -20,9 +19,6 @@ jobs:
   build-web:
     name: Build web image
     runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
-      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,33 +89,3 @@ jobs:
           files: |
             aura-agent-linux-amd64
             aura-agent-linux-arm64
-
-  # ── 3. Update image tag in aies-argocd ────────────────────────────────────
-  update-argocd:
-    name: Update ArgoCD manifest
-    needs: [build-web, build-agent]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout aies-argocd
-        uses: actions/checkout@v4
-        with:
-          repository: AIES-Infra/aies-argocd
-          token: ${{ secrets.AIES_ARGOCD_PAT }}
-          path: aies-argocd
-
-      - name: Update image tag in kustomization.yaml
-        run: |
-          cd aies-argocd/apps/scicom-aura
-          IMAGE="${{ needs.build-web.outputs.image }}"
-          TAG="${{ needs.build-web.outputs.tag }}"
-          # Use kustomize edit to update the image tag
-          kustomize edit set image "${IMAGE}=${IMAGE}:${TAG}"
-
-      - name: Commit and push
-        run: |
-          cd aies-argocd
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add apps/scicom-aura/kustomization.yaml
-          git commit -m "chore(scicom-aura): bump image to ${{ needs.build-web.outputs.tag }}"
-          git push
