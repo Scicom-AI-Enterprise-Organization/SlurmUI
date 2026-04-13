@@ -318,11 +318,14 @@ export function SetupStepper({ clusterId }: SetupStepperProps) {
                 {state.status !== "running" && (
                   <Button
                     onClick={idx === 0 ? runNfs : idx === 1 ? runNodes : idx === 2 ? runPartitions : runHealth}
-                    disabled={state.status === "running"}
                   >
                     {state.status === "error" ? "Retry" : idx === 3 ? "Run Health Check" : "Apply"}
-                    {state.status !== "running" && <ChevronRight className="ml-1 h-4 w-4" />}
-                    {state.status === "running" && <Loader2 className="ml-1 h-4 w-4 animate-spin" />}
+                    <ChevronRight className="ml-1 h-4 w-4" />
+                  </Button>
+                )}
+                {state.status === "running" && (
+                  <Button disabled>
+                    <Loader2 className="ml-1 h-4 w-4 animate-spin" /> Running...
                   </Button>
                 )}
               </CardContent>

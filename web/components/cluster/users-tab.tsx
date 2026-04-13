@@ -114,17 +114,13 @@ export function UsersTab({ clusterId }: UsersTabProps) {
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">{clusterUsers.length} user(s) provisioned</p>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button size="sm">
-              <UserPlus className="mr-2 h-4 w-4" /> Add User
-            </Button>
-          </DialogTrigger>
+          <DialogTrigger render={<Button size="sm"><UserPlus className="mr-2 h-4 w-4" /> Add User</Button>} />
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Provision User</DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
-              <Select value={selectedUserId} onValueChange={setSelectedUserId}>
+              <Select value={selectedUserId} onValueChange={(v) => setSelectedUserId(v ?? "")}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select a user..." />
                 </SelectTrigger>
