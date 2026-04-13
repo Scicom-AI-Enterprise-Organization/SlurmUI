@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { sshPublicKeyFromPrivate } from "@/lib/ssh-key";
+import { sshPublicKeyFromPrivate, normaliseKey } from "@/lib/ssh-key";
 import type { Session } from "next-auth";
 
 function isAdmin(session: Session | null): boolean {
@@ -34,9 +34,10 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: "privateKey is required" }, { status: 400 });
   }
 
+  const normalisedKey = normaliseKey(privateKey);
   let publicKey: string;
   try {
-    publicKey = sshPublicKeyFromPrivate(privateKey.trim());
+    publicKey = sshPublicKeyFromPrivate(normalisedKey);
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 422 });
   }
@@ -45,8 +46,8 @@ export async function PUT(req: NextRequest) {
   await prisma.$transaction([
     prisma.setting.upsert({
       where: { key: "ssh_private_key" },
-      create: { key: "ssh_private_key", value: privateKey.trim(), updatedAt: now },
-      update: { value: privateKey.trim(), updatedAt: now },
+      create: { key: "ssh_private_key", value: normalisedKey, updatedAt: now },
+      update: { value: normalisedKey, updatedAt: now },
     }),
     prisma.setting.upsert({
       where: { key: "ssh_public_key" },
