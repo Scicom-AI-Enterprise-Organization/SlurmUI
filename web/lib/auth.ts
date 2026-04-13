@@ -30,6 +30,7 @@ declare module "@auth/core/jwt" {
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  trustHost: true,
   providers: [
     KeycloakProvider({
       clientId: process.env.KEYCLOAK_ID!,
