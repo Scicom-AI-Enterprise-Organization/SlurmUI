@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { randomUUID } from "crypto";
 
-// GET /api/clusters — list all clusters
 export async function GET() {
   const session = await auth();
   if (!session?.user) {
@@ -17,9 +17,7 @@ export async function GET() {
       status: true,
       createdAt: true,
       updatedAt: true,
-      _count: {
-        select: { jobs: true },
-      },
+      _count: { select: { jobs: true } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -27,7 +25,6 @@ export async function GET() {
   return NextResponse.json(clusters);
 }
 
-// POST /api/clusters — create a new cluster (admin only)
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user || (session.user as any).role !== "ADMIN") {
@@ -35,17 +32,14 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-
-  // Validate required fields
-  const { name, controllerHost, config } = body;
-  if (!name || !controllerHost || !config) {
+  const { name, controllerHost } = body;
+  if (!name || !controllerHost) {
     return NextResponse.json(
-      { error: "Missing required fields: name, controllerHost, config" },
+      { error: "Missing required fields: name, controllerHost" },
       { status: 400 }
     );
   }
 
-  // Check for duplicate name
   const existing = await prisma.cluster.findUnique({ where: { name } });
   if (existing) {
     return NextResponse.json(
@@ -54,13 +48,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const installToken = randomUUID();
+  const installTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
   const cluster = await prisma.cluster.create({
     data: {
       name,
       controllerHost,
-      natsCredentials: "", // populated during bootstrap
+      natsCredentials: "",
       status: "PROVISIONING",
-      config,
+      config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
+      installToken,
+      installTokenExpiresAt,
     },
   });
 
