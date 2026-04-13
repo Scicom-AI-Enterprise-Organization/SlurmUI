@@ -11,9 +11,10 @@ import { KeyRound, Copy, Check, Trash2, ShieldCheck, AlertTriangle } from "lucid
 interface SshKeySettingsProps {
   initialConfigured: boolean;
   initialPublicKey: string | null;
+  activeClusters: number;
 }
 
-export function SshKeySettings({ initialConfigured, initialPublicKey }: SshKeySettingsProps) {
+export function SshKeySettings({ initialConfigured, initialPublicKey, activeClusters }: SshKeySettingsProps) {
   const [configured, setConfigured] = useState(initialConfigured);
   const [publicKey, setPublicKey] = useState(initialPublicKey);
   const [privateKeyInput, setPrivateKeyInput] = useState("");
@@ -133,33 +134,46 @@ export function SshKeySettings({ initialConfigured, initialPublicKey }: SshKeySe
           </div>
         )}
 
-        {/* Private key input */}
-        <div className="space-y-2">
-          <Label htmlFor="private-key" className="text-sm font-medium">
-            {configured ? "Replace private key" : "Paste private key"}
-          </Label>
-          <Textarea
-            id="private-key"
-            rows={8}
-            placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
-            value={privateKeyInput}
-            onChange={(e) => { setPrivateKeyInput(e.target.value); setError(null); }}
-            className="font-mono text-xs"
-          />
-          {error && <p className="text-sm text-destructive whitespace-pre-wrap">{error}</p>}
-        </div>
+        {/* Private key input — locked when active clusters exist */}
+        {configured && activeClusters > 0 ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400 space-y-1">
+            <p className="font-semibold">Key is locked</p>
+            <p>
+              {activeClusters} active cluster{activeClusters > 1 ? "s are" : " is"} using this key.
+              Replacing it would break Ansible access to all their nodes.
+              Delete all active clusters first if you need to rotate the key.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              <Label htmlFor="private-key" className="text-sm font-medium">
+                {configured ? "Replace private key" : "Paste private key"}
+              </Label>
+              <Textarea
+                id="private-key"
+                rows={8}
+                placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
+                value={privateKeyInput}
+                onChange={(e) => { setPrivateKeyInput(e.target.value); setError(null); }}
+                className="font-mono text-xs"
+              />
+              {error && <p className="text-sm text-destructive whitespace-pre-wrap">{error}</p>}
+            </div>
 
-        <div className="flex items-center gap-3">
-          <Button onClick={handleSave} disabled={saving || !privateKeyInput.trim()}>
-            {saving ? "Saving…" : configured ? "Update key" : "Save key"}
-          </Button>
-          {configured && (
-            <Button variant="destructive" size="sm" onClick={handleRemove} disabled={removing}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              {removing ? "Removing…" : "Remove key"}
-            </Button>
-          )}
-        </div>
+            <div className="flex items-center gap-3">
+              <Button onClick={handleSave} disabled={saving || !privateKeyInput.trim()}>
+                {saving ? "Saving…" : configured ? "Update key" : "Save key"}
+              </Button>
+              {configured && (
+                <Button variant="destructive" size="sm" onClick={handleRemove} disabled={removing}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  {removing ? "Removing…" : "Remove key"}
+                </Button>
+              )}
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

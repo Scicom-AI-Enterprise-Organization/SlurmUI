@@ -40,6 +40,15 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // SSH key must be configured before any cluster can be created.
+  const sshKey = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
+  if (!sshKey) {
+    return NextResponse.json(
+      { error: "SSH key not configured. Go to Admin → Settings and add the cluster SSH key before creating a cluster." },
+      { status: 412 }
+    );
+  }
+
   const existing = await prisma.cluster.findUnique({ where: { name } });
   if (existing) {
     return NextResponse.json(

@@ -34,6 +34,24 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: "privateKey is required" }, { status: 400 });
   }
 
+  // Block key replacement if provisioned clusters exist — changing the key
+  // would silently break Ansible access to all their nodes.
+  const existing = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
+  if (existing) {
+    const activeClusters = await prisma.cluster.count({
+      where: { status: { in: ["ACTIVE", "DEGRADED"] } },
+    });
+    if (activeClusters > 0) {
+      return NextResponse.json(
+        {
+          error: `Cannot replace the SSH key while ${activeClusters} active cluster${activeClusters > 1 ? "s are" : " is"} using it. ` +
+                 `Delete all active clusters first, then update the key.`,
+        },
+        { status: 409 }
+      );
+    }
+  }
+
   const normalisedKey = normaliseKey(privateKey);
   let publicKey: string;
   try {

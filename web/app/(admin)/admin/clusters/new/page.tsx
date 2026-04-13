@@ -1,61 +1,37 @@
-"use client";
+import { prisma } from "@/lib/prisma";
+import { NewClusterWizard } from "@/components/wizard/new-cluster-wizard";
+import { AlertTriangle } from "lucide-react";
+import Link from "next/link";
+import { Button } from "@/components/ui/button";
 
-import { useState } from "react";
-import { WizardShell } from "@/components/wizard/wizard-shell";
-import { StepBasics } from "@/components/wizard/step-basics";
-import { StepInstall } from "@/components/wizard/step-install";
+export default async function NewClusterPage() {
+  const sshKey = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
 
-const steps = [
-  { title: "Basics", description: "Cluster name and controller hostname" },
-  { title: "Install Agent", description: "Run the one-liner on your master node" },
-];
-
-export default function NewClusterPage() {
-  const [basics, setBasics] = useState({ clusterName: "", controllerHost: "" });
-  const [clusterId, setClusterId] = useState<string | null>(null);
-
-  const canProgress = (step: number): boolean => {
-    if (step === 0) return !!(basics.clusterName && basics.controllerHost);
-    return false; // Step 1: wait for agent — no "next" button
-  };
-
-  // Called before advancing from Step 0. Creates the cluster record.
-  const handleBeforeNext = async (step: number): Promise<boolean | void> => {
-    if (step !== 0) return;
-    try {
-      const res = await fetch("/api/clusters", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: basics.clusterName,
-          controllerHost: basics.controllerHost,
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        alert(`Failed to create cluster: ${err.error}`);
-        return false;
-      }
-      const cluster = await res.json();
-      setClusterId(cluster.id);
-    } catch {
-      alert("Failed to create cluster");
-      return false;
-    }
-  };
+  if (!sshKey) {
+    return (
+      <div className="mx-auto max-w-2xl py-8 space-y-6">
+        <h1 className="text-3xl font-bold">New Cluster</h1>
+        <div className="rounded-lg border border-destructive/50 bg-destructive/5 p-6 space-y-4">
+          <div className="flex items-center gap-2 text-destructive font-semibold text-lg">
+            <AlertTriangle className="h-5 w-5" />
+            SSH key required before creating a cluster
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Aura needs an SSH key to provision cluster nodes via Ansible. No cluster can be
+            created until one is configured.
+          </p>
+          <Link href="/admin/settings">
+            <Button>Go to Settings →</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto max-w-2xl py-8">
       <h1 className="mb-8 text-3xl font-bold">New Cluster</h1>
-      <WizardShell
-        steps={steps}
-        onComplete={() => {}}
-        onBeforeNext={handleBeforeNext}
-        canProgress={canProgress}
-      >
-        <StepBasics data={basics} onChange={setBasics} />
-        <StepInstall clusterId={clusterId} />
-      </WizardShell>
+      <NewClusterWizard />
     </div>
   );
 }
