@@ -70,50 +70,6 @@ func (h *SetupHandler) HandleTestNfs(ctx context.Context, cmd *message.Command) 
 	emit(result.Stdout)
 	emit("[aura] NFS connectivity OK")
 
-	emit("[aura] Mounting NFS shares via Ansible...")
-
-	type nfsVars struct {
-		MgmtNfsServer string `json:"mgmt_nfs_server"`
-		MgmtNfsPath   string `json:"mgmt_nfs_path"`
-		DataNfsServer string `json:"data_nfs_server"`
-		DataNfsPath   string `json:"data_nfs_path"`
-	}
-	varsData, err := json.Marshal(nfsVars{
-		MgmtNfsServer: payload.MgmtNfsServer,
-		MgmtNfsPath:   payload.MgmtNfsPath,
-		DataNfsServer: payload.DataNfsServer,
-		DataNfsPath:   payload.DataNfsPath,
-	})
-	if err != nil {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to marshal NFS vars: %w", err))
-	}
-
-	varsPath, err := writeTempConfig(json.RawMessage(varsData))
-	if err != nil {
-		return h.publisher.SendError(cmd.RequestID, err)
-	}
-	defer os.Remove(varsPath)
-
-	streamFn := func(line string, s int) {
-		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq+s)
-	}
-
-	opts := &ansible.RunOpts{
-		PlaybookDir: h.playbookDir,
-		Playbook:    "setup_nfs.yml",
-		VarsFile:    varsPath,
-		Inventory:   "localhost,",
-	}
-
-	ansResult, err := h.runner.Run(ctx, opts, streamFn)
-	if err != nil {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("setup_nfs playbook failed: %w", err))
-	}
-	if ansResult.ExitCode != 0 {
-		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("setup_nfs exited with code %d: %s", ansResult.ExitCode, ansResult.Stderr))
-	}
-	emit("[aura] NFS shares mounted successfully")
-
 	return h.publisher.SendResult(cmd.RequestID, map[string]string{"status": "ok"})
 }
 
@@ -148,11 +104,19 @@ func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Comman
 		ControllerHostname string              `json:"controller_hostname"`
 		ControllerIsWorker bool                `json:"controller_is_worker"`
 		Nodes              []message.NodeEntry `json:"nodes"`
+		MgmtNfsServer      string              `json:"mgmt_nfs_server"`
+		MgmtNfsPath        string              `json:"mgmt_nfs_path"`
+		DataNfsServer      string              `json:"data_nfs_server"`
+		DataNfsPath        string              `json:"data_nfs_path"`
 	}
 	vars := nodeVars{
 		ControllerHostname: payload.ControllerHostname,
 		ControllerIsWorker: payload.ControllerIsWorker,
 		Nodes:              payload.Nodes,
+		MgmtNfsServer:      payload.MgmtNfsServer,
+		MgmtNfsPath:        payload.MgmtNfsPath,
+		DataNfsServer:      payload.DataNfsServer,
+		DataNfsPath:        payload.DataNfsPath,
 	}
 	varsData, err := json.Marshal(vars)
 	if err != nil {

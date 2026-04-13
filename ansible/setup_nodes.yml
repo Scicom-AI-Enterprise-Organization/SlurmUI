@@ -48,8 +48,38 @@
           {% endfor %}
         marker: "# {mark} AURA CLUSTER NODES"
 
-    - name: Install slurmd on workers
+    - name: Install slurmd and nfs-common on workers
       apt:
-        name: slurmd
+        name:
+          - slurmd
+          - nfs-common
         state: present
         update_cache: true
+
+    - name: Create mgmt mount point on workers
+      file:
+        path: "{{ mgmt_nfs_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create data mount point on workers
+      file:
+        path: "{{ data_nfs_path }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount mgmt NFS on workers
+      mount:
+        path: "{{ mgmt_nfs_path }}"
+        src: "{{ mgmt_nfs_server }}:{{ mgmt_nfs_path }}"
+        fstype: nfs
+        opts: defaults,noatime
+        state: mounted
+
+    - name: Mount data NFS on workers
+      mount:
+        path: "{{ data_nfs_path }}"
+        src: "{{ data_nfs_server }}:{{ data_nfs_path }}"
+        fstype: nfs
+        opts: defaults,noatime
+        state: mounted

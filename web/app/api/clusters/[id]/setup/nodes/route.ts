@@ -45,6 +45,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   await prisma.cluster.update({ where: { id }, data: { config } });
 
   const requestId = randomUUID();
+  const clusterConfig = (cluster.config ?? {}) as Record<string, any>;
   await publishCommand(id, {
     request_id: requestId,
     type: "setup_nodes",
@@ -53,6 +54,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       controller_is_worker: controllerIsWorker ?? false,
       nodes,
       ssh_private_key: sshPrivateKey,
+      mgmt_nfs_server: clusterConfig.mgmt_nfs_server ?? "",
+      mgmt_nfs_path:   clusterConfig.mgmt_nfs_path   ?? "",
+      data_nfs_server: clusterConfig.data_nfs_server ?? "",
+      data_nfs_path:   clusterConfig.data_nfs_path   ?? "",
     },
   });
 

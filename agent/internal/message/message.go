@@ -155,6 +155,11 @@ type SetupNodesPayload struct {
 	ControllerIsWorker bool        `json:"controller_is_worker"`
 	Nodes              []NodeEntry `json:"nodes"`
 	SSHPrivateKey      string      `json:"ssh_private_key,omitempty"` // base64-encoded, saved for Ansible
+	// NFS config — passed to Ansible so workers get mounts
+	MgmtNfsServer string `json:"mgmt_nfs_server,omitempty"`
+	MgmtNfsPath   string `json:"mgmt_nfs_path,omitempty"`
+	DataNfsServer string `json:"data_nfs_server,omitempty"`
+	DataNfsPath   string `json:"data_nfs_path,omitempty"`
 }
 
 // PartitionDef defines a Slurm partition.
