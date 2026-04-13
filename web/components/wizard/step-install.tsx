@@ -12,6 +12,7 @@ interface StepInstallProps {
 }
 
 type ConnState = "waiting" | "connecting" | "connected" | "timeout" | "error";
+type TokenState = "valid" | "used" | "expired" | "loading";
 
 export function StepInstall({ clusterId }: StepInstallProps) {
   const [connState, setConnState] = useState<ConnState>("waiting");
@@ -24,6 +25,7 @@ export function StepInstall({ clusterId }: StepInstallProps) {
 
   // Fetch the actual token from the cluster record to build real URL
   const [installCmd, setInstallCmd] = useState<string | null>(null);
+  const [tokenState, setTokenState] = useState<TokenState>("loading");
 
   useEffect(() => {
     if (!clusterId) return;
@@ -31,7 +33,17 @@ export function StepInstall({ clusterId }: StepInstallProps) {
       .then((r) => r.json())
       .then((c) => {
         if (c.installToken) {
-          setInstallCmd(`curl -fsSL ${baseUrl}/api/install/${c.installToken} | bash`);
+          const now = new Date();
+          if (c.installTokenUsedAt) {
+            setTokenState("used");
+            setInstallCmd(null);
+          } else if (c.installTokenExpiresAt && new Date(c.installTokenExpiresAt) < now) {
+            setTokenState("expired");
+            setInstallCmd(null);
+          } else {
+            setTokenState("valid");
+            setInstallCmd(`curl -fsSL ${baseUrl}/api/install/${c.installToken} | bash`);
+          }
         }
       })
       .catch(() => {});
@@ -112,14 +124,23 @@ export function StepInstall({ clusterId }: StepInstallProps) {
 
       <Card>
         <CardContent className="pt-4">
-          <div className="flex items-center justify-between gap-2">
-            <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm break-all">
-              {installCmd ?? "Loading..."}
-            </code>
-            <Button variant="outline" size="sm" onClick={copyCmd} disabled={!installCmd}>
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            </Button>
-          </div>
+          {(tokenState === "used" || tokenState === "expired") ? (
+            <div className="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
+              {tokenState === "used"
+                ? "This install token has already been used."
+                : "This install token has expired."}
+              {" "}Go to the cluster detail page to regenerate it.
+            </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2">
+              <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm break-all">
+                {installCmd ?? "Loading..."}
+              </code>
+              <Button variant="outline" size="sm" onClick={copyCmd} disabled={!installCmd}>
+                {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

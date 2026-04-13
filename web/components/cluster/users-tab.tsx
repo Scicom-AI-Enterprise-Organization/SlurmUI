@@ -114,7 +114,9 @@ export function UsersTab({ clusterId }: UsersTabProps) {
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">{clusterUsers.length} user(s) provisioned</p>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button size="sm"><UserPlus className="mr-2 h-4 w-4" /> Add User</Button>} />
+          <DialogTrigger render={<Button size="sm" />}>
+            <UserPlus className="mr-2 h-4 w-4" /> Add User
+          </DialogTrigger>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Provision User</DialogTitle>

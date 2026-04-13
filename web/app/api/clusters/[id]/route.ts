@@ -27,6 +27,12 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   }
 
+  // Only admins see install token fields
+  if ((session.user as any).role !== "ADMIN") {
+    const { installToken, installTokenExpiresAt, installTokenUsedAt, ...safe } = cluster;
+    return NextResponse.json(safe);
+  }
+
   return NextResponse.json(cluster);
 }
 
@@ -41,7 +47,15 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   const body = await req.json();
   const { name, controllerHost, status, config } = body;
 
-  const cluster = await prisma.cluster.update({
+  const VALID_STATUSES = ["PROVISIONING", "ACTIVE", "DEGRADED", "OFFLINE", "ERROR"];
+  if (status && !VALID_STATUSES.includes(status)) {
+    return NextResponse.json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` }, { status: 400 });
+  }
+
+  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
+
+  const updated = await prisma.cluster.update({
     where: { id },
     data: {
       ...(name && { name }),
@@ -51,7 +65,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     },
   });
 
-  return NextResponse.json(cluster);
+  return NextResponse.json(updated);
 }
 
 // DELETE /api/clusters/[id] — delete cluster (admin only)

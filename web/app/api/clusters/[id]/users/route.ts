@@ -54,10 +54,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // Allocate UID if not yet assigned (global, starting from 10000)
   let { unixUid, unixGid } = user;
   if (!unixUid) {
-    const maxResult = await prisma.user.aggregate({ _max: { unixUid: true } });
-    unixUid = (maxResult._max.unixUid ?? 9999) + 1;
-    unixGid = unixUid;
-    await prisma.user.update({ where: { id: userId }, data: { unixUid, unixGid } });
+    // Allocate UID atomically to prevent races when two users are provisioned concurrently.
+    // The transaction serializes the read-increment-write so no two users get the same UID.
+    const updated = await prisma.$transaction(async (tx) => {
+      const maxResult = await tx.user.aggregate({ _max: { unixUid: true } });
+      const newUid = (maxResult._max.unixUid ?? 9999) + 1;
+      return tx.user.update({
+        where: { id: userId },
+        data: { unixUid: newUid, unixGid: newUid },
+      });
+    });
+    unixUid = updated.unixUid!;
+    unixGid = updated.unixGid!;
   }
 
   // Create or reset ClusterUser record

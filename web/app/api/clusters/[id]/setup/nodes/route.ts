@@ -23,7 +23,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "nodes array is required" }, { status: 400 });
   }
 
-  // Read SSH key to forward to agent
+  // NOTE: The SSH private key is forwarded to the agent in the NATS message payload.
+  // NATS is currently configured without TLS (nats://), so this key transits the network
+  // in plaintext. This is acceptable for a private management network, but TLS should be
+  // added before deployment on untrusted networks.
   let sshPrivateKey = "";
   const keyPath = process.env.ANSIBLE_SSH_KEY_FILE ?? "/home/nextjs/.ssh/id_ed25519";
   try {
