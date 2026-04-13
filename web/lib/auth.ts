@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import KeycloakProvider from "next-auth/providers/keycloak";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "./prisma";
 import type { UserRole } from "@prisma/client";
 
 declare module "next-auth" {

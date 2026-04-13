@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
-import { prisma } from "@/lib/prisma";
-import { getNatsConnection, jc } from "@/lib/nats";
+import { prisma } from "./prisma";
+import { getNatsConnection, jc } from "./nats";
 import { randomUUID } from "crypto";
 import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";

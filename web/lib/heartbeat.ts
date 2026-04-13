@@ -1,5 +1,5 @@
-import { prisma } from "@/lib/prisma";
-import { getNatsConnection, jc } from "@/lib/nats";
+import { prisma } from "./prisma";
+import { getNatsConnection, jc } from "./nats";
 import type { Subscription } from "nats";
 
 const HEARTBEAT_TIMEOUT_MS = 30_000; // 30 seconds without heartbeat = DEGRADED
