@@ -1,0 +1,7 @@
+{% for node in nodes %}
+{% if node.gpus > 0 %}
+NodeName={{ node.hostname }} CPUs={{ node.cpus }} RealMemory={{ node.memory_mb }} Gres=gpu:{{ node.gpus }} State=UNKNOWN
+{% else %}
+NodeName={{ node.hostname }} CPUs={{ node.cpus }} RealMemory={{ node.memory_mb }} State=UNKNOWN
+{% endif %}
+{% endfor %}

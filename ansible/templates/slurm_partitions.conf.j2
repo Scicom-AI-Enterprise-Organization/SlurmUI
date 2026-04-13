@@ -1,0 +1,3 @@
+{% for partition in partitions %}
+PartitionName={{ partition.name }} Nodes={{ partition.nodes }} MaxTime={{ partition.max_time }}{% if partition.default %} Default=YES{% endif %} State=UP
+{% endfor %}

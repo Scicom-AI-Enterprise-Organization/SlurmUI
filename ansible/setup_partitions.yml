@@ -1,0 +1,26 @@
+---
+- name: Configure Slurm partitions and restart slurmctld
+  hosts: localhost
+  connection: local
+  become: true
+  tasks:
+    - name: Write partition definitions
+      template:
+        src: slurm_partitions.conf.j2
+        dest: /etc/slurm/partitions.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Ensure partitions.conf is included in slurm.conf
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        line: "Include /etc/slurm/partitions.conf"
+        state: present
+        create: true
+
+    - name: Restart slurmctld
+      systemd:
+        name: slurmctld
+        state: restarted
+        enabled: true

@@ -1,0 +1,55 @@
+---
+- name: Write /etc/hosts and configure Slurm nodes on master
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Add cluster nodes to /etc/hosts
+      blockinfile:
+        path: /etc/hosts
+        block: |
+          {% for node in nodes %}
+          {{ node.ip }} {{ node.hostname }}
+          {% endfor %}
+        marker: "# {mark} AURA CLUSTER NODES"
+
+    - name: Install Slurm controller packages
+      apt:
+        name:
+          - slurm-wlm
+          - slurmctld
+        state: present
+        update_cache: true
+
+    - name: Write Slurm node definitions
+      template:
+        src: slurm_nodes.conf.j2
+        dest: /etc/slurm/nodes.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Ensure nodes.conf is included in slurm.conf
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        line: "Include /etc/slurm/nodes.conf"
+        state: present
+        create: true
+
+- name: Install Slurm compute daemon on workers
+  hosts: slurm_workers
+  become: true
+  tasks:
+    - name: Add cluster nodes to /etc/hosts on workers
+      blockinfile:
+        path: /etc/hosts
+        block: |
+          {% for node in nodes %}
+          {{ node.ip }} {{ node.hostname }}
+          {% endfor %}
+        marker: "# {mark} AURA CLUSTER NODES"
+
+    - name: Install slurmd on workers
+      apt:
+        name: slurmd
+        state: present
+        update_cache: true
