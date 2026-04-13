@@ -1,0 +1,15 @@
+---
+- name: Create user group
+  group:
+    name: "{{ username }}"
+    gid: "{{ gid }}"
+    state: present
+
+- name: Create user account
+  user:
+    name: "{{ username }}"
+    uid: "{{ uid }}"
+    group: "{{ username }}"
+    create_home: false
+    shell: /bin/bash
+    state: present

@@ -1,0 +1,6 @@
+---
+- name: Provision user on worker nodes
+  hosts: workers
+  become: true
+  roles:
+    - aura_user
