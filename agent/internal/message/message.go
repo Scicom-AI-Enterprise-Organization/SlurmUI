@@ -22,6 +22,14 @@ const (
 	CmdAddNode         CommandType = "add_node"
 	CmdPropagateConfig CommandType = "propagate_config"
 	CmdCreateHomedir   CommandType = "create_homedir"
+
+	// Setup commands (Phase 2 guided setup)
+	CmdTestNfs         CommandType = "test_nfs"
+	CmdSetupNodes      CommandType = "setup_nodes"
+	CmdSetupPartitions CommandType = "setup_partitions"
+
+	// User provisioning
+	CmdProvisionUser CommandType = "provision_user"
 )
 
 // ReplyType enumerates reply types.
@@ -122,6 +130,59 @@ type CreateHomedirPayload struct {
 	UserGID  int             `json:"user_gid"`
 	VarsFile string          `json:"vars_file,omitempty"`
 	Config   json.RawMessage `json:"config,omitempty"`
+}
+
+// TestNfsPayload is the payload for test_nfs commands.
+type TestNfsPayload struct {
+	MgmtNfsServer string `json:"mgmt_nfs_server"`
+	MgmtNfsPath   string `json:"mgmt_nfs_path"`
+	DataNfsServer string `json:"data_nfs_server"`
+	DataNfsPath   string `json:"data_nfs_path"`
+}
+
+// NodeEntry represents a single node definition for setup_nodes.
+type NodeEntry struct {
+	Hostname string `json:"hostname"`
+	IP       string `json:"ip"`
+	CPUs     int    `json:"cpus"`
+	MemoryMB int    `json:"memory_mb"`
+	GPUs     int    `json:"gpus"`
+}
+
+// SetupNodesPayload is the payload for setup_nodes commands.
+type SetupNodesPayload struct {
+	ControllerHostname string      `json:"controller_hostname"`
+	ControllerIsWorker bool        `json:"controller_is_worker"`
+	Nodes              []NodeEntry `json:"nodes"`
+	SSHPrivateKey      string      `json:"ssh_private_key,omitempty"` // base64-encoded, saved for Ansible
+}
+
+// PartitionDef defines a Slurm partition.
+type PartitionDef struct {
+	Name    string `json:"name"`
+	Nodes   string `json:"nodes"`
+	MaxTime string `json:"max_time"`
+	Default bool   `json:"default"`
+}
+
+// SetupPartitionsPayload is the payload for setup_partitions commands.
+type SetupPartitionsPayload struct {
+	Partitions []PartitionDef `json:"partitions"`
+}
+
+// WorkerHost is a hostname/IP pair for Ansible inventory.
+type WorkerHost struct {
+	Hostname string `json:"hostname"`
+	IP       string `json:"ip"`
+}
+
+// ProvisionUserPayload is the payload for provision_user commands.
+type ProvisionUserPayload struct {
+	Username    string       `json:"username"`
+	UID         int          `json:"uid"`
+	GID         int          `json:"gid"`
+	NfsHome     string       `json:"nfs_home"`
+	WorkerHosts []WorkerHost `json:"worker_hosts"`
 }
 
 // ParseCommand parses a raw JSON message into a Command.

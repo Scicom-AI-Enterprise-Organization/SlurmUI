@@ -21,9 +21,13 @@ func TestDispatcher_UnknownCommand(t *testing.T) {
 		message.CmdAddNode,
 		message.CmdPropagateConfig,
 		message.CmdCreateHomedir,
+		message.CmdTestNfs,
+		message.CmdSetupNodes,
+		message.CmdSetupPartitions,
+		message.CmdProvisionUser,
 	}
 
-	if len(knownTypes) != 9 {
-		t.Errorf("expected 9 known command types, got %d", len(knownTypes))
+	if len(knownTypes) != 13 {
+		t.Errorf("expected 13 known command types, got %d", len(knownTypes))
 	}
 }
