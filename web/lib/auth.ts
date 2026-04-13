@@ -40,12 +40,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       clientSecret: process.env.KEYCLOAK_SECRET!,
       issuer: process.env.KEYCLOAK_ISSUER!,
       profile(profile) {
+        const realmRoles: string[] = profile.realm_access?.roles ?? [];
+        const clientRoles: string[] = profile.resource_access?.[process.env.KEYCLOAK_ID!]?.roles ?? [];
+        const allRoles = new Set([...realmRoles, ...clientRoles]);
+        const role: UserRole = allRoles.has("aura-admin") ? "ADMIN" : "USER";
         return {
           id: profile.sub,
           name: profile.name ?? profile.preferred_username,
           email: profile.email,
           keycloakId: profile.sub,
-          role: (profile.groups?.includes("admin") ? "ADMIN" : "USER") as UserRole,
+          role,
         };
       },
     }),
@@ -62,6 +66,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           update: {
             name: user.name,
             email: user.email!,
+            role: user.role ?? "USER",
           },
           create: {
             keycloakId: user.keycloakId ?? user.id!,
