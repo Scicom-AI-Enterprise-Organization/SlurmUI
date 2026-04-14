@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getNatsConnection, jc, subscribeCommandStream } from "@/lib/nats";
+import { readCommandStream } from "@/lib/nats";
 
 interface RouteParams {
   params: Promise<{ id: string; requestId: string }>;
@@ -33,54 +33,40 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
         }
       };
 
-      let done = false;
-
-      const { streamSub, replySub } = await subscribeCommandStream(id, requestId);
-
       // Timeout — close after 10 minutes if no reply
       const timer = setTimeout(() => {
-        if (!done) {
-          done = true;
-          send({ type: "complete", success: false, message: "Command timed out after 10 minutes" });
-          streamSub.unsubscribe();
-          replySub.unsubscribe();
-          try { controller.close(); } catch {}
-        }
+        send({ type: "complete", success: false, message: "Command timed out after 10 minutes" });
+        try { controller.close(); } catch {}
       }, 600_000);
 
-      // Stream stdout lines
-      (async () => {
-        try {
-          for await (const msg of streamSub) {
-            if (done) break;
-            const data = jc.decode(msg.data) as any;
+      try {
+        for await (const event of readCommandStream(requestId)) {
+          if (event.type === "stream") {
+            const data = event.data as any;
             send({ type: "stream", line: data.line, seq: data.seq });
-          }
-        } catch {}
-      })();
-
-      // Wait for final reply
-      (async () => {
-        try {
-          for await (const msg of replySub) {
+          } else {
+            // reply — final event
             clearTimeout(timer);
-            done = true;
-            const data = jc.decode(msg.data) as any;
+            const data = event.data as any;
             send({
               type: "complete",
               success: data.type === "result",
               payload: data.payload,
             });
-            streamSub.unsubscribe();
             try { controller.close(); } catch {}
             return;
           }
-        } catch {}
-      })();
+        }
+      } catch {
+        clearTimeout(timer);
+        try { controller.close(); } catch {}
+      }
+
+      clearTimeout(timer);
     },
 
     cancel() {
-      // Client disconnected — subscriptions will be GC'd
+      // Client disconnected
     },
   });
 

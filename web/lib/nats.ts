@@ -78,10 +78,37 @@ export async function sendCommandAndWait(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Stream buffer — fixes the race condition where the agent sends stream lines
+// before the browser has opened the SSE connection.
+//
+// Flow:
+//   1. POST handler calls publishCommand() which internally subscribes to the
+//      NATS reply/stream subjects BEFORE publishing the command.
+//   2. Any messages that arrive before the SSE route connects are buffered.
+//   3. SSE route calls readCommandStream() which replays the buffer then
+//      continues with live messages.
+// ---------------------------------------------------------------------------
+
+interface StreamBuffer {
+  events: { type: "stream" | "reply"; data: any }[];
+  waiters: Array<() => void>;
+  done: boolean;
+}
+
+const streamBuffers = new Map<string, StreamBuffer>();
+
+function pushEvent(buf: StreamBuffer, event: StreamBuffer["events"][0]) {
+  buf.events.push(event);
+  if (event.type === "reply") buf.done = true;
+  const waiting = buf.waiters.splice(0);
+  waiting.forEach((w) => w());
+}
+
 /**
  * Publish a command to the cluster agent without waiting for a reply.
- * Returns the request_id so the caller can subscribe to the stream endpoint.
- * Suitable for long-running commands (activate_node, add_node, etc.).
+ * Subscribes to the reply/stream NATS subjects BEFORE publishing so no
+ * messages are missed regardless of how fast the agent responds.
  */
 export async function publishCommand(
   clusterId: string,
@@ -90,11 +117,70 @@ export async function publishCommand(
   const nc = await getNatsConnection();
   const js = nc.jetstream();
   const commandSubject = `aura.cluster.${clusterId}.command`;
+  const streamSubject = `aura.cluster.${clusterId}.stream.${cmd.request_id}`;
+  const replySubject = `aura.cluster.${clusterId}.reply.${cmd.request_id}`;
+
+  const buf: StreamBuffer = { events: [], waiters: [], done: false };
+  streamBuffers.set(cmd.request_id, buf);
+  // Auto-cleanup after 15 minutes
+  setTimeout(() => streamBuffers.delete(cmd.request_id), 900_000);
+
+  // Subscribe BEFORE publishing — prevents race condition.
+  const streamSub = nc.subscribe(streamSubject);
+  const replySub = nc.subscribe(replySubject, { max: 1 });
+
+  (async () => {
+    try {
+      for await (const msg of streamSub) {
+        pushEvent(buf, { type: "stream", data: jc.decode(msg.data) });
+      }
+    } catch {}
+  })();
+
+  (async () => {
+    try {
+      for await (const msg of replySub) {
+        pushEvent(buf, { type: "reply", data: jc.decode(msg.data) });
+        streamSub.unsubscribe();
+      }
+    } catch {}
+  })();
 
   try {
     await js.publish(commandSubject, jc.encode(cmd));
   } catch (err) {
+    streamBuffers.delete(cmd.request_id);
+    streamSub.unsubscribe();
+    replySub.unsubscribe();
     throw new Error(`Failed to publish command to cluster ${clusterId}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
+ * Async generator that replays buffered stream events then yields live ones.
+ * Used by the SSE route — works correctly even if called after the agent
+ * has already finished processing.
+ */
+export async function* readCommandStream(
+  requestId: string
+): AsyncGenerator<StreamBuffer["events"][0]> {
+  const buf = streamBuffers.get(requestId);
+  if (!buf) {
+    yield { type: "reply", data: { type: "error", payload: { error: "Stream not found — request may have expired" } } };
+    return;
+  }
+
+  let index = 0;
+  while (true) {
+    if (index < buf.events.length) {
+      const event = buf.events[index++];
+      yield event;
+      if (event.type === "reply") return;
+    } else if (buf.done) {
+      return;
+    } else {
+      await new Promise<void>((resolve) => buf.waiters.push(resolve));
+    }
   }
 }
 
