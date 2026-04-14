@@ -94,8 +94,11 @@
       blockinfile:
         path: /etc/hosts
         block: |
+          {{ hostvars['localhost']['ansible_default_ipv4']['address'] }} {{ controller_hostname }}
           {% for node in nodes %}
+          {% if node.hostname != controller_hostname %}
           {{ node.ip }} {{ node.hostname }}
+          {% endif %}
           {% endfor %}
         marker: "# {mark} AURA CLUSTER NODES"
 
