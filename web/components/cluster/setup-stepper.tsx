@@ -61,6 +61,9 @@ async function runStreamingCommand(
         if (event.type === "stream") onLine(event.line);
         else if (event.type === "complete") {
           evtSource.close();
+          if (!event.success && event.payload?.error) {
+            onLine(`[error] ${event.payload.error}`);
+          }
           resolve(event.success);
         }
       } catch {}
