@@ -47,9 +47,10 @@ func (r *Runner) Run(ctx context.Context, opts *RunOpts, streamFn slurm.StreamFu
 		"vars_file", opts.VarsFile,
 	)
 
-	// Attach extra env vars for cleaner, more verbose streaming output.
+	// Attach extra env vars for cleaner streaming output.
+	// Use "default" callback — always available in ansible-core without extra collections.
 	ansibleCtx := slurm.WithEnv(ctx, map[string]string{
-		"ANSIBLE_STDOUT_CALLBACK": "yaml",
+		"ANSIBLE_STDOUT_CALLBACK": "default",
 		"ANSIBLE_FORCE_COLOR":     "0",
 		"PYTHONUNBUFFERED":        "1",
 	})
