@@ -73,7 +73,12 @@ echo "[aura] System prerequisites installed"
 # Install Ansible if not present
 if ! command -v ansible-playbook &>/dev/null; then
   echo "[aura] Installing Ansible..."
-  pip3 install --break-system-packages --quiet "ansible-core==2.16.*"
+  # --break-system-packages was added in pip 23; fall back gracefully on older pip
+  if pip3 install --help 2>/dev/null | grep -q 'break-system-packages'; then
+    pip3 install --break-system-packages --quiet "ansible-core==2.16.*"
+  else
+    pip3 install --quiet "ansible-core==2.16.*"
+  fi
   echo "[aura] Ansible installed"
 else
   echo "[aura] Ansible already installed: $(ansible-playbook --version | head -1)"
