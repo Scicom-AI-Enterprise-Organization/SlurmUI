@@ -71,7 +71,7 @@
       when: data_nfs_path | default('') != ''
 
     - name: Mount mgmt NFS on workers
-      mount:
+      ansible.posix.mount:
         path: "{{ mgmt_nfs_path }}"
         src: "{{ mgmt_nfs_server }}:{{ mgmt_nfs_path }}"
         fstype: nfs
@@ -84,7 +84,7 @@
         - ansible_host != mgmt_nfs_server
 
     - name: Mount data NFS on workers
-      mount:
+      ansible.posix.mount:
         path: "{{ data_nfs_path }}"
         src: "{{ data_nfs_server }}:{{ data_nfs_path }}"
         fstype: nfs

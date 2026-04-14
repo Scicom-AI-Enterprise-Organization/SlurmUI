@@ -80,9 +80,12 @@ if ! command -v ansible-playbook &>/dev/null; then
     pip3 install --quiet "ansible-core==2.16.*"
   fi
   echo "[aura] Ansible installed"
-else
-  echo "[aura] Ansible already installed: $(ansible-playbook --version | head -1)"
 fi
+
+# Install required Ansible collections (ansible-core is minimal; posix module needed for mount)
+echo "[aura] Installing Ansible collections..."
+ansible-galaxy collection install ansible.posix --quiet
+echo "[aura] Ansible collections installed"
 
 # Download Ansible playbooks
 echo "[aura] Downloading Ansible playbooks..."
