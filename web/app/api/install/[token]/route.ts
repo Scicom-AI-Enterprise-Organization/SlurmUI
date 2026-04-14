@@ -59,6 +59,17 @@ curl -fsSL "$AURA_URL/api/install/$TOKEN/binary?arch=$ARCH" -o /usr/local/bin/au
 chmod +x /usr/local/bin/aura-agent
 echo "[aura] Binary installed at /usr/local/bin/aura-agent"
 
+# Install Ansible if not present
+if ! command -v ansible-playbook &>/dev/null; then
+  echo "[aura] Installing Ansible..."
+  apt-get update -qq
+  apt-get install -y -qq python3-pip
+  pip3 install --break-system-packages --quiet ansible-core==2.16.*
+  echo "[aura] Ansible installed"
+else
+  echo "[aura] Ansible already installed: $(ansible-playbook --version | head -1)"
+fi
+
 # Download Ansible playbooks
 echo "[aura] Downloading Ansible playbooks..."
 mkdir -p /opt/aura/ansible
