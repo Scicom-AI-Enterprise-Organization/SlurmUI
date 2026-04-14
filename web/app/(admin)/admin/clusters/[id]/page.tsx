@@ -59,7 +59,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       </div>
 
       {cluster.status === "PROVISIONING" ? (
-        <SetupStepper clusterId={cluster.id} sshKeyConfigured={sshKeyConfigured} />
+        <SetupStepper clusterId={cluster.id} controllerHost={cluster.controllerHost} sshKeyConfigured={sshKeyConfigured} />
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-3">

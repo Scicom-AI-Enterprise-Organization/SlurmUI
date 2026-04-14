@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +14,7 @@ import Link from "next/link";
 interface NodeRow { hostname: string; ip: string; cpus: number; memoryMb: number; gpus: number }
 interface Partition { name: string; nodes: string; maxTime: string; isDefault: boolean }
 
-interface SetupStepperProps { clusterId: string; sshKeyConfigured: boolean }
+interface SetupStepperProps { clusterId: string; controllerHost: string; sshKeyConfigured: boolean }
 
 type StepStatus = "pending" | "running" | "done" | "error";
 
@@ -25,12 +25,17 @@ interface StepState {
 }
 
 function LogView({ lines, status }: { lines: string[]; status: StepStatus }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lines]);
   return (
     <div className="mt-3 h-48 overflow-y-auto rounded-md border bg-black p-3 font-mono text-xs text-green-400">
       {lines.length === 0 && <span className="text-gray-500">No output yet...</span>}
       {lines.map((l, i) => <div key={i} className="whitespace-pre-wrap leading-5">{l}</div>)}
       {status === "error" && <div className="mt-2 text-red-400">✗ Step failed</div>}
       {status === "done" && <div className="mt-2 text-green-300">✓ Step complete</div>}
+      <div ref={bottomRef} />
     </div>
   );
 }
@@ -72,7 +77,7 @@ async function runStreamingCommand(
   });
 }
 
-export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps) {
+export function SetupStepper({ clusterId, controllerHost, sshKeyConfigured }: SetupStepperProps) {
   const router = useRouter();
   const [currentStep, setCurrentStep] = useState(0);
   const [stepStates, setStepStates] = useState<StepState[]>([
@@ -88,6 +93,17 @@ export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps)
   // Nodes form
   const [nodes, setNodes] = useState<NodeRow[]>([{ hostname: "", ip: "", cpus: 8, memoryMb: 16384, gpus: 0 }]);
   const [controllerIsWorker, setControllerIsWorker] = useState(false);
+
+  const handleControllerIsWorkerChange = (checked: boolean) => {
+    setControllerIsWorker(checked);
+    if (checked) {
+      setNodes((prev) => {
+        const updated = [...prev];
+        updated[0] = { ...updated[0], hostname: controllerHost };
+        return updated;
+      });
+    }
+  };
 
   // Partitions form
   const [partitions, setPartitions] = useState<Partition[]>([{ name: "compute", nodes: "", maxTime: "24:00:00", isDefault: true }]);
@@ -258,7 +274,7 @@ export function SetupStepper({ clusterId, sshKeyConfigured }: SetupStepperProps)
                       <Checkbox
                         id="ctrl-worker"
                         checked={controllerIsWorker}
-                        onCheckedChange={(v) => setControllerIsWorker(!!v)}
+                        onCheckedChange={(v) => handleControllerIsWorkerChange(!!v)}
                       />
                       <Label htmlFor="ctrl-worker" className="text-sm">Controller node is also a compute node</Label>
                     </div>
