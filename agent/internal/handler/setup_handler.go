@@ -251,7 +251,11 @@ func (h *SetupHandler) probeNode(ctx context.Context, ip, sshKeyPath string, emi
 
 	sshResult, err := slurm.RunCommand(ctx, "ssh", sshArgs...)
 	if err != nil || sshResult.ExitCode != 0 {
-		emit(fmt.Sprintf("[aura] ✗ %s — SSH not accessible (key not authorized?), skipping", ip))
+		reason := sshResult.Stderr
+		if reason == "" && err != nil {
+			reason = err.Error()
+		}
+		emit(fmt.Sprintf("[aura] ✗ %s — SSH failed: %s", ip, strings.TrimSpace(reason)))
 		return false
 	}
 
