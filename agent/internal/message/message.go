@@ -28,6 +28,7 @@ const (
 	CmdSetupNodes      CommandType = "setup_nodes"
 	CmdSetupPartitions CommandType = "setup_partitions"
 	CmdClusterHealth   CommandType = "cluster_health"
+	CmdTeardown        CommandType = "teardown"
 
 	// User provisioning
 	CmdProvisionUser CommandType = "provision_user"
@@ -175,6 +176,14 @@ type PartitionDef struct {
 // SetupPartitionsPayload is the payload for setup_partitions commands.
 type SetupPartitionsPayload struct {
 	Partitions []PartitionDef `json:"partitions"`
+}
+
+// TeardownPayload is the payload for teardown commands.
+type TeardownPayload struct {
+	Nodes         []NodeEntry `json:"nodes"`
+	SSHPrivateKey string      `json:"ssh_private_key,omitempty"` // base64-encoded
+	MgmtNfsPath   string      `json:"mgmt_nfs_path,omitempty"`
+	DataNfsPath   string      `json:"data_nfs_path,omitempty"`
 }
 
 // WorkerHost is a hostname/IP pair for Ansible inventory.

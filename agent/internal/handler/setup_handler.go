@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/scicom/aura/agent/internal/ansible"
 	"github.com/scicom/aura/agent/internal/message"
@@ -235,6 +237,121 @@ func (h *SetupHandler) HandleSetupPartitions(ctx context.Context, cmd *message.C
 	}
 
 	return h.publisher.SendResult(cmd.RequestID, result)
+}
+
+// HandleTeardown removes all Aura-installed Slurm config from every node and
+// then self-uninstalls the agent from the controller.
+func (h *SetupHandler) HandleTeardown(ctx context.Context, cmd *message.Command) error {
+	var payload message.TeardownPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("invalid teardown payload: %w", err))
+	}
+
+	h.logger.Info("tearing down cluster", "request_id", cmd.RequestID, "workers", len(payload.Nodes))
+
+	seq := 0
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+
+	// Save SSH key if provided.
+	sshKeyPath := ""
+	if payload.SSHPrivateKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(payload.SSHPrivateKey)
+		if err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to decode SSH key: %w", err))
+		}
+		sshKeyPath = "/root/.ssh/aura_cluster_key"
+		if err := os.WriteFile(sshKeyPath, keyBytes, 0600); err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to write SSH key: %w", err))
+		}
+		emit("[aura] SSH key loaded")
+	}
+
+	// Build inventory: controller (localhost) + workers.
+	sshKeyArg := ""
+	if sshKeyPath != "" {
+		sshKeyArg = " ansible_ssh_private_key_file=" + sshKeyPath
+	}
+	var sb strings.Builder
+	sb.WriteString("[slurm_controllers]\n")
+	sb.WriteString("localhost ansible_connection=local\n\n")
+	sb.WriteString("[slurm_workers]\n")
+	for _, n := range payload.Nodes {
+		sb.WriteString(fmt.Sprintf(
+			"%s ansible_host=%s ansible_user=root ansible_python_interpreter=/usr/bin/python3%s\n",
+			n.Hostname, n.IP, sshKeyArg,
+		))
+	}
+
+	invFile, err := os.CreateTemp("", "aura-teardown-inv-*.ini")
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create inventory: %w", err))
+	}
+	invFile.WriteString(sb.String())
+	invFile.Close()
+	defer os.Remove(invFile.Name())
+
+	// Write vars file.
+	type teardownVars struct {
+		MgmtNfsPath string `json:"mgmt_nfs_path"`
+		DataNfsPath string `json:"data_nfs_path"`
+	}
+	varsData, err := json.Marshal(teardownVars{
+		MgmtNfsPath: payload.MgmtNfsPath,
+		DataNfsPath: payload.DataNfsPath,
+	})
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to marshal vars: %w", err))
+	}
+	varsPath, err := writeTempConfig(json.RawMessage(varsData))
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer os.Remove(varsPath)
+
+	streamFn := func(line string, seq int) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+	}
+
+	opts := &ansible.RunOpts{
+		PlaybookDir: h.playbookDir,
+		Playbook:    "teardown.yml",
+		VarsFile:    varsPath,
+		Inventory:   invFile.Name(),
+	}
+
+	emit("[aura] Starting teardown playbook...")
+	result, err := h.runner.Run(ctx, opts, streamFn)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("teardown playbook failed: %w", err))
+	}
+	if result.ExitCode != 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("teardown exited with code %d: %s", result.ExitCode, result.Stderr))
+	}
+
+	emit("[aura] Teardown complete. Scheduling agent self-uninstall...")
+
+	// Send success reply BEFORE uninstalling — gives NATS time to deliver.
+	if sendErr := h.publisher.SendResult(cmd.RequestID, map[string]string{"status": "ok"}); sendErr != nil {
+		h.logger.Error("failed to send teardown result", "error", sendErr)
+	}
+
+	// Spawn a detached subprocess (new session) that stops and removes the agent
+	// after a brief delay, giving the reply above time to reach the web service.
+	cleanup := "sleep 5;" +
+		"systemctl stop aura-agent 2>/dev/null || true;" +
+		"systemctl disable aura-agent 2>/dev/null || true;" +
+		"rm -f /etc/systemd/system/aura-agent.service;" +
+		"systemctl daemon-reload 2>/dev/null || true;" +
+		"rm -rf /opt/aura /etc/aura-agent;" +
+		"rm -f /usr/local/bin/aura-agent"
+	selfCleanup := exec.Command("bash", "-c", cleanup)
+	selfCleanup.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	_ = selfCleanup.Start()
+
+	return nil
 }
 
 // HandleClusterHealth runs sinfo and squeue, streaming their output as log lines.

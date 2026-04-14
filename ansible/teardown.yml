@@ -1,0 +1,116 @@
+---
+- name: Teardown Slurm on worker nodes
+  hosts: slurm_workers
+  become: true
+  tasks:
+    - name: Stop slurmd
+      service:
+        name: slurmd
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Stop munge
+      service:
+        name: munge
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Unmount and remove mgmt NFS from fstab
+      ansible.posix.mount:
+        path: "{{ mgmt_nfs_path }}"
+        state: absent
+      when: mgmt_nfs_path | default('') != ''
+      ignore_errors: true
+
+    - name: Unmount and remove data NFS from fstab
+      ansible.posix.mount:
+        path: "{{ data_nfs_path }}"
+        state: absent
+      when: data_nfs_path | default('') != ''
+      ignore_errors: true
+
+    - name: Purge Slurm and munge packages
+      apt:
+        name:
+          - slurmd
+          - slurm-client
+          - munge
+          - libmunge-dev
+          - nfs-common
+        state: absent
+        purge: true
+      ignore_errors: true
+
+    - name: Remove Slurm config directory
+      file:
+        path: /etc/slurm
+        state: absent
+
+    - name: Remove Slurm runtime and spool directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/slurm
+        - /var/log/slurm
+        - /var/run/slurm
+      ignore_errors: true
+
+    - name: Remove Aura /etc/hosts block
+      blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} AURA CLUSTER NODES"
+        state: absent
+
+- name: Teardown Slurm on controller
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Stop slurmctld
+      service:
+        name: slurmctld
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Stop munge on controller
+      service:
+        name: munge
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Purge Slurm packages on controller
+      apt:
+        name:
+          - slurm-wlm
+          - slurmctld
+          - slurm-client
+          - munge
+          - libmunge-dev
+        state: absent
+        purge: true
+      ignore_errors: true
+
+    - name: Remove Slurm config directory on controller
+      file:
+        path: /etc/slurm
+        state: absent
+
+    - name: Remove Slurm runtime and spool directories on controller
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/slurm
+        - /var/log/slurm
+        - /var/run/slurm
+      ignore_errors: true
+
+    - name: Remove Aura /etc/hosts block on controller
+      blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} AURA CLUSTER NODES"
+        state: absent

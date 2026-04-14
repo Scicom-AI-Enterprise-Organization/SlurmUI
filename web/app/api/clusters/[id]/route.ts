@@ -76,8 +76,9 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Delete all jobs first
+  // Delete dependent records before removing the cluster.
   await prisma.job.deleteMany({ where: { clusterId: id } });
+  await prisma.clusterUser.deleteMany({ where: { clusterId: id } });
   await prisma.cluster.delete({ where: { id } });
 
   return NextResponse.json({ success: true });
