@@ -238,11 +238,19 @@
         name: slurmctld
         state: restarted
 
-- name: Sync updated nodes.conf to workers and restart slurmd
+- name: Sync updated Slurm config to workers and restart slurmd
   hosts: slurm_workers
   become: true
   tasks:
-    - name: Copy auto-detected nodes.conf to workers
+    - name: Sync slurm.conf to workers
+      copy:
+        src: /etc/slurm/slurm.conf
+        dest: /etc/slurm/slurm.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Sync auto-detected nodes.conf to workers
       copy:
         src: /etc/slurm/nodes.conf
         dest: /etc/slurm/nodes.conf
@@ -250,7 +258,7 @@
         group: slurm
         mode: "0644"
 
-    - name: Restart slurmd to load updated node specs
+    - name: Restart slurmd to load updated config
       service:
         name: slurmd
         state: restarted
