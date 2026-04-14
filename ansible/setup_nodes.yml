@@ -75,7 +75,9 @@
         path: "{{ mgmt_nfs_path }}"
         src: "{{ mgmt_nfs_server }}:{{ mgmt_nfs_path }}"
         fstype: nfs
-        opts: defaults,noatime
+        # soft + short timeo so mount fails fast (instead of hanging) if server
+        # is unreachable or export doesn't exist. timeo is in 0.1s units → 30 = 3s.
+        opts: soft,timeo=30,retrans=3,noatime
         state: mounted
       # Skip if this host IS the NFS server (would deadlock).
       when:
@@ -88,7 +90,7 @@
         path: "{{ data_nfs_path }}"
         src: "{{ data_nfs_server }}:{{ data_nfs_path }}"
         fstype: nfs
-        opts: defaults,noatime
+        opts: soft,timeo=30,retrans=3,noatime
         state: mounted
       # Skip if this host IS the NFS server (would deadlock).
       when:
