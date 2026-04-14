@@ -4,12 +4,13 @@
 
 # ---- Agent binary (linux/amd64 for most K8s nodes) ----
 FROM golang:1.25-alpine AS agent-builder
+ARG BUILD_VERSION=dev
 WORKDIR /build
 COPY agent/go.mod agent/go.sum ./
 RUN go mod download
 COPY agent/ .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags "-s -w -X main.Version=$(cat go.mod | grep ^module | awk '{print "0.1.0"}')" \
+    -ldflags "-s -w -X main.Version=${BUILD_VERSION}" \
     -o aura-agent ./cmd/aura-agent
 
 # ---- Node.js dependency install ----

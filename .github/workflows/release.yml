@@ -51,6 +51,8 @@ jobs:
           push: true
           platforms: ${{ matrix.platform }}
           tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_WEB_REPO }}:${{ github.ref_name }}-${{ matrix.suffix }}
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
 
   # ── 1b. Merge platform images into a multi-arch manifest ──────────────────
   merge-web:
