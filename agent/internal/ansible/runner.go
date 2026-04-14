@@ -50,9 +50,10 @@ func (r *Runner) Run(ctx context.Context, opts *RunOpts, streamFn slurm.StreamFu
 	// Attach extra env vars for cleaner streaming output.
 	// Use "default" callback — always available in ansible-core without extra collections.
 	ansibleCtx := slurm.WithEnv(ctx, map[string]string{
-		"ANSIBLE_STDOUT_CALLBACK": "default",
-		"ANSIBLE_FORCE_COLOR":     "0",
-		"PYTHONUNBUFFERED":        "1",
+		"ANSIBLE_STDOUT_CALLBACK":  "default",
+		"ANSIBLE_FORCE_COLOR":      "0",
+		"PYTHONUNBUFFERED":         "1",
+		"ANSIBLE_HOST_KEY_CHECKING": "False",
 	})
 
 	result, err := slurm.RunCommandStreaming(ansibleCtx, streamFn, "ansible-playbook", args...)
