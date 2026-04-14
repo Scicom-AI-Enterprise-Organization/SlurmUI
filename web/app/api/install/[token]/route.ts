@@ -84,7 +84,7 @@ fi
 
 # Install required Ansible collections (ansible-core is minimal; posix module needed for mount)
 echo "[aura] Installing Ansible collections..."
-ansible-galaxy collection install ansible.posix --quiet
+ansible-galaxy collection install ansible.posix
 echo "[aura] Ansible collections installed"
 
 # Download Ansible playbooks
