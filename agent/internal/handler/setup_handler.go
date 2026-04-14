@@ -235,21 +235,13 @@ func (h *SetupHandler) HandleSetupPartitions(ctx context.Context, cmd *message.C
 	return h.publisher.SendResult(cmd.RequestID, result)
 }
 
-// probeNode returns true if ip is reachable via ping AND SSH.
-// It logs progress/result lines via emit.
+// probeNode returns true if ip is reachable via SSH.
+// Ping is intentionally skipped — ICMP is commonly blocked in cloud security groups.
 func (h *SetupHandler) probeNode(ctx context.Context, ip, sshKeyPath string, emit func(string)) bool {
-	// 1. Ping (1 packet, 3 s timeout).
-	pingResult, err := slurm.RunCommand(ctx, "ping", "-c1", "-W3", ip)
-	if err != nil || pingResult.ExitCode != 0 {
-		emit(fmt.Sprintf("[aura] ✗ %s — unreachable (ping failed), skipping", ip))
-		return false
-	}
-
-	// 2. SSH probe — connect only, no command, 5 s timeout.
 	sshArgs := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=5",
+		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 	}
 	if sshKeyPath != "" {
@@ -263,7 +255,7 @@ func (h *SetupHandler) probeNode(ctx context.Context, ip, sshKeyPath string, emi
 		return false
 	}
 
-	emit(fmt.Sprintf("[aura] ✓ %s — reachable", ip))
+	emit(fmt.Sprintf("[aura] ✓ %s — reachable via SSH", ip))
 	return true
 }
 
