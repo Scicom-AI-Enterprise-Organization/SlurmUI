@@ -215,3 +215,42 @@
         name: slurmd
         state: started
         enabled: true
+
+- name: Rewrite nodes.conf with actual hardware specs detected from workers
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Write nodes.conf using real CPU/memory from worker Ansible facts
+      copy:
+        dest: /etc/slurm/nodes.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+        content: |
+          {% for host in groups['slurm_workers'] %}
+          {% set ns = namespace(gpus=0) %}
+          {% for node in nodes %}{% if node.hostname == host %}{% set ns.gpus = node.gpus | int %}{% endif %}{% endfor %}
+          NodeName={{ host }} CPUs={{ hostvars[host]['ansible_processor_vcpus'] | int }} RealMemory={{ hostvars[host]['ansible_memtotal_mb'] | int - 512 }}{% if ns.gpus > 0 %} Gres=gpu:{{ ns.gpus }}{% endif %} State=UNKNOWN
+          {% endfor %}
+
+    - name: Restart slurmctld to load updated node specs
+      service:
+        name: slurmctld
+        state: restarted
+
+- name: Sync updated nodes.conf to workers and restart slurmd
+  hosts: slurm_workers
+  become: true
+  tasks:
+    - name: Copy auto-detected nodes.conf to workers
+      copy:
+        src: /etc/slurm/nodes.conf
+        dest: /etc/slurm/nodes.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Restart slurmd to load updated node specs
+      service:
+        name: slurmd
+        state: restarted
