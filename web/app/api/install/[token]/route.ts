@@ -40,9 +40,22 @@ TOKEN="${token}"
 echo "[aura] Installing aura-agent for cluster: ${cluster.name}"
 echo "[aura] CLUSTER_ID: $CLUSTER_ID"
 
-# Download agent binary
-echo "[aura] Downloading agent binary..."
-curl -fsSL "$AURA_URL/api/install/$TOKEN/binary" -o /usr/local/bin/aura-agent
+# Detect architecture
+MACHINE=$(uname -m)
+case "$MACHINE" in
+  x86_64)  ARCH="amd64" ;;
+  aarch64) ARCH="arm64" ;;
+  arm64)   ARCH="arm64" ;;
+  *)
+    echo "[aura] ERROR: Unsupported architecture: $MACHINE" >&2
+    exit 1
+    ;;
+esac
+echo "[aura] Detected architecture: $ARCH ($MACHINE)"
+
+# Download agent binary for this arch
+echo "[aura] Downloading agent binary ($ARCH)..."
+curl -fsSL "$AURA_URL/api/install/$TOKEN/binary?arch=$ARCH" -o /usr/local/bin/aura-agent
 chmod +x /usr/local/bin/aura-agent
 echo "[aura] Binary installed at /usr/local/bin/aura-agent"
 

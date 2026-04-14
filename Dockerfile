@@ -2,7 +2,7 @@
 # This Dockerfile is used by the CI/CD pipeline for K8s/ArgoCD deployment.
 # For local dev, use web/docker-compose.dev.yml instead.
 
-# ---- Agent binary (linux/amd64 for most K8s nodes) ----
+# ---- Agent binaries (amd64 + arm64 for x86 and GPU/ARM nodes) ----
 FROM golang:1.25-alpine AS agent-builder
 ARG BUILD_VERSION=dev
 WORKDIR /build
@@ -11,7 +11,10 @@ RUN go mod download
 COPY agent/ .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags "-s -w -X main.Version=${BUILD_VERSION}" \
-    -o aura-agent ./cmd/aura-agent
+    -o aura-agent-amd64 ./cmd/aura-agent && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+    -ldflags "-s -w -X main.Version=${BUILD_VERSION}" \
+    -o aura-agent-arm64 ./cmd/aura-agent
 
 # ---- Node.js dependency install ----
 FROM node:20-alpine AS deps
@@ -61,8 +64,9 @@ COPY web/lib ./lib
 # Ansible playbooks bundled into the image
 COPY ansible/ /opt/aura/ansible/
 
-# Agent binary for Ansible to deploy onto cluster nodes
-COPY --from=agent-builder /build/aura-agent /opt/aura/aura-agent
+# Agent binaries for both architectures
+COPY --from=agent-builder /build/aura-agent-amd64 /opt/aura/aura-agent-amd64
+COPY --from=agent-builder /build/aura-agent-arm64 /opt/aura/aura-agent-arm64
 
 # SSH dir for ansible (key is mounted at runtime via K8s Secret)
 RUN mkdir -p /home/nextjs/.ssh && chown nextjs:nodejs /home/nextjs/.ssh
@@ -71,6 +75,6 @@ USER nextjs
 EXPOSE 3000
 
 ENV ANSIBLE_PLAYBOOKS_DIR=/opt/aura/ansible
-ENV AURA_AGENT_BINARY_SRC=/opt/aura/aura-agent
+ENV AURA_AGENT_BINARY_DIR=/opt/aura
 
 CMD ["npx", "tsx", "server.ts"]
