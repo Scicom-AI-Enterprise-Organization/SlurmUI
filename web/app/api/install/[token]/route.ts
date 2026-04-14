@@ -59,6 +59,12 @@ curl -fsSL "$AURA_URL/api/install/$TOKEN/binary?arch=$ARCH" -o /usr/local/bin/au
 chmod +x /usr/local/bin/aura-agent
 echo "[aura] Binary installed at /usr/local/bin/aura-agent"
 
+# Download Ansible playbooks
+echo "[aura] Downloading Ansible playbooks..."
+mkdir -p /opt/aura/ansible
+curl -fsSL "$AURA_URL/api/install/$TOKEN/playbooks" | tar xzf - -C /opt/aura/ansible
+echo "[aura] Playbooks extracted to /opt/aura/ansible"
+
 # Write environment file
 mkdir -p /etc/aura-agent
 cat > /etc/aura-agent/agent.env <<EOF
