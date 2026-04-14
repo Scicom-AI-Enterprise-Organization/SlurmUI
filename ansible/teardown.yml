@@ -87,6 +87,7 @@
         name:
           - slurm-wlm
           - slurmctld
+          - slurmd
           - slurm-client
           - munge
           - libmunge-dev

@@ -15,11 +15,19 @@
     - name: Install Slurm controller packages
       apt:
         name:
-          - slurm-wlm
           - slurmctld
+          - slurm-client
           - munge
         state: present
         update_cache: true
+
+    - name: Stop and disable slurmd on controller (not a worker node)
+      service:
+        name: slurmd
+        state: stopped
+        enabled: false
+      when: not controller_is_worker
+      ignore_errors: true
 
     - name: Create Slurm runtime directories
       file:
@@ -132,10 +140,10 @@
         group: munge
         mode: "0400"
 
-    - name: Enable and start munge on workers
+    - name: Restart munge on workers to load new key
       service:
         name: munge
-        state: started
+        state: restarted
         enabled: true
 
     - name: Create mgmt mount point on workers
