@@ -27,6 +27,7 @@ const (
 	CmdTestNfs         CommandType = "test_nfs"
 	CmdSetupNodes      CommandType = "setup_nodes"
 	CmdSetupPartitions CommandType = "setup_partitions"
+	CmdClusterHealth   CommandType = "cluster_health"
 
 	// User provisioning
 	CmdProvisionUser CommandType = "provision_user"
@@ -151,6 +152,7 @@ type NodeEntry struct {
 
 // SetupNodesPayload is the payload for setup_nodes commands.
 type SetupNodesPayload struct {
+	ClusterName        string      `json:"cluster_name"`
 	ControllerHostname string      `json:"controller_hostname"`
 	ControllerIsWorker bool        `json:"controller_is_worker"`
 	Nodes              []NodeEntry `json:"nodes"`

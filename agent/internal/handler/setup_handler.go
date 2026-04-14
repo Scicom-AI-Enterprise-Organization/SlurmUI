@@ -129,6 +129,7 @@ func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Comman
 
 	// Write vars file for Ansible.
 	type nodeVars struct {
+		ClusterName        string              `json:"cluster_name"`
 		ControllerHostname string              `json:"controller_hostname"`
 		ControllerIsWorker bool                `json:"controller_is_worker"`
 		Nodes              []message.NodeEntry `json:"nodes"`
@@ -138,6 +139,7 @@ func (h *SetupHandler) HandleSetupNodes(ctx context.Context, cmd *message.Comman
 		DataNfsPath        string              `json:"data_nfs_path"`
 	}
 	vars := nodeVars{
+		ClusterName:        payload.ClusterName,
 		ControllerHostname: payload.ControllerHostname,
 		ControllerIsWorker: payload.ControllerIsWorker,
 		Nodes:              payload.Nodes,
@@ -233,6 +235,45 @@ func (h *SetupHandler) HandleSetupPartitions(ctx context.Context, cmd *message.C
 	}
 
 	return h.publisher.SendResult(cmd.RequestID, result)
+}
+
+// HandleClusterHealth runs sinfo and squeue, streaming their output as log lines.
+func (h *SetupHandler) HandleClusterHealth(ctx context.Context, cmd *message.Command) error {
+	h.logger.Info("running cluster health check", "request_id", cmd.RequestID)
+
+	seq := 0
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+
+	emit("[aura] Running sinfo...")
+	sinfoResult, err := slurm.RunCommand(ctx, "sinfo")
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("sinfo failed: %w", err))
+	}
+	if sinfoResult.ExitCode != 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("sinfo failed (exit %d): %s", sinfoResult.ExitCode, sinfoResult.Stderr))
+	}
+	for _, line := range strings.Split(strings.TrimRight(sinfoResult.Stdout, "\n"), "\n") {
+		if line != "" {
+			emit(line)
+		}
+	}
+
+	emit("[aura] Running squeue...")
+	squeueResult, err := slurm.RunCommand(ctx, "squeue")
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("squeue failed: %w", err))
+	}
+	for _, line := range strings.Split(strings.TrimRight(squeueResult.Stdout, "\n"), "\n") {
+		if line != "" {
+			emit(line)
+		}
+	}
+
+	emit("[aura] Slurm health OK")
+	return h.publisher.SendResult(cmd.RequestID, map[string]string{"status": "ok"})
 }
 
 // probeNode returns true if ip is reachable via SSH.

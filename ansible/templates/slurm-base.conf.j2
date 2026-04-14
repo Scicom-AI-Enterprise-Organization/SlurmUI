@@ -1,0 +1,28 @@
+# Managed by Aura — do not edit manually
+ClusterName={{ cluster_name }}
+SlurmctldHost={{ controller_hostname }}
+
+AuthType=auth/munge
+SlurmUser=slurm
+SlurmctldPort=6817
+SlurmdPort=6818
+
+StateSaveLocation=/var/lib/slurm/slurmctld
+SlurmdSpoolDir=/var/lib/slurm/slurmd
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+SlurmctldPidFile=/var/run/slurm/slurmctld.pid
+SlurmdPidFile=/var/run/slurm/slurmd.pid
+
+{% if nodes | selectattr('gpus', 'gt', 0) | list | length > 0 %}
+GresTypes=gpu
+{% endif %}
+AccountingStorageType=accounting_storage/none
+ProctrackType=proctrack/linuxproc
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+OverSubscribe=YES
+
+Include /etc/slurm/nodes.conf
+Include /etc/slurm/partitions.conf

@@ -49,6 +49,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     request_id: requestId,
     type: "setup_nodes",
     payload: {
+      cluster_name: cluster.name,
       controller_hostname: cluster.controllerHost,
       controller_is_worker: controllerIsWorker ?? false,
       nodes,

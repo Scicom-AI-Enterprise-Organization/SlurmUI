@@ -19,7 +19,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   const requestId = randomUUID();
   await publishCommand(id, {
     request_id: requestId,
-    type: "node_status",
+    type: "cluster_health",
     payload: {},
   });
 

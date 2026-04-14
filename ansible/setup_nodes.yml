@@ -1,5 +1,5 @@
 ---
-- name: Write /etc/hosts and configure Slurm nodes on master
+- name: Configure Slurm controller on master
   hosts: slurm_controllers
   become: true
   tasks:
@@ -17,8 +17,32 @@
         name:
           - slurm-wlm
           - slurmctld
+          - munge
         state: present
         update_cache: true
+
+    - name: Create Slurm runtime directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: slurm
+        group: slurm
+        mode: "0755"
+      loop:
+        - /var/lib/slurm/slurmctld
+        - /var/lib/slurm/slurmd
+        - /var/log/slurm
+        - /var/run/slurm
+        - /etc/slurm
+
+    - name: Write slurm.conf (only if ClusterName not already present)
+      template:
+        src: slurm-base.conf.j2
+        dest: /etc/slurm/slurm.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+        force: no
 
     - name: Write Slurm node definitions
       template:
@@ -28,12 +52,39 @@
         group: slurm
         mode: "0644"
 
-    - name: Ensure nodes.conf is included in slurm.conf
-      lineinfile:
-        path: /etc/slurm/slurm.conf
-        line: "Include /etc/slurm/nodes.conf"
-        state: present
-        create: true
+    - name: Ensure partitions.conf exists (written later by setup_partitions)
+      file:
+        path: /etc/slurm/partitions.conf
+        state: touch
+        owner: slurm
+        group: slurm
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Generate munge key if not present
+      command: mungekey --create --keyfile=/etc/munge/munge.key
+      args:
+        creates: /etc/munge/munge.key
+
+    - name: Set munge key permissions
+      file:
+        path: /etc/munge/munge.key
+        owner: munge
+        group: munge
+        mode: "0400"
+
+    - name: Enable and start munge
+      service:
+        name: munge
+        state: started
+        enabled: true
+
+    - name: Enable and start slurmctld
+      service:
+        name: slurmctld
+        state: started
+        enabled: true
 
 - name: Install Slurm compute daemon on workers
   hosts: slurm_workers
@@ -53,8 +104,36 @@
         name:
           - slurmd
           - nfs-common
+          - munge
         state: present
         update_cache: true
+
+    - name: Create Slurm runtime directories on workers
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: slurm
+        group: slurm
+        mode: "0755"
+      loop:
+        - /var/lib/slurm/slurmd
+        - /var/log/slurm
+        - /var/run/slurm
+        - /etc/slurm
+
+    - name: Deploy munge key on workers
+      copy:
+        src: /etc/munge/munge.key
+        dest: /etc/munge/munge.key
+        owner: munge
+        group: munge
+        mode: "0400"
+
+    - name: Enable and start munge on workers
+      service:
+        name: munge
+        state: started
+        enabled: true
 
     - name: Create mgmt mount point on workers
       file:
@@ -75,11 +154,8 @@
         path: "{{ mgmt_nfs_path }}"
         src: "{{ mgmt_nfs_server }}:{{ mgmt_nfs_path }}"
         fstype: nfs
-        # soft + short timeo so mount fails fast (instead of hanging) if server
-        # is unreachable or export doesn't exist. timeo is in 0.1s units → 30 = 3s.
         opts: soft,timeo=30,retrans=3,noatime
         state: mounted
-      # Skip if this host IS the NFS server (would deadlock).
       when:
         - mgmt_nfs_server | default('') != ''
         - mgmt_nfs_path | default('') != ''
@@ -92,8 +168,39 @@
         fstype: nfs
         opts: soft,timeo=30,retrans=3,noatime
         state: mounted
-      # Skip if this host IS the NFS server (would deadlock).
       when:
         - data_nfs_server | default('') != ''
         - data_nfs_path | default('') != ''
         - ansible_host != data_nfs_server
+
+    - name: Copy slurm.conf from controller to workers
+      copy:
+        src: /etc/slurm/slurm.conf
+        dest: /etc/slurm/slurm.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Copy nodes.conf from controller to workers
+      copy:
+        src: /etc/slurm/nodes.conf
+        dest: /etc/slurm/nodes.conf
+        owner: slurm
+        group: slurm
+        mode: "0644"
+
+    - name: Ensure partitions.conf exists on workers
+      file:
+        path: /etc/slurm/partitions.conf
+        state: touch
+        owner: slurm
+        group: slurm
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Enable and start slurmd on workers
+      service:
+        name: slurmd
+        state: started
+        enabled: true

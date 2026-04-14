@@ -75,6 +75,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cmd *message.Command) error {
 		return d.setup.HandleSetupNodes(ctx, cmd)
 	case message.CmdSetupPartitions:
 		return d.setup.HandleSetupPartitions(ctx, cmd)
+	case message.CmdClusterHealth:
+		return d.setup.HandleClusterHealth(ctx, cmd)
 
 	// User provisioning commands
 	case message.CmdProvisionUser:
