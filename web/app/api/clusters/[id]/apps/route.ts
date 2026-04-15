@@ -55,7 +55,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { type, partition, ntasks, time_limit } = body;
+  const { type, partition, nodes, cpus_per_node, gpus_per_node, time_limit } = body;
   if (!type || !["shell", "jupyter"].includes(type)) {
     return NextResponse.json({ error: "type must be 'shell' or 'jupyter'" }, { status: 400 });
   }
@@ -87,7 +87,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       partition,
       username: dbUser.unixUsername,
       nfs_home: nfsHome,
-      ntasks: ntasks ?? 1,
+      nodes: nodes ?? 1,
+      cpus_per_node: cpus_per_node ?? 1,
+      gpus_per_node: gpus_per_node ?? 0,
       time_limit: time_limit ?? "2:00:00",
       controller_host: cluster.controllerHost,
     },

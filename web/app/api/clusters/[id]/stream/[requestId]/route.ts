@@ -48,6 +48,16 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
             // reply — final event
             clearTimeout(timer);
             const data = event.data as any;
+
+            // Synthetic error when stream buffer never existed — buffer expired or
+            // watch_job was never dispatched. Don't clobber DB status in this case.
+            const isSynthetic = data.payload?.error === "Stream not found — request may have expired";
+            if (isSynthetic) {
+              send({ type: "complete", success: false, payload: data.payload });
+              try { controller.close(); } catch {}
+              return;
+            }
+
             const success = data.type === "result";
             const exitCode: number = success ? (data.payload?.exit_code ?? 0) : -1;
 
@@ -57,18 +67,13 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
               data: {
                 status: success && exitCode === 0 ? "COMPLETED" : "FAILED",
                 exitCode,
-                // Always persist output (even empty string) so the UI can render it.
                 output: data.payload?.output ?? null,
               },
             }).catch(() => {
               // requestId may not be a job ID (e.g. setup commands) — ignore
             });
 
-            send({
-              type: "complete",
-              success,
-              payload: data.payload,
-            });
+            send({ type: "complete", success, payload: data.payload });
             try { controller.close(); } catch {}
             return;
           }

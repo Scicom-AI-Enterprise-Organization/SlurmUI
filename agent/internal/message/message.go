@@ -263,7 +263,9 @@ type LaunchAppPayload struct {
 	Partition      string `json:"partition"`
 	Username       string `json:"username"`
 	NfsHome        string `json:"nfs_home"`
-	NTasks         int    `json:"ntasks"`
+	Nodes          int    `json:"nodes"`           // --nodes (shell)
+	CpusPerNode    int    `json:"cpus_per_node"`   // --cpus-per-task (shell)
+	GpusPerNode    int    `json:"gpus_per_node"`   // --gpus-per-node (shell, optional)
 	TimeLimit      string `json:"time_limit"`
 	ControllerHost string `json:"controller_host"` // used to build Jupyter URL
 }

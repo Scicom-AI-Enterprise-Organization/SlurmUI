@@ -71,9 +71,13 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 	}
 
 	// Build the srun command — runs as the provisioned user on a compute node.
-	ntasks := payload.NTasks
-	if ntasks <= 0 {
-		ntasks = 1
+	nodes := payload.Nodes
+	if nodes <= 0 {
+		nodes = 1
+	}
+	cpusPerNode := payload.CpusPerNode
+	if cpusPerNode <= 0 {
+		cpusPerNode = 1
 	}
 	timeLimit := payload.TimeLimit
 	if timeLimit == "" {
@@ -85,10 +89,15 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 		srunArgs = append(srunArgs, "--partition="+payload.Partition)
 	}
 	srunArgs = append(srunArgs,
-		fmt.Sprintf("--ntasks=%d", ntasks),
+		fmt.Sprintf("--nodes=%d", nodes),
+		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
+		"--ntasks-per-node=1",
 		"--time="+timeLimit,
-		"--pty", "/bin/bash", "--login",
 	)
+	if payload.GpusPerNode > 0 {
+		srunArgs = append(srunArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
+	}
+	srunArgs = append(srunArgs, "--pty", "/bin/bash", "--login")
 
 	var c *exec.Cmd
 	if payload.Username != "" {

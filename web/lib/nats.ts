@@ -67,7 +67,13 @@ export async function sendCommandAndWait(
       try {
         for await (const msg of sub) {
           clearTimeout(timer);
-          resolve(jc.decode(msg.data));
+          // Agent replies are {type, payload} — unwrap and reject on errors.
+          const reply = jc.decode(msg.data) as { type: string; payload: unknown };
+          if (reply.type === "error") {
+            reject(new Error((reply.payload as any)?.error ?? "Agent returned error"));
+          } else {
+            resolve(reply.payload);
+          }
           return;
         }
       } catch (err) {
