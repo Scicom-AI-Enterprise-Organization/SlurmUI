@@ -18,30 +18,30 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
   useEffect(() => {
     if (!isRunning) return;
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/api/ws?clusterId=${clusterId}&token=${jobId}`;
+    // Use SSE instead of WebSocket — works through any HTTP proxy without
+    // special Upgrade header configuration.
+    const evtSource = new EventSource(`/api/clusters/${clusterId}/stream/${jobId}`);
 
-    const ws = new WebSocket(wsUrl);
+    setConnected(true);
 
-    ws.onopen = () => {
-      setConnected(true);
-      ws.send(JSON.stringify({ type: "subscribe", request_id: jobId }));
+    evtSource.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "stream") {
+          setLines((prev) => [...prev, msg.line]);
+        } else if (msg.type === "complete") {
+          setConnected(false);
+          evtSource.close();
+        }
+      } catch {}
     };
 
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === "stream") {
-        setLines((prev) => [...prev, msg.line]);
-      }
-      if (msg.type === "complete") {
-        setConnected(false);
-      }
+    evtSource.onerror = () => {
+      setConnected(false);
+      evtSource.close();
     };
 
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
-
-    return () => ws.close();
+    return () => evtSource.close();
   }, [clusterId, jobId, isRunning]);
 
   // Auto-scroll

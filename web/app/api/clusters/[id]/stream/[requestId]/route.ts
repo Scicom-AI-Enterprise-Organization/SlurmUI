@@ -48,9 +48,23 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
             // reply — final event
             clearTimeout(timer);
             const data = event.data as any;
+            const success = data.type === "result";
+            const exitCode: number = success ? (data.payload?.exit_code ?? 0) : -1;
+
+            // Update job status in DB if this request maps to a job.
+            await prisma.job.update({
+              where: { id: requestId },
+              data: {
+                status: success && exitCode === 0 ? "COMPLETED" : "FAILED",
+                exitCode,
+              },
+            }).catch(() => {
+              // requestId may not be a job ID (e.g. setup commands) — ignore
+            });
+
             send({
               type: "complete",
-              success: data.type === "result",
+              success,
               payload: data.payload,
             });
             try { controller.close(); } catch {}
