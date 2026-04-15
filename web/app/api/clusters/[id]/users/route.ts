@@ -84,7 +84,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     .map((h) => ({ hostname: h.hostname, ip: h.ip }));
 
   const dataNfsPath = (config.data_nfs_path as string) ?? "/aura-usrdata";
-  const username = user.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_").toLowerCase();
+  const username = user.unixUsername
+    ?? user.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_").toLowerCase();
+
+  // Persist the derived username so job submission can look it up consistently.
+  if (!user.unixUsername) {
+    await prisma.user.update({ where: { id: userId }, data: { unixUsername: username } });
+  }
 
   const requestId = randomUUID();
   await publishCommand(id, {

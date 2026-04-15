@@ -18,11 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Plus, UserPlus } from "lucide-react";
+import { Loader2, Plus, UserPlus, Trash2 } from "lucide-react";
 
 interface ClusterUserRow {
   id: string;
-  status: "PENDING" | "ACTIVE" | "FAILED";
+  status: "PENDING" | "ACTIVE" | "FAILED" | "REMOVED";
   provisionedAt: string | null;
   user: { id: string; email: string; name: string | null; unixUid: number | null };
 }
@@ -34,6 +34,7 @@ interface UsersTabProps { clusterId: string }
 function StatusBadge({ status }: { status: string }) {
   if (status === "ACTIVE") return <Badge className="bg-green-100 text-green-700">Active</Badge>;
   if (status === "FAILED") return <Badge variant="destructive">Failed</Badge>;
+  if (status === "REMOVED") return <Badge variant="secondary">Removed</Badge>;
   return <Badge variant="outline">Pending</Badge>;
 }
 
@@ -42,6 +43,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
   const [allUsers, setAllUsers] = useState<AllUser[]>([]);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [provisioning, setProvisioning] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -106,6 +108,14 @@ export function UsersTab({ clusterId }: UsersTabProps) {
     };
   };
 
+  const handleRemove = async (userId: string) => {
+    if (!confirm("Remove this user from the cluster? Their NFS home directory will be preserved.")) return;
+    setRemoving(userId);
+    await fetch(`/api/clusters/${clusterId}/users/${userId}`, { method: "DELETE" }).catch(() => {});
+    setRemoving(null);
+    fetchClusterUsers();
+  };
+
   const alreadyProvisioned = new Set(clusterUsers.map((cu) => cu.user.id));
   const availableUsers = allUsers.filter((u) => !alreadyProvisioned.has(u.id));
 
@@ -165,6 +175,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
                 <th className="px-4 py-2 text-left font-medium">UID</th>
                 <th className="px-4 py-2 text-left font-medium">Status</th>
                 <th className="px-4 py-2 text-left font-medium">Provisioned</th>
+                <th className="px-4 py-2 text-left font-medium"></th>
               </tr>
             </thead>
             <tbody>
@@ -178,6 +189,20 @@ export function UsersTab({ clusterId }: UsersTabProps) {
                   <td className="px-4 py-2"><StatusBadge status={cu.status} /></td>
                   <td className="px-4 py-2 text-muted-foreground">
                     {cu.provisionedAt ? new Date(cu.provisionedAt).toLocaleDateString() : "—"}
+                  </td>
+                  <td className="px-4 py-2">
+                    {cu.status !== "REMOVED" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemove(cu.user.id)}
+                        disabled={removing === cu.user.id}
+                      >
+                        {removing === cu.user.id
+                          ? <Loader2 className="h-4 w-4 animate-spin" />
+                          : <Trash2 className="h-4 w-4 text-destructive" />}
+                      </Button>
+                    )}
                   </td>
                 </tr>
               ))}

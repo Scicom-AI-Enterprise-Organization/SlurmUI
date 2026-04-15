@@ -1,0 +1,17 @@
+---
+- name: Remove user from worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Remove user account
+      user:
+        name: "{{ username }}"
+        state: absent
+        remove: false  # preserve home dir data on workers (NFS home is on controller)
+      ignore_errors: true
+
+    - name: Remove user group
+      group:
+        name: "{{ username }}"
+        state: absent
+      ignore_errors: true

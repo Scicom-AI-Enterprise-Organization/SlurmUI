@@ -89,7 +89,9 @@ func main() {
 	deployHandler := handler.NewDeployHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
 	setupHandler := handler.NewSetupHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
 	userHandler := handler.NewUserHandler(publisher, ansibleRunner, cfg.AnsiblePlaybookDir, logger)
-	dispatcher := handler.NewDispatcher(slurmHandler, deployHandler, setupHandler, userHandler, publisher, logger)
+	fileHandler := handler.NewFileHandler(publisher, logger)
+	appHandler := handler.NewAppHandler(publisher, logger)
+	dispatcher := handler.NewDispatcher(slurmHandler, deployHandler, setupHandler, userHandler, fileHandler, appHandler, publisher, logger)
 
 	// Start heartbeat.
 	go agentNats.StartHeartbeat(ctx, natsClient.Conn(), cfg, agentID, Version, logger)
@@ -127,22 +129,27 @@ func consumeMessages(ctx context.Context, consumer jetstream.Consumer, dispatche
 		}
 
 		for msg := range msgs.Messages() {
-			cmd, err := message.ParseCommand(msg.Data())
+			m := msg
+			cmd, err := message.ParseCommand(m.Data())
 			if err != nil {
-				logger.Error("failed to parse message", "error", err, "data", string(msg.Data()))
-				msg.Nak()
+				logger.Error("failed to parse message", "error", err, "data", string(m.Data()))
+				m.Nak()
 				continue
 			}
 
-			if err := dispatcher.Dispatch(ctx, cmd); err != nil {
-				logger.Error("handler error",
-					"request_id", cmd.RequestID,
-					"type", cmd.Type,
-					"error", err,
-				)
-			}
+			// Ack immediately so long-running handlers (watch_job, launch_app)
+			// do not block subsequent commands on this consumer.
+			m.Ack()
 
-			msg.Ack()
+			go func(c *message.Command) {
+				if err := dispatcher.Dispatch(ctx, c); err != nil {
+					logger.Error("handler error",
+						"request_id", c.RequestID,
+						"type", c.Type,
+						"error", err,
+					)
+				}
+			}(cmd)
 		}
 
 		if err := msgs.Error(); err != nil {

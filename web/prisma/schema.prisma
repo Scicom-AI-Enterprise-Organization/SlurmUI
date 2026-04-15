@@ -22,6 +22,7 @@ model Cluster {
   installTokenUsedAt    DateTime?
   jobs                  Job[]
   clusterUsers          ClusterUser[]
+  appSessions           AppSession[]
 }
 
 enum ClusterStatus {
@@ -59,15 +60,33 @@ enum JobStatus {
 }
 
 model User {
-  id         String        @id @default(uuid())
-  keycloakId String        @unique
-  email      String        @unique
-  name       String?
-  unixUid    Int?          @unique
-  unixGid    Int?
-  role       UserRole      @default(USER)
-  createdAt  DateTime      @default(now())
-  clusters   ClusterUser[]
+  id            String        @id @default(uuid())
+  keycloakId    String        @unique
+  email         String        @unique
+  name          String?
+  unixUid       Int?          @unique
+  unixGid       Int?
+  unixUsername  String?       @unique
+  role          UserRole      @default(USER)
+  createdAt     DateTime      @default(now())
+  clusters      ClusterUser[]
+  appSessions   AppSession[]
+}
+
+model AppSession {
+  id          String   @id @default(uuid())
+  clusterId   String
+  userId      String
+  type        String   // "shell" | "jupyter"
+  partition   String
+  status      String   @default("STARTING") // STARTING | RUNNING | STOPPED | FAILED
+  accessUrl   String?  // Jupyter token URL
+  createdAt   DateTime @default(now())
+  cluster     Cluster  @relation(fields: [clusterId], references: [id])
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@index([clusterId])
+  @@index([userId])
 }
 
 enum UserRole {
@@ -92,6 +111,7 @@ enum ClusterUserStatus {
   PENDING
   ACTIVE
   FAILED
+  REMOVED
 }
 
 // Global key-value settings store (admin-managed).

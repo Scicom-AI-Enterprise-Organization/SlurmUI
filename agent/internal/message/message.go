@@ -31,10 +31,21 @@ const (
 	CmdTeardown        CommandType = "teardown"
 
 	// User provisioning
-	CmdProvisionUser CommandType = "provision_user"
+	CmdProvisionUser   CommandType = "provision_user"
+	CmdDeprovisionUser CommandType = "deprovision_user"
 
 	// Job output streaming
 	CmdWatchJob CommandType = "watch_job"
+
+	// File operations
+	CmdListFiles CommandType = "list_files"
+	CmdReadFile  CommandType = "read_file"
+
+	// Interactive apps
+	CmdLaunchApp  CommandType = "launch_app"
+	CmdAppInput   CommandType = "app_input"
+	CmdAppResize  CommandType = "app_resize"
+	CmdKillApp    CommandType = "kill_app"
 )
 
 // ReplyType enumerates reply types.
@@ -89,6 +100,7 @@ type SubmitJobPayload struct {
 	ExtraArgs []string          `json:"extra_args"`  // additional sbatch flags
 	EnvVars   map[string]string `json:"env_vars"`    // --export
 	OutputDir string            `json:"output_dir"`  // shared NFS dir for job output
+	Username  string            `json:"username"`    // Linux user to run sbatch as (sudo -u)
 }
 
 // CancelJobPayload is the payload for cancel_job commands.
@@ -209,6 +221,69 @@ type ProvisionUserPayload struct {
 	GID         int          `json:"gid"`
 	NfsHome     string       `json:"nfs_home"`
 	WorkerHosts []WorkerHost `json:"worker_hosts"`
+}
+
+// DeprovisionUserPayload is the payload for deprovision_user commands.
+type DeprovisionUserPayload struct {
+	Username    string       `json:"username"`
+	UID         int          `json:"uid"`
+	GID         int          `json:"gid"`
+	NfsHome     string       `json:"nfs_home"`
+	WorkerHosts []WorkerHost `json:"worker_hosts"`
+}
+
+// --- File operation payloads ---
+
+// ListFilesPayload is the payload for list_files commands.
+type ListFilesPayload struct {
+	Path    string `json:"path"`     // relative path within NfsHome; "" = root
+	NfsHome string `json:"nfs_home"` // absolute path to user's NFS home
+}
+
+// ReadFilePayload is the payload for read_file commands.
+type ReadFilePayload struct {
+	Path    string `json:"path"`
+	NfsHome string `json:"nfs_home"`
+}
+
+// FileEntry represents one item in a directory listing.
+type FileEntry struct {
+	Name     string `json:"name"`
+	IsDir    bool   `json:"is_dir"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
+	Mode     string `json:"mode"`
+}
+
+// --- Interactive app payloads ---
+
+// LaunchAppPayload is the payload for launch_app commands.
+type LaunchAppPayload struct {
+	AppType        string `json:"app_type"`        // "shell" | "jupyter"
+	Partition      string `json:"partition"`
+	Username       string `json:"username"`
+	NfsHome        string `json:"nfs_home"`
+	NTasks         int    `json:"ntasks"`
+	TimeLimit      string `json:"time_limit"`
+	ControllerHost string `json:"controller_host"` // used to build Jupyter URL
+}
+
+// AppInputPayload is the payload for app_input commands.
+type AppInputPayload struct {
+	SessionID string `json:"session_id"`
+	Data      string `json:"data"` // base64-encoded bytes
+}
+
+// AppResizePayload is the payload for app_resize commands.
+type AppResizePayload struct {
+	SessionID string `json:"session_id"`
+	Cols      uint16 `json:"cols"`
+	Rows      uint16 `json:"rows"`
+}
+
+// KillAppPayload is the payload for kill_app commands.
+type KillAppPayload struct {
+	SessionID string `json:"session_id"`
 }
 
 // ParseCommand parses a raw JSON message into a Command.

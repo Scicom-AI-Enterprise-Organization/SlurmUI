@@ -41,21 +41,6 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 
 	h.logger.Info("submitting job", "request_id", cmd.RequestID, "job_name", payload.JobName)
 
-	// Write output to a path visible to BOTH the controller (where the agent
-	// runs) and the worker node (where the job executes).
-	// If a shared NFS directory is provided, use it — the controller has that
-	// path locally (it IS the NFS server) and workers see it via the NFS mount.
-	// Fall back to /tmp only for single-node clusters (controller = worker).
-	outputDir := "/tmp"
-	if payload.OutputDir != "" {
-		outputDir = strings.TrimRight(payload.OutputDir, "/") + "/aura-jobs"
-		if err := os.MkdirAll(outputDir, 0o755); err != nil {
-			h.logger.Warn("failed to create output dir, falling back to /tmp", "error", err)
-			outputDir = "/tmp"
-		}
-	}
-	outputFile := fmt.Sprintf("%s/aura-%s.out", outputDir, cmd.RequestID)
-
 	opts := &slurm.SbatchOpts{
 		Script:    payload.Script,
 		WorkDir:   payload.WorkDir,
@@ -65,8 +50,9 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 		NTasks:    payload.NTasks,
 		GPUs:      payload.GPUs,
 		TimeLimit: payload.TimeLimit,
-		ExtraArgs: append(payload.ExtraArgs, "--output="+outputFile),
+		ExtraArgs: payload.ExtraArgs,
 		EnvVars:   payload.EnvVars,
+		Username:  payload.Username,
 	}
 
 	streamFn := func(line string, seq int) {
@@ -86,6 +72,15 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 
 	// Parse slurm job ID from "Submitted batch job XXXXX"
 	slurmJobID := parseSlurmJobID(result.Stdout)
+
+	// Derive the output file path.
+	// When WorkDir is set (normal user jobs), sbatch writes to {workDir}/slurm-{jobID}.out
+	// via the default --output arg added by buildSbatchArgs.
+	outputFile := ""
+	if payload.WorkDir != "" && slurmJobID > 0 {
+		outputFile = fmt.Sprintf("%s/slurm-%d.out", strings.TrimRight(payload.WorkDir, "/"), slurmJobID)
+	}
+
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
 		"slurm_job_id": slurmJobID,
 		"output_file":  outputFile,

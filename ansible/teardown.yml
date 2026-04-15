@@ -68,6 +68,16 @@
   hosts: slurm_controllers
   become: true
   tasks:
+    - name: Clean up Slurm accounting users and accounts
+      shell: |
+        sacctmgr show users format=User --noheader --parsable 2>/dev/null \
+          | grep -v '^root\|^slurm\|^$' \
+          | while read -r user; do
+              sacctmgr -i delete user "$user" 2>/dev/null || true
+              sacctmgr -i delete account "$user" 2>/dev/null || true
+            done
+      ignore_errors: true
+
     - name: Stop slurmctld
       service:
         name: slurmctld

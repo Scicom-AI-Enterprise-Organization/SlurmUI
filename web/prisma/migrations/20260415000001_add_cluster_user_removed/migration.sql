@@ -1,0 +1,1 @@
+ALTER TYPE "ClusterUserStatus" ADD VALUE 'REMOVED';

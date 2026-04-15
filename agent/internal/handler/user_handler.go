@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/scicom/aura/agent/internal/ansible"
@@ -83,7 +84,7 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 
 	// 3. Create NFS home directory
 	emit(fmt.Sprintf("[aura] Creating NFS home dir: %s", payload.NfsHome))
-	if err := os.MkdirAll(payload.NfsHome, 0755); err != nil {
+	if err := os.MkdirAll(payload.NfsHome, 0700); err != nil {
 		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create NFS home: %w", err))
 	}
 	if _, err := slurm.RunCommand(ctx, "chown",
@@ -92,9 +93,35 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 	); err != nil {
 		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("chown failed: %w", err))
 	}
-	emit("[aura] NFS home created")
 
-	// 4. Replicate user to workers via Ansible (skip if no workers)
+	// Seed skeleton files (.bashrc, .bash_profile) so the user has a working shell environment.
+	writeSkeletonFile(ctx, filepath.Join(payload.NfsHome, ".bashrc"), fmt.Sprintf(
+		"# .bashrc\nexport HOME=%s\nexport USER=%s\nexport PATH=$PATH:/usr/local/bin:/usr/bin:/bin\n[ -f /etc/bashrc ] && . /etc/bashrc\n",
+		payload.NfsHome, payload.Username,
+	), payload.UID, payload.GID)
+	writeSkeletonFile(ctx, filepath.Join(payload.NfsHome, ".bash_profile"), fmt.Sprintf(
+		"# .bash_profile\n[ -f ~/.bashrc ] && . ~/.bashrc\n",
+	), payload.UID, payload.GID)
+	emit("[aura] NFS home created with skeleton files")
+
+	// 4a. Register user with Slurm accounting (tolerates absence of slurmdbd).
+	// sacctmgr exits non-zero when slurmdbd is not running; treat any failure as
+	// a soft warning — accounting is optional until slurmdbd is configured.
+	emit("[aura] Registering user with Slurm accounting...")
+	accResult, accErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "account",
+		payload.Username, fmt.Sprintf("Description=Aura user %s", payload.Username), "Organization=Aura")
+	userResult, userErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "user",
+		payload.Username, "Account="+payload.Username)
+	sacctOK := accErr == nil && userErr == nil &&
+		accResult != nil && accResult.ExitCode == 0 &&
+		userResult != nil && userResult.ExitCode == 0
+	if sacctOK {
+		emit("[aura] Slurm accounting registered")
+	} else {
+		emit("[aura] Note: Slurm accounting not available (slurmdbd not running) — skipped")
+	}
+
+	// 5. Replicate user to workers via Ansible (skip if no workers)
 	if len(payload.WorkerHosts) > 0 {
 		emit("[aura] Replicating user to worker nodes via Ansible...")
 
@@ -145,13 +172,109 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("user_provision exited with code %d: %s", ansResult.ExitCode, ansResult.Stderr))
 		}
 		emit("[aura] User replicated to all workers")
-	}
+	} // end if workers
 
 	emit(fmt.Sprintf("[aura] User %s provisioned successfully (uid=%d)", payload.Username, payload.UID))
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
 		"username": payload.Username,
 		"uid":      payload.UID,
 		"gid":      payload.GID,
+	})
+}
+
+// HandleDeprovisionUser removes a Linux user from the controller and all worker nodes,
+// cleans up Slurm accounting records, and marks the provisioning as removed.
+// The NFS home directory is preserved (not deleted) so data is not lost.
+func (h *UserHandler) HandleDeprovisionUser(ctx context.Context, cmd *message.Command) error {
+	var payload message.DeprovisionUserPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("invalid deprovision_user payload: %w", err))
+	}
+
+	h.logger.Info("deprovisioning user",
+		"request_id", cmd.RequestID,
+		"username", payload.Username,
+	)
+
+	seq := 0
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+
+	// 1. Remove Slurm accounting records (tolerate missing slurmdbd).
+	emit("[aura] Removing Slurm accounting records...")
+	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "user", "Name="+payload.Username)
+	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "account", "Name="+payload.Username)
+	emit("[aura] Slurm accounting cleanup done (errors ignored)")
+
+	// 2. Remove Linux user from controller.
+	emit(fmt.Sprintf("[aura] Removing user %s from controller", payload.Username))
+	result, err := slurm.RunCommand(ctx, "userdel", payload.Username)
+	if err == nil && result.ExitCode != 0 && result.ExitCode != 6 {
+		// exit 6 = user does not exist — idempotent
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("userdel failed (exit %d): %s", result.ExitCode, result.Stderr))
+	}
+	result, err = slurm.RunCommand(ctx, "groupdel", payload.Username)
+	if err == nil && result.ExitCode != 0 && result.ExitCode != 6 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("groupdel failed (exit %d): %s", result.ExitCode, result.Stderr))
+	}
+	emit("[aura] User removed from controller")
+
+	// 3. Remove user from worker nodes via Ansible (skip if no workers).
+	if len(payload.WorkerHosts) > 0 {
+		emit("[aura] Removing user from worker nodes via Ansible...")
+
+		inventory := h.buildWorkerInventory(payload.WorkerHosts)
+		type deprovVars struct {
+			Username string `json:"username"`
+			UID      int    `json:"uid"`
+			GID      int    `json:"gid"`
+		}
+		varsData, _ := json.Marshal(deprovVars{
+			Username: payload.Username,
+			UID:      payload.UID,
+			GID:      payload.GID,
+		})
+
+		varsPath, err := writeTempConfig(json.RawMessage(varsData))
+		if err != nil {
+			return h.publisher.SendError(cmd.RequestID, err)
+		}
+		defer os.Remove(varsPath)
+
+		invFile, err := os.CreateTemp("", "aura-deprov-inventory-*.ini")
+		if err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create inventory: %w", err))
+		}
+		invFile.WriteString(inventory)
+		invFile.Close()
+		defer os.Remove(invFile.Name())
+
+		streamFn := func(line string, s int) {
+			_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq+s)
+		}
+
+		opts := &ansible.RunOpts{
+			PlaybookDir: h.playbookDir,
+			Playbook:    "user_deprovision.yml",
+			VarsFile:    varsPath,
+			Inventory:   invFile.Name(),
+		}
+
+		ansResult, err := h.runner.Run(ctx, opts, streamFn)
+		if err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("user_deprovision playbook failed: %w", err))
+		}
+		if ansResult.ExitCode != 0 {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("user_deprovision exited with code %d: %s", ansResult.ExitCode, ansResult.Stderr))
+		}
+		emit("[aura] User removed from all worker nodes")
+	}
+
+	emit(fmt.Sprintf("[aura] User %s deprovisioned successfully", payload.Username))
+	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
+		"username": payload.Username,
 	})
 }
 
@@ -167,4 +290,12 @@ func (h *UserHandler) buildWorkerInventory(hosts []message.WorkerHost) string {
 			host.Hostname, host.IP, sshKeyArg))
 	}
 	return sb.String()
+}
+
+// writeSkeletonFile writes content to path and sets ownership. Errors are non-fatal.
+func writeSkeletonFile(ctx context.Context, path, content string, uid, gid int) {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return
+	}
+	slurm.RunCommand(ctx, "chown", fmt.Sprintf("%d:%d", uid, gid), path)
 }
