@@ -105,15 +105,20 @@ func (h *UserHandler) HandleProvisionUser(ctx context.Context, cmd *message.Comm
 	emit("[aura] NFS home created with skeleton files")
 
 	// 4a. Register user with Slurm accounting (tolerates absence of slurmdbd).
+	// sacctmgr exits non-zero when slurmdbd is not running; treat any failure as
+	// a soft warning — accounting is optional until slurmdbd is configured.
 	emit("[aura] Registering user with Slurm accounting...")
-	_, sacctAccErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "account",
+	accResult, accErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "account",
 		payload.Username, fmt.Sprintf("Description=Aura user %s", payload.Username), "Organization=Aura")
-	_, sacctUserErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "user",
+	userResult, userErr := slurm.RunCommand(ctx, "sacctmgr", "-i", "add", "user",
 		payload.Username, "Account="+payload.Username)
-	if sacctAccErr != nil || sacctUserErr != nil {
-		emit("[aura] Note: Slurm accounting not available (slurmdbd not running) — skipped")
-	} else {
+	sacctOK := accErr == nil && userErr == nil &&
+		accResult != nil && accResult.ExitCode == 0 &&
+		userResult != nil && userResult.ExitCode == 0
+	if sacctOK {
 		emit("[aura] Slurm accounting registered")
+	} else {
+		emit("[aura] Note: Slurm accounting not available (slurmdbd not running) — skipped")
 	}
 
 	// 5. Replicate user to workers via Ansible (skip if no workers)
@@ -199,9 +204,9 @@ func (h *UserHandler) HandleDeprovisionUser(ctx context.Context, cmd *message.Co
 
 	// 1. Remove Slurm accounting records (tolerate missing slurmdbd).
 	emit("[aura] Removing Slurm accounting records...")
-	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "user", payload.Username)
-	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "account", payload.Username)
-	emit("[aura] Slurm accounting cleanup done")
+	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "user", "Name="+payload.Username)
+	_, _ = slurm.RunCommand(ctx, "sacctmgr", "-i", "delete", "account", "Name="+payload.Username)
+	emit("[aura] Slurm accounting cleanup done (errors ignored)")
 
 	// 2. Remove Linux user from controller.
 	emit(fmt.Sprintf("[aura] Removing user %s from controller", payload.Username))

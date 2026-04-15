@@ -126,6 +126,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           output_file: result.output_file,
         },
       }).catch((err) => console.error("[jobs] Failed to dispatch watch_job:", err));
+    } else if (result.slurm_job_id) {
+      // No output file (e.g. admin job with no workDir) — mark completed immediately.
+      // We can't stream output but the job was submitted successfully.
+      await prisma.job.update({
+        where: { id: job.id },
+        data: { status: "COMPLETED", exitCode: 0 },
+      }).catch(() => {});
     }
 
     return NextResponse.json(updated, { status: 201 });

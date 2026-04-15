@@ -39,6 +39,15 @@ func Sbatch(ctx context.Context, opts *SbatchOpts, streamFn StreamFunc) (*ExecRe
 	}
 	tmpFile.Close()
 
+	// When running as another user via sudo, sbatch reads the script as that user.
+	// The temp file is created 0600 by default — make it world-readable so the
+	// provisioned user can read it.
+	if opts.Username != "" {
+		if err := os.Chmod(tmpFile.Name(), 0644); err != nil {
+			return nil, fmt.Errorf("failed to chmod temp script: %w", err)
+		}
+	}
+
 	args := buildSbatchArgs(opts, tmpFile.Name())
 
 	if opts.Username != "" {
