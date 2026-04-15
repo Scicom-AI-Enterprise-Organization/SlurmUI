@@ -41,3 +41,9 @@
       - python3-pip
     state: present
     update_cache: true
+
+- name: Install Jupyter Notebook
+  ansible.builtin.pip:
+    name: jupyter
+    executable: pip3
+    state: present

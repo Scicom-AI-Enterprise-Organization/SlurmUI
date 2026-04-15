@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/scicom/aura/agent/internal/message"
@@ -64,7 +66,12 @@ func (h *AppHandler) HandleLaunchApp(ctx context.Context, cmd *message.Command) 
 	}
 }
 
-// launchShell starts an interactive bash session via srun --pty.
+// launchShell starts an interactive bash session using salloc to reserve a full
+// resource block (N nodes × C CPUs × G GPUs), then runs `srun --pty bash` as a
+// step inside that allocation. The user lands on one compute node; from there they
+// can launch additional `srun` steps that span all allocated nodes. cgroups
+// constrain the shell to exactly the requested CPUs so htop / free -m reflect the
+// reserved resources.
 func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload message.LaunchAppPayload) error {
 	seq := 0
 	emit := func(line string) {
@@ -72,7 +79,6 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 		seq++
 	}
 
-	// Build the srun command — runs as the provisioned user on a compute node.
 	nodes := payload.Nodes
 	if nodes <= 0 {
 		nodes = 1
@@ -86,28 +92,39 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 		timeLimit = "2:00:00"
 	}
 
-	var srunArgs []string
+	// salloc reserves the full allocation; `srun --pty bash` runs as a step inside it.
+	sallocArgs := []string{}
 	if payload.Partition != "" {
-		srunArgs = append(srunArgs, "--partition="+payload.Partition)
+		sallocArgs = append(sallocArgs, "--partition="+payload.Partition)
 	}
-	srunArgs = append(srunArgs,
+	sallocArgs = append(sallocArgs,
 		fmt.Sprintf("--nodes=%d", nodes),
-		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
 		"--ntasks-per-node=1",
+		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
 		"--time="+timeLimit,
 	)
 	if payload.GpusPerNode > 0 {
-		srunArgs = append(srunArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
+		sallocArgs = append(sallocArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
 	}
-	srunArgs = append(srunArgs, "--pty", "/bin/bash", "--login")
+
+	// The srun step inside salloc: --pty bash on first available node, chdir to NFS home.
+	srunStep := []string{"srun", "--ntasks=1"}
+	if payload.NfsHome != "" {
+		srunStep = append(srunStep, "--chdir="+payload.NfsHome)
+	}
+	srunStep = append(srunStep, "--pty", "bash", "--login")
+	sallocArgs = append(sallocArgs, srunStep...)
 
 	var c *exec.Cmd
 	if payload.Username != "" {
-		args := append([]string{"-u", payload.Username, "srun"}, srunArgs...)
+		args := append([]string{"-u", payload.Username, "salloc"}, sallocArgs...)
 		c = exec.CommandContext(ctx, "sudo", args...)
 	} else {
-		c = exec.CommandContext(ctx, "srun", srunArgs...)
+		c = exec.CommandContext(ctx, "salloc", sallocArgs...)
 	}
+
+	// Own process group so we can kill the whole tree on terminate.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Set HOME so bash --login finds the right profile.
 	if payload.NfsHome != "" {
@@ -165,14 +182,16 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 }
 
 // launchJupyter starts a Jupyter Notebook server inside a real Slurm allocation.
-// It uses srun to land on a compute node, starts Jupyter there, then opens a
-// TCP proxy on the controller (port range 9100–9199) forwarding to the compute
-// node so the browser can reach Jupyter without direct access to the compute LAN.
+// It uses salloc to reserve a full resource block (N nodes × C CPUs × G GPUs),
+// then runs `srun bash -c "jupyter..."` as a step on the first compute node.
+// The agent starts a TCP proxy on the controller (9100–9199) forwarding to the
+// compute node so the browser can reach Jupyter without direct access to the
+// compute LAN. The full allocation is available for kernels / distributed work.
 func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payload message.LaunchAppPayload) error {
 	// Jupyter listens on a fixed well-known port on the compute node.
 	const jupyterPort = 8888
 
-	// Reserve a proxy port on the controller before starting srun.
+	// Reserve a proxy port on the controller.
 	proxyPort, err := findFreePort(9100, 9199)
 	if err != nil {
 		return h.publisher.SendError(sessionID, fmt.Errorf("no free proxy port available (9100–9199): %w", err))
@@ -201,35 +220,38 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 		timeLimit = "2:00:00"
 	}
 
-	// Build srun args — allocate resources on one compute node.
-	var srunArgs []string
+	// salloc reserves the full N-node allocation.
+	sallocArgs := []string{}
 	if payload.Partition != "" {
-		srunArgs = append(srunArgs, "--partition="+payload.Partition)
+		sallocArgs = append(sallocArgs, "--partition="+payload.Partition)
 	}
-	srunArgs = append(srunArgs,
+	sallocArgs = append(sallocArgs,
 		fmt.Sprintf("--nodes=%d", nodes),
-		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
 		"--ntasks-per-node=1",
+		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
 		"--time="+timeLimit,
 	)
 	if payload.GpusPerNode > 0 {
-		srunArgs = append(srunArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
+		sallocArgs = append(sallocArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
 	}
 
-	// The script announces the compute node hostname, then starts Jupyter.
+	// The script runs on the first compute node: announce hostname, then start Jupyter.
 	script := fmt.Sprintf(
 		`echo "AURA_NODE:$(hostname)" && jupyter notebook --no-browser --ip=0.0.0.0 --port=%d --NotebookApp.token=%s --NotebookApp.allow_origin='*' --notebook-dir=%s 2>&1`,
 		jupyterPort, token, notebookDir,
 	)
-	srunArgs = append(srunArgs, "bash", "-c", script)
+	sallocArgs = append(sallocArgs, "srun", "--ntasks=1", "bash", "-c", script)
 
 	var c *exec.Cmd
 	if payload.Username != "" {
-		args := append([]string{"-u", payload.Username, "srun"}, srunArgs...)
+		args := append([]string{"-u", payload.Username, "salloc"}, sallocArgs...)
 		c = exec.CommandContext(ctx, "sudo", args...)
 	} else {
-		c = exec.CommandContext(ctx, "srun", srunArgs...)
+		c = exec.CommandContext(ctx, "salloc", sallocArgs...)
 	}
+
+	// Own process group so we can kill the whole tree (salloc + srun + jupyter) on terminate.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -402,7 +424,7 @@ func (h *AppHandler) HandleAppResize(ctx context.Context, cmd *message.Command) 
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{"ok": true})
 }
 
-// HandleKillApp terminates an active app session.
+// HandleKillApp terminates an active app session and its Slurm allocation.
 func (h *AppHandler) HandleKillApp(ctx context.Context, cmd *message.Command) error {
 	var payload message.KillAppPayload
 	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
@@ -417,12 +439,28 @@ func (h *AppHandler) HandleKillApp(ctx context.Context, cmd *message.Command) er
 	h.mu.Unlock()
 
 	if ok && session.cmd != nil && session.cmd.Process != nil {
-		_ = session.cmd.Process.Kill()
+		pid := session.cmd.Process.Pid
+
+		// Close PTY and proxy first to unblock any pending reads.
 		if session.ptmx != nil {
 			_ = session.ptmx.Close()
 		}
 		if session.proxyLn != nil {
 			_ = session.proxyLn.Close()
+		}
+
+		// Send SIGTERM to the entire process group so srun can scancel the Slurm
+		// allocation before exiting. SIGKILL would kill srun without cleanup.
+		pgid, err := syscall.Getpgid(pid)
+		if err == nil {
+			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+			// Give srun 5 s to cancel the allocation, then force-kill.
+			go func() {
+				time.Sleep(5 * time.Second)
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}()
+		} else {
+			_ = session.cmd.Process.Kill()
 		}
 	}
 

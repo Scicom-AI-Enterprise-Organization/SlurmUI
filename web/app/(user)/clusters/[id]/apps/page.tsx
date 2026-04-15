@@ -99,12 +99,10 @@ export default function AppsPage() {
         type: dialogApp.type,
         partition,
         time_limit: timeLimit || "2:00:00",
+        nodes: parseInt(nodes) || 1,
+        cpus_per_node: parseInt(cpusPerNode) || 1,
+        gpus_per_node: parseInt(gpusPerNode) || 0,
       };
-      if (dialogApp.type === "shell") {
-        body.nodes = parseInt(nodes) || 1;
-        body.cpus_per_node = parseInt(cpusPerNode) || 1;
-        body.gpus_per_node = parseInt(gpusPerNode) || 0;
-      }
 
       const res = await fetch(`/api/clusters/${clusterId}/apps`, {
         method: "POST",
@@ -247,6 +245,7 @@ export default function AppsPage() {
               </Select>
             </div>
 
+            {/* Shell: salloc reserves full resource block, srun --pty bash runs inside it */}
             {dialogApp?.type === "shell" && (<>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
@@ -285,16 +284,52 @@ export default function AppsPage() {
               </div>
             </>)}
 
+            {/* Jupyter: full resource allocation on compute node */}
+            {dialogApp?.type === "jupyter" && (<>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Nodes</Label>
+                  <Select value={nodes} onValueChange={(v) => v && setNodes(v)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {NODE_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={n}>{n} node{n !== "1" ? "s" : ""}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>CPUs per node</Label>
+                  <Select value={cpusPerNode} onValueChange={(v) => v && setCpusPerNode(v)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {CPU_OPTIONS.map((c) => (
+                        <SelectItem key={c} value={c}>{c} CPU{c !== "1" ? "s" : ""}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>GPUs per node <span className="text-muted-foreground">(optional)</span></Label>
+                <Select value={gpusPerNode} onValueChange={(v) => v && setGpusPerNode(v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {GPU_OPTIONS.map((g) => (
+                      <SelectItem key={g} value={g}>{g === "0" ? "None" : `${g} GPU${g !== "1" ? "s" : ""}`}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Jupyter runs on a compute node inside a Slurm allocation. The controller proxies your browser to the compute node — ensure ports 9100–9199 are open on the controller firewall.
+              </p>
+            </>)}
+
             <div className="space-y-1.5">
               <Label>Time Limit</Label>
               <Input value={timeLimit} onChange={(e) => setTimeLimit(e.target.value)} placeholder="2:00:00" />
             </div>
-
-            {dialogApp?.type === "jupyter" && (
-              <p className="text-xs text-muted-foreground">
-                Jupyter will run on a compute node inside a Slurm allocation. The controller proxies your browser to the compute node — ensure port 9100–9199 is open on the controller in your firewall.
-              </p>
-            )}
 
             <Button
               className="w-full"
