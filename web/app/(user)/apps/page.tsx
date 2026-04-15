@@ -2,25 +2,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
-import {
-  BrainCircuit,
-  BarChart3,
-  Code2,
-  FlaskConical,
-  LineChart,
-  Terminal,
-} from "lucide-react";
+import { BrainCircuit, Terminal } from "lucide-react";
 
-interface App {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: React.ElementType;
-  tags: string[];
-}
-
-const APPS: App[] = [
+const APPS = [
   {
     id: "jupyter",
     name: "Jupyter Notebook",
@@ -30,44 +14,12 @@ const APPS: App[] = [
     tags: ["Python", "ML", "GPU"],
   },
   {
-    id: "rstudio",
-    name: "RStudio",
-    description: "Integrated development environment for R statistical computing and graphics.",
-    category: "Statistics",
-    icon: BarChart3,
-    tags: ["R", "Statistics"],
-  },
-  {
-    id: "vscode",
-    name: "VS Code Server",
-    description: "Full VS Code in the browser — edit, run, and debug code on the cluster.",
-    category: "Development",
-    icon: Code2,
-    tags: ["IDE", "Python", "GPU"],
-  },
-  {
-    id: "matlab",
-    name: "MATLAB",
-    description: "Numerical computing environment for algorithm development and data analysis.",
-    category: "Engineering",
-    icon: FlaskConical,
-    tags: ["MATLAB", "GPU"],
-  },
-  {
-    id: "tensorboard",
-    name: "TensorBoard",
-    description: "Visualize ML training metrics, model graphs, and embeddings in real time.",
-    category: "ML Tools",
-    icon: LineChart,
-    tags: ["ML", "Visualization"],
-  },
-  {
-    id: "terminal",
+    id: "shell",
     name: "Interactive Shell",
-    description: "Request an interactive Slurm allocation and drop into a shell on a compute node.",
+    description: "Request an interactive Slurm allocation and drop into a bash shell on a compute node.",
     category: "Utilities",
     icon: Terminal,
-    tags: ["Shell", "GPU"],
+    tags: ["bash", "interactive"],
   },
 ];
 
@@ -81,7 +33,7 @@ export default function AppsPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2">
         {APPS.map((app) => {
           const Icon = app.icon;
           return (
