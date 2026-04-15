@@ -10,7 +10,6 @@ import {
   Plus,
   Monitor,
   Briefcase,
-  AppWindow,
   PanelLeftOpen,
   PanelLeftClose,
   Settings,
@@ -28,7 +27,6 @@ const workloadSection: NavSection = {
   links: [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/jobs", label: "Jobs", icon: Briefcase },
-    { href: "/apps", label: "Apps", icon: AppWindow },
     { href: "/clusters", label: "Clusters", icon: Monitor },
   ],
 };

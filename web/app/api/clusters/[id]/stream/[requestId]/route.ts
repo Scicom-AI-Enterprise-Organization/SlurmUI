@@ -57,7 +57,8 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
               data: {
                 status: success && exitCode === 0 ? "COMPLETED" : "FAILED",
                 exitCode,
-                ...(data.payload?.output ? { output: data.payload.output } : {}),
+                // Always persist output (even empty string) so the UI can render it.
+                output: data.payload?.output ?? null,
               },
             }).catch(() => {
               // requestId may not be a job ID (e.g. setup commands) — ignore

@@ -155,12 +155,16 @@ export default function JobDetailPage() {
         <LiveOutput clusterId={clusterId} jobId={jobId} isRunning={true} />
       )}
 
-      {/* Stored output for completed jobs */}
-      {!isRunning && job.output && (
+      {/* Stored output for completed/failed jobs */}
+      {!isRunning && (
         <div className="space-y-2">
           <h3 className="font-medium">Output</h3>
           <ScrollArea className="h-96 rounded-md border bg-black p-4">
-            <pre className="font-mono text-xs text-green-400">{job.output}</pre>
+            {job.output ? (
+              <pre className="font-mono text-xs text-green-400">{job.output}</pre>
+            ) : (
+              <p className="font-mono text-xs text-gray-500">No output captured.</p>
+            )}
           </ScrollArea>
         </div>
       )}

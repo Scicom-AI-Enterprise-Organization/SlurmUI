@@ -14,6 +14,17 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
+  // All users (including admins) must be actively provisioned to browse files.
+  const clusterUser = await prisma.clusterUser.findUnique({
+    where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
+  });
+  if (!clusterUser || clusterUser.status !== "ACTIVE") {
+    return NextResponse.json(
+      { error: "No provisioned user on this cluster. Contact your admin." },
+      { status: 403 }
+    );
+  }
+
   const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
   if (!dbUser?.unixUsername) {
     return NextResponse.json({ error: "No Linux account provisioned" }, { status: 403 });
@@ -30,7 +41,15 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     request_id: crypto.randomUUID(),
     type: "list_files",
     payload: { path, nfs_home: nfsHome },
-  }, 15_000) as { entries: unknown[]; path: string };
+  }, 15_000) as any;
+
+  // Agent returns {type: "error"} on failure — surface it properly.
+  if (result?.type === "error") {
+    return NextResponse.json(
+      { error: result.payload?.error ?? "Failed to list files" },
+      { status: 500 }
+    );
+  }
 
   return NextResponse.json(result);
 }

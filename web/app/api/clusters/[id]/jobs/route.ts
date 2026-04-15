@@ -59,18 +59,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
   if (!dbUser) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
-  // Admins bypass the cluster-user check (they may not have a Linux account).
-  const isAdmin = (session.user as any).role === "ADMIN";
-  if (!isAdmin) {
-    const clusterUser = await prisma.clusterUser.findUnique({
-      where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
-    });
-    if (!clusterUser || clusterUser.status !== "ACTIVE") {
-      return NextResponse.json(
-        { error: "You must be provisioned on this cluster before submitting jobs." },
-        { status: 403 }
-      );
-    }
+  // All users (including admins) must be actively provisioned to submit jobs.
+  const clusterUser = await prisma.clusterUser.findUnique({
+    where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
+  });
+  if (!clusterUser || clusterUser.status !== "ACTIVE") {
+    return NextResponse.json(
+      { error: "You must be provisioned on this cluster before submitting jobs." },
+      { status: 403 }
+    );
   }
 
   const body = await req.json();

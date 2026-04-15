@@ -43,18 +43,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Verify ACTIVE ClusterUser (admins bypass).
-  const isAdmin = (session.user as any).role === "ADMIN";
-  if (!isAdmin) {
-    const clusterUser = await prisma.clusterUser.findUnique({
-      where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
-    });
-    if (!clusterUser || clusterUser.status !== "ACTIVE") {
-      return NextResponse.json(
-        { error: "You must be provisioned on this cluster before launching apps." },
-        { status: 403 }
-      );
-    }
+  // All users (including admins) must be actively provisioned to launch apps.
+  const clusterUser = await prisma.clusterUser.findUnique({
+    where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
+  });
+  if (!clusterUser || clusterUser.status !== "ACTIVE") {
+    return NextResponse.json(
+      { error: "You must be provisioned on this cluster before launching apps." },
+      { status: 403 }
+    );
   }
 
   const body = await req.json();

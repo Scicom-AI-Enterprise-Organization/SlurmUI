@@ -222,6 +222,13 @@ func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command)
 		if err == io.EOF {
 			running, _ := slurmJobRunning(ctx, payload.SlurmJobID)
 			if !running {
+				// Brief pause to let Slurm flush the remaining output to disk
+				// before we do a final drain (avoids a timing race on fast jobs).
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+				}
 				// Drain any remaining lines written after the last read.
 				for {
 					line, err2 := reader.ReadString('\n')

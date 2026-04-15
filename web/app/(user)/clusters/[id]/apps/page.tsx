@@ -74,10 +74,11 @@ export default function AppsPage() {
 
   useEffect(() => {
     fetchSessions();
-    // Load partitions from cluster config via existing config endpoint
-    fetch(`/api/clusters/${clusterId}/config`)
+    // Load partitions from cluster detail (config is a field on the cluster object)
+    fetch(`/api/clusters/${clusterId}`)
       .then((r) => r.json())
-      .then((cfg: Record<string, any>) => {
+      .then((cluster: Record<string, any>) => {
+        const cfg = (cluster.config ?? {}) as Record<string, any>;
         const parts = (cfg.slurm_partitions ?? []) as Partition[];
         setPartitions(parts.map((p) => p.name));
         if (parts.length > 0) setPartition(parts[0].name);

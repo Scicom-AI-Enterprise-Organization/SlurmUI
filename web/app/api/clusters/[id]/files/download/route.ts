@@ -11,13 +11,24 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
+
+  // All users (including admins) must be actively provisioned.
+  const clusterUser = await prisma.clusterUser.findUnique({
+    where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
+  });
+  if (!clusterUser || clusterUser.status !== "ACTIVE") {
+    return NextResponse.json(
+      { error: "No provisioned user on this cluster." },
+      { status: 403 }
+    );
+  }
+
   const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
   if (!dbUser?.unixUsername) {
     return NextResponse.json({ error: "No Linux account provisioned" }, { status: 403 });
   }
-
-  const cluster = await prisma.cluster.findUnique({ where: { id } });
-  if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
   const config = cluster.config as Record<string, unknown>;
   const dataNfsPath = (config.data_nfs_path as string | undefined) ?? "/aura-usrdata";
@@ -31,7 +42,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     request_id: crypto.randomUUID(),
     type: "read_file",
     payload: { path, nfs_home: nfsHome },
-  }, 30_000) as { name: string; content: string; size: number };
+  }, 30_000) as any;
+
+  if (result?.type === "error") {
+    return NextResponse.json(
+      { error: result.payload?.error ?? "Failed to read file" },
+      { status: 500 }
+    );
+  }
 
   const bytes = Buffer.from(result.content, "base64");
   return new Response(bytes, {
