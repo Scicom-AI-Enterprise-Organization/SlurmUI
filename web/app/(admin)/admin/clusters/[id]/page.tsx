@@ -4,6 +4,7 @@ import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { SetupStepper } from "@/components/cluster/setup-stepper";
 import { UsersTab } from "@/components/cluster/users-tab";
+import { PackagesTab } from "@/components/cluster/packages-tab";
 import { DeleteClusterButton } from "@/components/cluster/delete-cluster-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -103,12 +104,16 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             <TabsList>
               <TabsTrigger value="config">Configuration</TabsTrigger>
               <TabsTrigger value="users">Users</TabsTrigger>
+              <TabsTrigger value="packages">Packages</TabsTrigger>
             </TabsList>
             <TabsContent value="config">
               <ConfigEditor clusterId={id} initialConfig={config} />
             </TabsContent>
             <TabsContent value="users">
               <UsersTab clusterId={id} />
+            </TabsContent>
+            <TabsContent value="packages">
+              <PackagesTab clusterId={id} />
             </TabsContent>
           </Tabs>
         </>

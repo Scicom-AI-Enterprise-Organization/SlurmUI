@@ -41,6 +41,9 @@ const (
 	CmdListFiles CommandType = "list_files"
 	CmdReadFile  CommandType = "read_file"
 
+	// Package management
+	CmdInstallPackages CommandType = "install_packages"
+
 	// Interactive apps
 	CmdLaunchApp  CommandType = "launch_app"
 	CmdAppInput   CommandType = "app_input"
@@ -286,6 +289,13 @@ type AppResizePayload struct {
 // KillAppPayload is the payload for kill_app commands.
 type KillAppPayload struct {
 	SessionID string `json:"session_id"`
+}
+
+// InstallPackagesPayload is the payload for install_packages commands.
+type InstallPackagesPayload struct {
+	Packages      []string     `json:"packages"`       // apt package names to install
+	WorkerHosts   []WorkerHost `json:"worker_hosts"`   // worker node hostname/IP pairs
+	SSHPrivateKey string       `json:"ssh_private_key"` // base64-encoded
 }
 
 // ParseCommand parses a raw JSON message into a Command.

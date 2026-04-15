@@ -444,3 +444,106 @@ func (h *SetupHandler) buildInventory(payload message.SetupNodesPayload) string 
 
 	return sb.String()
 }
+
+// HandleInstallPackages checks each package exists on the controller via apt-cache,
+// then installs them across all cluster nodes (controller + workers) via Ansible.
+func (h *SetupHandler) HandleInstallPackages(ctx context.Context, cmd *message.Command) error {
+	var payload message.InstallPackagesPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("invalid install_packages payload: %w", err))
+	}
+	if len(payload.Packages) == 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("no packages specified"))
+	}
+
+	h.logger.Info("installing packages", "request_id", cmd.RequestID, "packages", payload.Packages)
+
+	seq := 0
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+
+	// Validate that each package is known to apt on the controller.
+	emit("[aura] Checking packages against apt cache...")
+	for _, pkg := range payload.Packages {
+		result, err := slurm.RunCommand(ctx, "apt-cache", "show", pkg)
+		if err != nil || result.ExitCode != 0 {
+			return h.publisher.SendError(cmd.RequestID,
+				fmt.Errorf("package %q not found in apt cache — check the package name and try again", pkg))
+		}
+		emit(fmt.Sprintf("[aura] ✓ %s found in apt cache", pkg))
+	}
+
+	// Save SSH key if provided.
+	sshKeyPath := "/root/.ssh/aura_cluster_key"
+	if payload.SSHPrivateKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(payload.SSHPrivateKey)
+		if err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to decode SSH key: %w", err))
+		}
+		if err := os.MkdirAll("/root/.ssh", 0700); err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create .ssh dir: %w", err))
+		}
+		if err := os.WriteFile(sshKeyPath, keyBytes, 0600); err != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to write SSH key: %w", err))
+		}
+	}
+
+	// Build inventory: controller (localhost) + workers.
+	sshKeyArg := ""
+	if _, err := os.Stat(sshKeyPath); err == nil {
+		sshKeyArg = " ansible_ssh_private_key_file=" + sshKeyPath
+	}
+	var sb strings.Builder
+	sb.WriteString("[all]\n")
+	sb.WriteString("localhost ansible_connection=local\n")
+	for _, w := range payload.WorkerHosts {
+		sb.WriteString(fmt.Sprintf(
+			"%s ansible_host=%s ansible_user=root ansible_python_interpreter=/usr/bin/python3%s\n",
+			w.Hostname, w.IP, sshKeyArg,
+		))
+	}
+
+	invFile, err := os.CreateTemp("", "aura-pkg-inv-*.ini")
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create inventory: %w", err))
+	}
+	invFile.WriteString(sb.String())
+	invFile.Close()
+	defer os.Remove(invFile.Name())
+
+	// Write vars file with the package list so Ansible receives it as a proper list.
+	pkgVarsData, _ := json.Marshal(map[string]interface{}{"packages": payload.Packages})
+	varsPath, err := writeTempConfig(json.RawMessage(pkgVarsData))
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, err)
+	}
+	defer os.Remove(varsPath)
+
+	streamFn := func(line string, s int) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, s)
+	}
+
+	emit(fmt.Sprintf("[aura] Installing %v on all nodes...", payload.Packages))
+
+	opts := &ansible.RunOpts{
+		PlaybookDir: h.playbookDir,
+		Playbook:    "install_packages.yml",
+		Inventory:   invFile.Name(),
+		VarsFile:    varsPath,
+	}
+
+	result, err := h.runner.Run(ctx, opts, streamFn)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("install_packages playbook failed: %w", err))
+	}
+	if result.ExitCode != 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("install_packages exited with code %d", result.ExitCode))
+	}
+
+	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
+		"status":   "ok",
+		"packages": payload.Packages,
+	})
+}
