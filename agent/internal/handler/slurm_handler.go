@@ -1,12 +1,17 @@
 package handler
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/scicom/aura/agent/internal/message"
 	agentNats "github.com/scicom/aura/agent/internal/nats"
@@ -36,6 +41,9 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 
 	h.logger.Info("submitting job", "request_id", cmd.RequestID, "job_name", payload.JobName)
 
+	// Write output to a predictable path so watch_job can tail it.
+	outputFile := fmt.Sprintf("/tmp/aura-%s.out", cmd.RequestID)
+
 	opts := &slurm.SbatchOpts{
 		Script:    payload.Script,
 		WorkDir:   payload.WorkDir,
@@ -45,7 +53,7 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 		NTasks:    payload.NTasks,
 		GPUs:      payload.GPUs,
 		TimeLimit: payload.TimeLimit,
-		ExtraArgs: payload.ExtraArgs,
+		ExtraArgs: append(payload.ExtraArgs, "--output="+outputFile),
 		EnvVars:   payload.EnvVars,
 	}
 
@@ -68,6 +76,7 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 	slurmJobID := parseSlurmJobID(result.Stdout)
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
 		"slurm_job_id": slurmJobID,
+		"output_file":  outputFile,
 		"stdout":       result.Stdout,
 	})
 }
@@ -148,4 +157,118 @@ func (h *SlurmHandler) HandleNodeStatus(ctx context.Context, cmd *message.Comman
 	}
 
 	return h.publisher.SendResult(cmd.RequestID, result)
+}
+
+// HandleWatchJob tails the Slurm job output file and streams it line-by-line
+// until the job completes, then sends a final result with the exit code.
+func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command) error {
+	var payload message.WatchJobPayload
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("invalid watch_job payload: %w", err))
+	}
+
+	h.logger.Info("watching job output", "request_id", cmd.RequestID, "slurm_job_id", payload.SlurmJobID)
+
+	// Wait up to 60 s for Slurm to create the output file.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if _, err := os.Stat(payload.OutputFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return h.publisher.SendError(cmd.RequestID,
+				fmt.Errorf("output file never appeared: %s", payload.OutputFile))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	f, err := os.Open(payload.OutputFile)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to open output file: %w", err))
+	}
+	defer f.Close()
+
+	seq := 0
+	reader := bufio.NewReader(f)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			seq++
+			if pubErr := h.publisher.SendStreamLine(cmd.RequestID, strings.TrimRight(line, "\r\n"), seq); pubErr != nil {
+				h.logger.Error("failed to stream job output line", "error", pubErr)
+			}
+		}
+		if err == io.EOF {
+			running, _ := slurmJobRunning(ctx, payload.SlurmJobID)
+			if !running {
+				// Drain any remaining lines written after the last read.
+				for {
+					line, err2 := reader.ReadString('\n')
+					if len(line) > 0 {
+						seq++
+						h.publisher.SendStreamLine(cmd.RequestID, strings.TrimRight(line, "\r\n"), seq)
+					}
+					if err2 != nil {
+						break
+					}
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	exitCode := slurmJobExitCode(ctx, payload.SlurmJobID)
+	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
+		"exit_code": exitCode,
+		"success":   exitCode == 0,
+	})
+}
+
+// slurmJobRunning returns true if the job is still in squeue.
+func slurmJobRunning(ctx context.Context, slurmJobID int) (bool, error) {
+	out, err := exec.CommandContext(ctx, "squeue", "-j", strconv.Itoa(slurmJobID), "-h").Output()
+	if err != nil {
+		return false, nil // not found → completed
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// slurmJobExitCode uses sacct to get the job's exit code after completion.
+func slurmJobExitCode(ctx context.Context, slurmJobID int) int {
+	out, err := exec.CommandContext(ctx, "sacct",
+		"-j", strconv.Itoa(slurmJobID),
+		"--format=ExitCode", "--noheader", "--parsable2",
+	).Output()
+	if err != nil {
+		return -1
+	}
+	// Output is "0:0\n..." — format is exit_code:signal
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) >= 1 && parts[0] != "" {
+			code, _ := strconv.Atoi(parts[0])
+			return code
+		}
+	}
+	return -1
 }

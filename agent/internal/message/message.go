@@ -32,6 +32,9 @@ const (
 
 	// User provisioning
 	CmdProvisionUser CommandType = "provision_user"
+
+	// Job output streaming
+	CmdWatchJob CommandType = "watch_job"
 )
 
 // ReplyType enumerates reply types.
@@ -176,6 +179,12 @@ type PartitionDef struct {
 // SetupPartitionsPayload is the payload for setup_partitions commands.
 type SetupPartitionsPayload struct {
 	Partitions []PartitionDef `json:"partitions"`
+}
+
+// WatchJobPayload is the payload for watch_job commands.
+type WatchJobPayload struct {
+	SlurmJobID int    `json:"slurm_job_id"`
+	OutputFile string `json:"output_file"`
 }
 
 // TeardownPayload is the payload for teardown commands.

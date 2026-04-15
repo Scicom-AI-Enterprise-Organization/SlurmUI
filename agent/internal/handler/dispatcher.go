@@ -57,6 +57,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cmd *message.Command) error {
 		return d.slurm.HandleJobInfo(ctx, cmd)
 	case message.CmdNodeStatus:
 		return d.slurm.HandleNodeStatus(ctx, cmd)
+	case message.CmdWatchJob:
+		return d.slurm.HandleWatchJob(ctx, cmd)
 
 	// Deploy commands
 	case message.CmdActivateNode:

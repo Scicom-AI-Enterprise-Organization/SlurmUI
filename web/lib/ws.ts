@@ -1,10 +1,10 @@
 import { WebSocket } from "ws";
-import { getNatsConnection, jc } from "./nats";
-import type { Subscription } from "nats";
+import { readCommandStream } from "./nats";
+import { prisma } from "./prisma";
 
 interface WebSocketClient {
   ws: WebSocket;
-  subscriptions: Map<string, Subscription>;
+  abortControllers: Map<string, AbortController>;
 }
 
 const clients = new Map<string, WebSocketClient>();
@@ -24,7 +24,7 @@ export async function handleWebSocket(
   const clientId = `${userId}-${Date.now()}`;
   const client: WebSocketClient = {
     ws,
-    subscriptions: new Map(),
+    abortControllers: new Map(),
   };
   clients.set(clientId, client);
 
@@ -37,10 +37,10 @@ export async function handleWebSocket(
       }
 
       if (message.type === "unsubscribe" && message.request_id) {
-        const sub = client.subscriptions.get(message.request_id);
-        if (sub) {
-          sub.unsubscribe();
-          client.subscriptions.delete(message.request_id);
+        const ac = client.abortControllers.get(message.request_id);
+        if (ac) {
+          ac.abort();
+          client.abortControllers.delete(message.request_id);
         }
       }
     } catch (err) {
@@ -50,9 +50,8 @@ export async function handleWebSocket(
   });
 
   ws.on("close", () => {
-    // Clean up all subscriptions
-    for (const sub of client.subscriptions.values()) {
-      sub.unsubscribe();
+    for (const ac of client.abortControllers.values()) {
+      ac.abort();
     }
     clients.delete(clientId);
   });
@@ -67,59 +66,51 @@ async function subscribeToStream(
   clusterId: string,
   requestId: string
 ): Promise<void> {
-  const nc = await getNatsConnection();
+  const ac = new AbortController();
+  client.abortControllers.set(requestId, ac);
 
-  // Subscribe to stream subject for live stdout lines
-  const streamSubject = `aura.cluster.${clusterId}.stream.${requestId}`;
-  const streamSub = nc.subscribe(streamSubject);
-  client.subscriptions.set(`stream-${requestId}`, streamSub);
-
+  // readCommandStream replays buffered events first, then continues live.
+  // This prevents race conditions where the agent streamed output before
+  // the browser WS connection was established.
   (async () => {
-    let seq = 0;
-    for await (const msg of streamSub) {
-      try {
-        const line = jc.decode(msg.data) as string;
-        seq++;
-        client.ws.send(
-          JSON.stringify({
+    try {
+      for await (const event of readCommandStream(requestId)) {
+        if (ac.signal.aborted || client.ws.readyState !== WebSocket.OPEN) break;
+
+        if (event.type === "stream") {
+          const data = event.data as { line: string; seq: number };
+          client.ws.send(JSON.stringify({
             type: "stream",
             request_id: requestId,
-            line,
-            seq,
-          })
-        );
-      } catch (err) {
-        console.error("[WS] Error forwarding stream:", err);
-      }
-    }
-  })();
+            line: data.line,
+            seq: data.seq,
+          }));
+        } else if (event.type === "reply") {
+          const reply = event.data as { type: string; payload: any };
+          const success = reply.type === "result";
+          const exitCode: number = success ? (reply.payload?.exit_code ?? 0) : -1;
 
-  // Subscribe to reply subject for completion
-  const replySubject = `aura.cluster.${clusterId}.reply.${requestId}`;
-  const replySub = nc.subscribe(replySubject, { max: 1 });
-  client.subscriptions.set(`reply-${requestId}`, replySub);
+          // Persist final status to DB so the page shows correct state on refresh.
+          await prisma.job.update({
+            where: { id: requestId },
+            data: {
+              status: success && exitCode === 0 ? "COMPLETED" : "FAILED",
+              exitCode,
+            },
+          }).catch((err: unknown) => console.error("[WS] Failed to update job status:", err));
 
-  (async () => {
-    for await (const msg of replySub) {
-      try {
-        const result = jc.decode(msg.data);
-        client.ws.send(
-          JSON.stringify({
+          client.ws.send(JSON.stringify({
             type: "complete",
             request_id: requestId,
-            result,
-          })
-        );
-        // Clean up stream subscription after completion
-        const streamSub = client.subscriptions.get(`stream-${requestId}`);
-        if (streamSub) {
-          streamSub.unsubscribe();
-          client.subscriptions.delete(`stream-${requestId}`);
+            result: reply.payload,
+          }));
+          break;
         }
-        client.subscriptions.delete(`reply-${requestId}`);
-      } catch (err) {
-        console.error("[WS] Error forwarding reply:", err);
       }
+    } catch (err) {
+      console.error("[WS] Error in stream loop:", err);
+    } finally {
+      client.abortControllers.delete(requestId);
     }
   })();
 }

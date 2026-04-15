@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { sendCommandAndWait } from "@/lib/nats";
+import { sendCommandAndWait, publishCommand } from "@/lib/nats";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -76,12 +76,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         payload: { script, partition, job_name: `aura-${job.id.slice(0, 8)}` },
       },
       60_000 // sbatch is fast
-    ) as { slurm_job_id?: number };
+    ) as { slurm_job_id?: number; output_file?: string };
 
     const updated = await prisma.job.update({
       where: { id: job.id },
       data: { slurmJobId: result.slurm_job_id ?? null, status: "RUNNING" },
     });
+
+    // Fire-and-forget: stream the job output file via the same request ID.
+    // The WS subscriber on the job page will pick up the streamed lines.
+    if (result.slurm_job_id && result.output_file) {
+      publishCommand(id, {
+        request_id: job.id,
+        type: "watch_job",
+        payload: {
+          slurm_job_id: result.slurm_job_id,
+          output_file: result.output_file,
+        },
+      }).catch((err) => console.error("[jobs] Failed to dispatch watch_job:", err));
+    }
 
     return NextResponse.json(updated, { status: 201 });
   } catch (err) {

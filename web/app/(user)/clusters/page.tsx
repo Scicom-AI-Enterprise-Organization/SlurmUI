@@ -45,7 +45,7 @@ export default async function UserClustersPage() {
           {clusters.map((cluster) => {
             const config = cluster.config as Record<string, unknown>;
             const partitions = (config.slurm_partitions ?? []) as Array<{ name: string }>;
-            const nodeGroups = (config.slurm_nodes ?? []) as Array<{ expression: string }>;
+            const nodeGroups = (config.slurm_hosts_entries ?? []) as Array<{ hostname: string }>;
 
             return (
               <Card key={cluster.id}>
