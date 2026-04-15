@@ -93,6 +93,7 @@ enum ClusterUserStatus {
   PENDING
   ACTIVE
   FAILED
+  REMOVED
 }
 
 // Global key-value settings store (admin-managed).

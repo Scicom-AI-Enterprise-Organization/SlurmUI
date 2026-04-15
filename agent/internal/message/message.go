@@ -31,7 +31,8 @@ const (
 	CmdTeardown        CommandType = "teardown"
 
 	// User provisioning
-	CmdProvisionUser CommandType = "provision_user"
+	CmdProvisionUser   CommandType = "provision_user"
+	CmdDeprovisionUser CommandType = "deprovision_user"
 
 	// Job output streaming
 	CmdWatchJob CommandType = "watch_job"
@@ -205,6 +206,15 @@ type WorkerHost struct {
 
 // ProvisionUserPayload is the payload for provision_user commands.
 type ProvisionUserPayload struct {
+	Username    string       `json:"username"`
+	UID         int          `json:"uid"`
+	GID         int          `json:"gid"`
+	NfsHome     string       `json:"nfs_home"`
+	WorkerHosts []WorkerHost `json:"worker_hosts"`
+}
+
+// DeprovisionUserPayload is the payload for deprovision_user commands.
+type DeprovisionUserPayload struct {
 	Username    string       `json:"username"`
 	UID         int          `json:"uid"`
 	GID         int          `json:"gid"`

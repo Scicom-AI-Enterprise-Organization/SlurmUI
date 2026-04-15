@@ -87,10 +87,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   try {
     const config = cluster.config as Record<string, unknown>;
-    const outputDir = (config.mgmt_nfs_path as string | undefined) ?? "";
     // Derive username — same logic as provisioning. Falls back to empty string
     // for admins who may not have a Linux account (sbatch runs as root).
     const username = dbUser.unixUsername ?? "";
+    // Job working directory = user's NFS home. Outputs land here naturally.
+    const dataNfsPath = (config.data_nfs_path as string | undefined) ?? "";
+    const workDir = username && dataNfsPath ? `${dataNfsPath}/${username}` : "";
 
     const result = await sendCommandAndWait(
       id,
@@ -101,7 +103,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           script,
           partition,
           job_name: `aura-${job.id.slice(0, 8)}`,
-          output_dir: outputDir,
+          work_dir: workDir,
           username,
         },
       },

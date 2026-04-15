@@ -85,6 +85,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cmd *message.Command) error {
 	// User provisioning commands
 	case message.CmdProvisionUser:
 		return d.user.HandleProvisionUser(ctx, cmd)
+	case message.CmdDeprovisionUser:
+		return d.user.HandleDeprovisionUser(ctx, cmd)
 
 	default:
 		err := fmt.Errorf("unknown command type: %s", cmd.Type)
