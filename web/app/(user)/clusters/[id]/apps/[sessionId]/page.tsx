@@ -134,7 +134,7 @@ function JupyterPanel({
       <Card>
         <CardContent className="pt-6 text-center text-muted-foreground">
           <p>Session ended before Jupyter could start.</p>
-          <p className="text-sm">Check that <code>jupyter</code> is installed on the controller node.</p>
+          <p className="text-sm">Check that <code>jupyter</code> is installed on the compute node and that port 8888 is available.</p>
         </CardContent>
       </Card>
     );

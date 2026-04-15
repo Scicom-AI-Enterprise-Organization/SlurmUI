@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -22,9 +23,10 @@ import (
 
 // appSession holds a running interactive app.
 type appSession struct {
-	ptmx *os.File   // PTY master (shell)
-	cmd  *exec.Cmd
-	done chan struct{}
+	ptmx    *os.File     // PTY master (shell)
+	cmd     *exec.Cmd
+	done    chan struct{}
+	proxyLn net.Listener // TCP proxy listener (Jupyter)
 }
 
 // AppHandler manages interactive app sessions (shell, Jupyter).
@@ -162,11 +164,18 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 	return nil
 }
 
-// launchJupyter starts a Jupyter Notebook server on the controller node.
+// launchJupyter starts a Jupyter Notebook server inside a real Slurm allocation.
+// It uses srun to land on a compute node, starts Jupyter there, then opens a
+// TCP proxy on the controller (port range 9100–9199) forwarding to the compute
+// node so the browser can reach Jupyter without direct access to the compute LAN.
 func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payload message.LaunchAppPayload) error {
-	port, err := findFreePort(8888, 8999)
+	// Jupyter listens on a fixed well-known port on the compute node.
+	const jupyterPort = 8888
+
+	// Reserve a proxy port on the controller before starting srun.
+	proxyPort, err := findFreePort(9100, 9199)
 	if err != nil {
-		return h.publisher.SendError(sessionID, fmt.Errorf("no free port available (8888–8999): %w", err))
+		return h.publisher.SendError(sessionID, fmt.Errorf("no free proxy port available (9100–9199): %w", err))
 	}
 
 	token, err := randomHex(16)
@@ -179,24 +188,49 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 		notebookDir = "/tmp"
 	}
 
-	var c *exec.Cmd
-	jupyterArgs := []string{
-		"notebook",
-		"--no-browser",
-		"--ip=0.0.0.0",
-		fmt.Sprintf("--port=%d", port),
-		"--NotebookApp.token=" + token,
-		"--NotebookApp.allow_origin=*",
-		"--notebook-dir=" + notebookDir,
+	nodes := payload.Nodes
+	if nodes <= 0 {
+		nodes = 1
 	}
-	if payload.Username != "" {
-		args := append([]string{"-u", payload.Username, "jupyter"}, jupyterArgs...)
-		c = exec.CommandContext(ctx, "sudo", args...)
-	} else {
-		c = exec.CommandContext(ctx, "jupyter", jupyterArgs...)
+	cpusPerNode := payload.CpusPerNode
+	if cpusPerNode <= 0 {
+		cpusPerNode = 1
+	}
+	timeLimit := payload.TimeLimit
+	if timeLimit == "" {
+		timeLimit = "2:00:00"
 	}
 
-	// Capture both stdout and stderr to detect the startup URL.
+	// Build srun args — allocate resources on one compute node.
+	var srunArgs []string
+	if payload.Partition != "" {
+		srunArgs = append(srunArgs, "--partition="+payload.Partition)
+	}
+	srunArgs = append(srunArgs,
+		fmt.Sprintf("--nodes=%d", nodes),
+		fmt.Sprintf("--cpus-per-task=%d", cpusPerNode),
+		"--ntasks-per-node=1",
+		"--time="+timeLimit,
+	)
+	if payload.GpusPerNode > 0 {
+		srunArgs = append(srunArgs, fmt.Sprintf("--gpus-per-node=%d", payload.GpusPerNode))
+	}
+
+	// The script announces the compute node hostname, then starts Jupyter.
+	script := fmt.Sprintf(
+		`echo "AURA_NODE:$(hostname)" && jupyter notebook --no-browser --ip=0.0.0.0 --port=%d --NotebookApp.token=%s --NotebookApp.allow_origin='*' --notebook-dir=%s 2>&1`,
+		jupyterPort, token, notebookDir,
+	)
+	srunArgs = append(srunArgs, "bash", "-c", script)
+
+	var c *exec.Cmd
+	if payload.Username != "" {
+		args := append([]string{"-u", payload.Username, "srun"}, srunArgs...)
+		c = exec.CommandContext(ctx, "sudo", args...)
+	} else {
+		c = exec.CommandContext(ctx, "srun", srunArgs...)
+	}
+
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return h.publisher.SendError(sessionID, fmt.Errorf("failed to create pipe: %w", err))
@@ -207,7 +241,7 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 	if err := c.Start(); err != nil {
 		pr.Close()
 		pw.Close()
-		return h.publisher.SendError(sessionID, fmt.Errorf("failed to start Jupyter: %w", err))
+		return h.publisher.SendError(sessionID, fmt.Errorf("failed to start srun for Jupyter: %w", err))
 	}
 	pw.Close()
 
@@ -216,14 +250,6 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 	h.sessions[sessionID] = session
 	h.mu.Unlock()
 
-	// Build the access URL now — we know the port and token.
-	host := payload.ControllerHost
-	if host == "" {
-		host = "localhost"
-	}
-	accessURL := fmt.Sprintf("http://%s:%d?token=%s", host, port, token)
-
-	// Stream output and wait for Jupyter to confirm it started.
 	go func() {
 		defer func() {
 			pr.Close()
@@ -233,24 +259,91 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 			close(session.done)
 		}()
 
+		seq := 0
 		scanner := bufio.NewScanner(pr)
+		var computeNode string
+		var resultSent bool
+
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Stream lines to NATS so the browser can see startup logs.
-			_ = h.publisher.SendStreamLine(sessionID, line, 0)
+			_ = h.publisher.SendStreamLine(sessionID, line, seq)
+			seq++
+
+			if resultSent {
+				continue
+			}
+
+			// First line printed by the srun script: the compute node hostname.
+			if strings.HasPrefix(line, "AURA_NODE:") {
+				computeNode = strings.TrimSpace(strings.TrimPrefix(line, "AURA_NODE:"))
+				continue
+			}
+
+			// Jupyter prints a URL containing the token once it is ready.
+			// Wait until we have the hostname AND Jupyter has confirmed startup.
+			if computeNode != "" && strings.Contains(line, "?token=") {
+				ln, err := net.Listen("tcp", fmt.Sprintf(":%d", proxyPort))
+				if err != nil {
+					_ = h.publisher.SendError(sessionID, fmt.Errorf("failed to start TCP proxy on :%d: %w", proxyPort, err))
+					resultSent = true
+					continue
+				}
+
+				h.mu.Lock()
+				session.proxyLn = ln
+				h.mu.Unlock()
+
+				target := fmt.Sprintf("%s:%d", computeNode, jupyterPort)
+				go proxyTCP(ln, target)
+
+				host := payload.ControllerHost
+				if host == "" {
+					host = "localhost"
+				}
+				accessURL := fmt.Sprintf("http://%s:%d/?token=%s", host, proxyPort, token)
+
+				_ = h.publisher.SendResult(sessionID, map[string]interface{}{
+					"type":       "jupyter_ready",
+					"access_url": accessURL,
+					"port":       proxyPort,
+					"token":      token,
+				})
+				resultSent = true
+			}
 		}
+
+		// If srun exited before Jupyter announced itself, report the failure.
+		if !resultSent {
+			_ = h.publisher.SendError(sessionID, fmt.Errorf("Jupyter did not start — check that jupyter is installed on the compute node and port %d is available", jupyterPort))
+		}
+
 		c.Wait()
 	}()
 
-	// Return the URL immediately — the server may still be starting up,
-	// but the token and port are known and the URL is stable.
-	return h.publisher.SendResult(sessionID, map[string]interface{}{
-		"type":       "jupyter_started",
-		"access_url": accessURL,
-		"port":       port,
-		"token":      token,
-		"note":       fmt.Sprintf("Ensure port %d is open on the controller node's firewall/security group.", port),
-	})
+	return nil
+}
+
+// proxyTCP accepts connections on ln and bidirectionally proxies them to target.
+func proxyTCP(ln net.Listener, target string) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return // listener was closed (session killed)
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			remote, err := net.Dial("tcp", target)
+			if err != nil {
+				return
+			}
+			defer remote.Close()
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); io.Copy(remote, c) }()
+			go func() { defer wg.Done(); io.Copy(c, remote) }()
+			wg.Wait()
+		}(conn)
+	}
 }
 
 // HandleAppInput writes data to the PTY of an active shell session.
@@ -328,6 +421,9 @@ func (h *AppHandler) HandleKillApp(ctx context.Context, cmd *message.Command) er
 		if session.ptmx != nil {
 			_ = session.ptmx.Close()
 		}
+		if session.proxyLn != nil {
+			_ = session.proxyLn.Close()
+		}
 	}
 
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{"ok": true})
@@ -354,5 +450,3 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// ioReadAll is a helper used to satisfy the import of io.
-var _ = io.EOF

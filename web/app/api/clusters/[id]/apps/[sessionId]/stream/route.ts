@@ -41,13 +41,13 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
             const payload = (event.data as any)?.payload ?? {};
             const eventType = payload.type as string | undefined;
 
-            if (eventType === "jupyter_started") {
+            if (eventType === "jupyter_ready") {
               // Update DB with access URL
               await prisma.appSession.update({
                 where: { id: sessionId },
                 data: { status: "RUNNING", accessUrl: payload.access_url },
               }).catch(() => {});
-              send({ type: "jupyter_ready", access_url: payload.access_url, note: payload.note });
+              send({ type: "jupyter_ready", access_url: payload.access_url });
             } else {
               // Shell exited
               await prisma.appSession.update({

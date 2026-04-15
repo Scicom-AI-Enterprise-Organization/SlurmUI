@@ -36,7 +36,7 @@ const APPS: AppDef[] = [
   {
     type: "jupyter",
     title: "Jupyter Notebook",
-    description: "Start a Jupyter Notebook server on the controller node using your NFS home as the working directory.",
+    description: "Start a Jupyter Notebook server on a compute node inside a Slurm allocation, using your NFS home as the working directory.",
     icon: <BookOpen className="h-8 w-8 text-orange-500" />,
     tags: ["Python", "ML", "Data Science"],
   },
@@ -292,7 +292,7 @@ export default function AppsPage() {
 
             {dialogApp?.type === "jupyter" && (
               <p className="text-xs text-muted-foreground">
-                Jupyter runs directly on the controller node (not via Slurm). No allocation is created — it will not appear in <code>squeue</code>. Ensure port 8888–8999 is open in your firewall.
+                Jupyter will run on a compute node inside a Slurm allocation. The controller proxies your browser to the compute node — ensure port 9100–9199 is open on the controller in your firewall.
               </p>
             )}
 
