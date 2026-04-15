@@ -70,12 +70,21 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
     const { request_id } = await res.json();
 
     const evtSource = new EventSource(`/api/clusters/${clusterId}/stream/${request_id}`);
+
+    // Client-side timeout: surface Force Delete after 3 minutes if no completion
+    const timeout = setTimeout(() => {
+      evtSource.close();
+      setError("Teardown timed out after 3 minutes — agent may be unreachable.");
+      setPhase("failed");
+    }, 3 * 60 * 1000);
+
     evtSource.onmessage = async (e) => {
       try {
         const event = JSON.parse(e.data);
         if (event.type === "stream") {
           appendLog(event.line);
         } else if (event.type === "complete") {
+          clearTimeout(timeout);
           evtSource.close();
           if (event.success) {
             appendLog("[aura] Removing cluster record...");
@@ -88,6 +97,7 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
       } catch {}
     };
     evtSource.onerror = () => {
+      clearTimeout(timeout);
       evtSource.close();
       setError("Connection lost during teardown — agent may be offline.");
       setPhase("failed");
