@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/scicom/aura/agent/internal/ansible"
 	"github.com/scicom/aura/agent/internal/message"
@@ -338,8 +337,10 @@ func (h *SetupHandler) HandleTeardown(ctx context.Context, cmd *message.Command)
 		h.logger.Error("failed to send teardown result", "error", sendErr)
 	}
 
-	// Spawn a detached subprocess (new session) that stops and removes the agent
-	// after a brief delay, giving the reply above time to reach the web service.
+	// Schedule agent self-uninstall via a transient systemd unit so the cleanup
+	// runs outside the agent's cgroup. Using Setsid alone is not enough — when
+	// systemd stops aura-agent.service it kills the entire cgroup, which would
+	// terminate a plain bash subprocess before it can finish.
 	cleanup := "sleep 5;" +
 		"systemctl stop aura-agent 2>/dev/null || true;" +
 		"systemctl disable aura-agent 2>/dev/null || true;" +
@@ -347,8 +348,8 @@ func (h *SetupHandler) HandleTeardown(ctx context.Context, cmd *message.Command)
 		"systemctl daemon-reload 2>/dev/null || true;" +
 		"rm -rf /opt/aura /etc/aura-agent;" +
 		"rm -f /usr/local/bin/aura-agent"
-	selfCleanup := exec.Command("bash", "-c", cleanup)
-	selfCleanup.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	selfCleanup := exec.Command("systemd-run", "--no-block", "--unit=aura-cleanup",
+		"bash", "-c", cleanup)
 	_ = selfCleanup.Start()
 
 	return nil
