@@ -68,12 +68,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   });
 
   try {
+    // Pass the shared NFS path so the agent writes the output file there —
+    // both controller (NFS server) and workers (NFS clients) see the same path.
+    const config = cluster.config as Record<string, unknown>;
+    const outputDir = (config.mgmt_nfs_path as string | undefined) ?? "";
+
     const result = await sendCommandAndWait(
       id,
       {
         request_id: job.id,
         type: "submit_job",
-        payload: { script, partition, job_name: `aura-${job.id.slice(0, 8)}` },
+        payload: {
+          script,
+          partition,
+          job_name: `aura-${job.id.slice(0, 8)}`,
+          output_dir: outputDir,
+        },
       },
       60_000 // sbatch is fast
     ) as { slurm_job_id?: number; output_file?: string };

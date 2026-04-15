@@ -78,9 +78,9 @@ type Heartbeat struct {
 
 // SubmitJobPayload is the payload for submit_job commands.
 type SubmitJobPayload struct {
-	Script    string            `json:"script"`     // sbatch script content
-	WorkDir   string            `json:"work_dir"`   // working directory
-	JobName   string            `json:"job_name"`   // --job-name
+	Script    string            `json:"script"`      // sbatch script content
+	WorkDir   string            `json:"work_dir"`    // working directory
+	JobName   string            `json:"job_name"`    // --job-name
 	Partition string            `json:"partition"`   // --partition
 	Nodes     int               `json:"nodes"`       // --nodes
 	NTasks    int               `json:"ntasks"`      // --ntasks
@@ -88,6 +88,7 @@ type SubmitJobPayload struct {
 	TimeLimit string            `json:"time_limit"`  // --time
 	ExtraArgs []string          `json:"extra_args"`  // additional sbatch flags
 	EnvVars   map[string]string `json:"env_vars"`    // --export
+	OutputDir string            `json:"output_dir"`  // shared NFS dir for job output
 }
 
 // CancelJobPayload is the payload for cancel_job commands.

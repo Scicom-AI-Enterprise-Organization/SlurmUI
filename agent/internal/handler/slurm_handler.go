@@ -41,8 +41,20 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 
 	h.logger.Info("submitting job", "request_id", cmd.RequestID, "job_name", payload.JobName)
 
-	// Write output to a predictable path so watch_job can tail it.
-	outputFile := fmt.Sprintf("/tmp/aura-%s.out", cmd.RequestID)
+	// Write output to a path visible to BOTH the controller (where the agent
+	// runs) and the worker node (where the job executes).
+	// If a shared NFS directory is provided, use it — the controller has that
+	// path locally (it IS the NFS server) and workers see it via the NFS mount.
+	// Fall back to /tmp only for single-node clusters (controller = worker).
+	outputDir := "/tmp"
+	if payload.OutputDir != "" {
+		outputDir = strings.TrimRight(payload.OutputDir, "/") + "/aura-jobs"
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			h.logger.Warn("failed to create output dir, falling back to /tmp", "error", err)
+			outputDir = "/tmp"
+		}
+	}
+	outputFile := fmt.Sprintf("%s/aura-%s.out", outputDir, cmd.RequestID)
 
 	opts := &slurm.SbatchOpts{
 		Script:    payload.Script,
@@ -193,6 +205,7 @@ func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command)
 	defer f.Close()
 
 	seq := 0
+	var outputLines []string
 	reader := bufio.NewReader(f)
 
 	for {
@@ -204,8 +217,10 @@ func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command)
 
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
+			clean := strings.TrimRight(line, "\r\n")
+			outputLines = append(outputLines, clean)
 			seq++
-			if pubErr := h.publisher.SendStreamLine(cmd.RequestID, strings.TrimRight(line, "\r\n"), seq); pubErr != nil {
+			if pubErr := h.publisher.SendStreamLine(cmd.RequestID, clean, seq); pubErr != nil {
 				h.logger.Error("failed to stream job output line", "error", pubErr)
 			}
 		}
@@ -216,8 +231,10 @@ func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command)
 				for {
 					line, err2 := reader.ReadString('\n')
 					if len(line) > 0 {
+						clean := strings.TrimRight(line, "\r\n")
+						outputLines = append(outputLines, clean)
 						seq++
-						h.publisher.SendStreamLine(cmd.RequestID, strings.TrimRight(line, "\r\n"), seq)
+						h.publisher.SendStreamLine(cmd.RequestID, clean, seq)
 					}
 					if err2 != nil {
 						break
@@ -241,6 +258,7 @@ func (h *SlurmHandler) HandleWatchJob(ctx context.Context, cmd *message.Command)
 	return h.publisher.SendResult(cmd.RequestID, map[string]interface{}{
 		"exit_code": exitCode,
 		"success":   exitCode == 0,
+		"output":    strings.Join(outputLines, "\n"),
 	})
 }
 
@@ -253,22 +271,35 @@ func slurmJobRunning(ctx context.Context, slurmJobID int) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// slurmJobExitCode uses sacct to get the job's exit code after completion.
+// slurmJobExitCode returns the job's exit code after completion.
+// Tries scontrol first (works without accounting), then sacct as fallback.
+// Returns 0 if neither can determine the exit code (job completed normally).
 func slurmJobExitCode(ctx context.Context, slurmJobID int) int {
-	out, err := exec.CommandContext(ctx, "sacct",
+	// scontrol show job works for recently-completed jobs without accounting.
+	out, err := exec.CommandContext(ctx, "scontrol", "show", "job", strconv.Itoa(slurmJobID)).Output()
+	if err == nil {
+		for _, field := range strings.Fields(string(out)) {
+			if strings.HasPrefix(field, "ExitCode=") {
+				parts := strings.SplitN(strings.TrimPrefix(field, "ExitCode="), ":", 2)
+				code, _ := strconv.Atoi(parts[0])
+				return code
+			}
+		}
+	}
+	// sacct fallback (requires AccountingStorageType != none)
+	out, err = exec.CommandContext(ctx, "sacct",
 		"-j", strconv.Itoa(slurmJobID),
 		"--format=ExitCode", "--noheader", "--parsable2",
 	).Output()
-	if err != nil {
-		return -1
-	}
-	// Output is "0:0\n..." — format is exit_code:signal
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
-		if len(parts) >= 1 && parts[0] != "" {
-			code, _ := strconv.Atoi(parts[0])
-			return code
+	if err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+			if len(parts) >= 1 && parts[0] != "" {
+				code, _ := strconv.Atoi(parts[0])
+				return code
+			}
 		}
 	}
-	return -1
+	// Cannot determine exit code — assume success if job left queue normally.
+	return 0
 }
