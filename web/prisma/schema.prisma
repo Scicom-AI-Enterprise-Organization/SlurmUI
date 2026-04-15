@@ -59,15 +59,16 @@ enum JobStatus {
 }
 
 model User {
-  id         String        @id @default(uuid())
-  keycloakId String        @unique
-  email      String        @unique
-  name       String?
-  unixUid    Int?          @unique
-  unixGid    Int?
-  role       UserRole      @default(USER)
-  createdAt  DateTime      @default(now())
-  clusters   ClusterUser[]
+  id            String        @id @default(uuid())
+  keycloakId    String        @unique
+  email         String        @unique
+  name          String?
+  unixUid       Int?          @unique
+  unixGid       Int?
+  unixUsername  String?       @unique
+  role          UserRole      @default(USER)
+  createdAt     DateTime      @default(now())
+  clusters      ClusterUser[]
 }
 
 enum UserRole {

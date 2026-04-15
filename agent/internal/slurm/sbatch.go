@@ -20,6 +20,7 @@ type SbatchOpts struct {
 	TimeLimit string
 	ExtraArgs []string
 	EnvVars   map[string]string
+	Username  string // if set, runs as: sudo -u <Username> sbatch ...
 }
 
 // Sbatch runs `sbatch` with the given options and streams stdout.
@@ -39,6 +40,12 @@ func Sbatch(ctx context.Context, opts *SbatchOpts, streamFn StreamFunc) (*ExecRe
 	tmpFile.Close()
 
 	args := buildSbatchArgs(opts, tmpFile.Name())
+
+	if opts.Username != "" {
+		// Run as the provisioned Linux user so the job is owned by them in Slurm.
+		sudoArgs := append([]string{"-u", opts.Username, "sbatch"}, args...)
+		return RunCommandStreaming(ctx, streamFn, "sudo", sudoArgs...)
+	}
 	return RunCommandStreaming(ctx, streamFn, "sbatch", args...)
 }
 
@@ -79,8 +86,15 @@ func buildSbatchArgs(opts *SbatchOpts, scriptPath string) []string {
 		args = append(args, arg)
 	}
 
-	// Output file defaults.
-	if opts.WorkDir != "" {
+	// Only apply default output/error paths if ExtraArgs hasn't already set --output.
+	hasOutputArg := false
+	for _, a := range opts.ExtraArgs {
+		if strings.HasPrefix(a, "--output=") || strings.HasPrefix(a, "-o") {
+			hasOutputArg = true
+			break
+		}
+	}
+	if opts.WorkDir != "" && !hasOutputArg {
 		args = append(args,
 			"--output="+filepath.Join(opts.WorkDir, "slurm-%j.out"),
 			"--error="+filepath.Join(opts.WorkDir, "slurm-%j.err"),

@@ -55,6 +55,24 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Cluster is not accepting jobs" }, { status: 503 });
   }
 
+  // Verify the submitting user is provisioned and ACTIVE on this cluster.
+  const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
+  if (!dbUser) return NextResponse.json({ error: "User not found" }, { status: 404 });
+
+  // Admins bypass the cluster-user check (they may not have a Linux account).
+  const isAdmin = (session.user as any).role === "ADMIN";
+  if (!isAdmin) {
+    const clusterUser = await prisma.clusterUser.findUnique({
+      where: { userId_clusterId: { userId: session.user.id, clusterId: id } },
+    });
+    if (!clusterUser || clusterUser.status !== "ACTIVE") {
+      return NextResponse.json(
+        { error: "You must be provisioned on this cluster before submitting jobs." },
+        { status: 403 }
+      );
+    }
+  }
+
   const body = await req.json();
   const { script, partition } = body;
 
@@ -68,10 +86,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   });
 
   try {
-    // Pass the shared NFS path so the agent writes the output file there —
-    // both controller (NFS server) and workers (NFS clients) see the same path.
     const config = cluster.config as Record<string, unknown>;
     const outputDir = (config.mgmt_nfs_path as string | undefined) ?? "";
+    // Derive username — same logic as provisioning. Falls back to empty string
+    // for admins who may not have a Linux account (sbatch runs as root).
+    const username = dbUser.unixUsername ?? "";
 
     const result = await sendCommandAndWait(
       id,
@@ -83,6 +102,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           partition,
           job_name: `aura-${job.id.slice(0, 8)}`,
           output_dir: outputDir,
+          username,
         },
       },
       60_000 // sbatch is fast

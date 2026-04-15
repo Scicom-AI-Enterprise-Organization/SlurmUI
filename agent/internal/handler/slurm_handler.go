@@ -49,10 +49,13 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 	outputDir := "/tmp"
 	if payload.OutputDir != "" {
 		outputDir = strings.TrimRight(payload.OutputDir, "/") + "/aura-jobs"
-		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		// 0777 so any provisioned Linux user can write output files here.
+		if err := os.MkdirAll(outputDir, 0o777); err != nil {
 			h.logger.Warn("failed to create output dir, falling back to /tmp", "error", err)
 			outputDir = "/tmp"
 		}
+		// Ensure permissions even if the dir already existed with tighter perms.
+		_ = os.Chmod(outputDir, 0o777)
 	}
 	outputFile := fmt.Sprintf("%s/aura-%s.out", outputDir, cmd.RequestID)
 
@@ -67,6 +70,7 @@ func (h *SlurmHandler) HandleSubmitJob(ctx context.Context, cmd *message.Command
 		TimeLimit: payload.TimeLimit,
 		ExtraArgs: append(payload.ExtraArgs, "--output="+outputFile),
 		EnvVars:   payload.EnvVars,
+		Username:  payload.Username,
 	}
 
 	streamFn := func(line string, seq int) {

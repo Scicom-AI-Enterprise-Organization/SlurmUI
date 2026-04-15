@@ -89,6 +89,7 @@ type SubmitJobPayload struct {
 	ExtraArgs []string          `json:"extra_args"`  // additional sbatch flags
 	EnvVars   map[string]string `json:"env_vars"`    // --export
 	OutputDir string            `json:"output_dir"`  // shared NFS dir for job output
+	Username  string            `json:"username"`    // Linux user to run sbatch as (sudo -u)
 }
 
 // CancelJobPayload is the payload for cancel_job commands.
