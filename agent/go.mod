@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect

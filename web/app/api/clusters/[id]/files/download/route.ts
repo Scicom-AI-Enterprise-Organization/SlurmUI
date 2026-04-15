@@ -1,0 +1,44 @@
+import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { sendCommandAndWait } from "@/lib/nats";
+
+interface RouteParams { params: Promise<{ id: string }> }
+
+// GET /api/clusters/[id]/files/download?path=... — download a file via agent
+export async function GET(req: NextRequest, { params }: RouteParams) {
+  const { id } = await params;
+  const session = await auth();
+  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const dbUser = await prisma.user.findUnique({ where: { id: session.user.id } });
+  if (!dbUser?.unixUsername) {
+    return NextResponse.json({ error: "No Linux account provisioned" }, { status: 403 });
+  }
+
+  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
+
+  const config = cluster.config as Record<string, unknown>;
+  const dataNfsPath = (config.data_nfs_path as string | undefined) ?? "/aura-usrdata";
+  const nfsHome = `${dataNfsPath}/${dbUser.unixUsername}`;
+
+  const url = new URL(req.url);
+  const path = url.searchParams.get("path") ?? "";
+  if (!path) return NextResponse.json({ error: "path is required" }, { status: 400 });
+
+  const result = await sendCommandAndWait(id, {
+    request_id: crypto.randomUUID(),
+    type: "read_file",
+    payload: { path, nfs_home: nfsHome },
+  }, 30_000) as { name: string; content: string; size: number };
+
+  const bytes = Buffer.from(result.content, "base64");
+  return new Response(bytes, {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${result.name}"`,
+      "Content-Length": String(bytes.length),
+    },
+  });
+}

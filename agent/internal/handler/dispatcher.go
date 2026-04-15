@@ -15,6 +15,8 @@ type Dispatcher struct {
 	deploy    *DeployHandler
 	setup     *SetupHandler
 	user      *UserHandler
+	file      *FileHandler
+	app       *AppHandler
 	publisher *agentNats.Publisher
 	logger    *slog.Logger
 }
@@ -25,6 +27,8 @@ func NewDispatcher(
 	deployHandler *DeployHandler,
 	setupHandler *SetupHandler,
 	userHandler *UserHandler,
+	fileHandler *FileHandler,
+	appHandler *AppHandler,
 	publisher *agentNats.Publisher,
 	logger *slog.Logger,
 ) *Dispatcher {
@@ -33,6 +37,8 @@ func NewDispatcher(
 		deploy:    deployHandler,
 		setup:     setupHandler,
 		user:      userHandler,
+		file:      fileHandler,
+		app:       appHandler,
 		publisher: publisher,
 		logger:    logger,
 	}
@@ -87,6 +93,22 @@ func (d *Dispatcher) Dispatch(ctx context.Context, cmd *message.Command) error {
 		return d.user.HandleProvisionUser(ctx, cmd)
 	case message.CmdDeprovisionUser:
 		return d.user.HandleDeprovisionUser(ctx, cmd)
+
+	// File operations
+	case message.CmdListFiles:
+		return d.file.HandleListFiles(ctx, cmd)
+	case message.CmdReadFile:
+		return d.file.HandleReadFile(ctx, cmd)
+
+	// Interactive apps
+	case message.CmdLaunchApp:
+		return d.app.HandleLaunchApp(ctx, cmd)
+	case message.CmdAppInput:
+		return d.app.HandleAppInput(ctx, cmd)
+	case message.CmdAppResize:
+		return d.app.HandleAppResize(ctx, cmd)
+	case message.CmdKillApp:
+		return d.app.HandleKillApp(ctx, cmd)
 
 	default:
 		err := fmt.Errorf("unknown command type: %s", cmd.Type)
