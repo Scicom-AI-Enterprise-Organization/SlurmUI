@@ -230,7 +230,7 @@
           {% for host in groups['slurm_workers'] %}
           {% set ns = namespace(gpus=0) %}
           {% for node in nodes %}{% if node.hostname == host %}{% set ns.gpus = node.gpus | int %}{% endif %}{% endfor %}
-          NodeName={{ host }} CPUs={{ hostvars[host]['ansible_processor_vcpus'] | int }} RealMemory={{ hostvars[host]['ansible_memtotal_mb'] | int - 512 }}{% if ns.gpus > 0 %} Gres=gpu:{{ ns.gpus }}{% endif %} State=UNKNOWN
+          NodeName={{ host }} CPUs={{ hostvars[host]['ansible_processor_vcpus'] | int }} Sockets={{ hostvars[host]['ansible_processor_count'] | int }} CoresPerSocket={{ hostvars[host]['ansible_processor_cores'] | int }} ThreadsPerCore={{ (hostvars[host]['ansible_processor_vcpus'] | int // (hostvars[host]['ansible_processor_count'] | int * hostvars[host]['ansible_processor_cores'] | int)) | int }} RealMemory={{ hostvars[host]['ansible_memtotal_mb'] | int - 512 }}{% if ns.gpus > 0 %} Gres=gpu:{{ ns.gpus }}{% endif %} State=UNKNOWN
           {% endfor %}
 
     - name: Restart slurmctld to load updated node specs
