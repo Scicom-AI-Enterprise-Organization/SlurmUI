@@ -132,6 +132,7 @@ SwitchType=switch/none
 TaskPlugin=task/none
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
+GresTypes=gpu
 SlurmctldLogFile=/var/log/slurm/slurmctld.log
 SlurmdLogFile=/var/log/slurm/slurmd.log
 SLURM_CONF"

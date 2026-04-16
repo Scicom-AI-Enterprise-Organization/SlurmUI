@@ -90,7 +90,7 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
 
       <Separator />
 
-      <ClusterTabs clusterId={id} hasNodes={((cluster.config as any)?.slurm_hosts_entries ?? []).length > 0} />
+      <ClusterTabs clusterId={id} isActive={cluster.status === "ACTIVE"} />
       {children}
     </div>
   );

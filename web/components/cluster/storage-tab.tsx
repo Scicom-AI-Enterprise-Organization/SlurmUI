@@ -522,7 +522,7 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
 
       {/* Deploy Log Dialog */}
       <Dialog open={deployLogOpen} onOpenChange={deployStatus !== "running" ? setDeployLogOpen : undefined}>
-        <DialogContent className="max-w-[90vw]">
+        <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between">
               Deploying Storage

@@ -142,7 +142,7 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
       </Button>
 
       <Dialog open={open} onOpenChange={(o) => { if (!o) handleClose(); }}>
-        <DialogContent showCloseButton className="max-w-[90vw]">
+        <DialogContent showCloseButton className="max-w-4xl">
           {phase === "confirm" && (
             <>
               <DialogHeader>
@@ -172,7 +172,7 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
           {(phase === "running" || phase === "success" || phase === "failed") && (
             <>
               <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
+                <DialogTitle className="flex items-center gap-2 pr-8">
                   {phase === "running" && <Loader2 className="h-4 w-4 animate-spin" />}
                   {phase === "running" ? "Bootstrapping cluster..." :
                    phase === "success" ? "Bootstrap complete" : "Bootstrap failed"}

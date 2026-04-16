@@ -88,7 +88,7 @@ export function TerminalButton({ clusterId }: TerminalButtonProps) {
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent showCloseButton className="max-w-[90vw]">
+        <DialogContent showCloseButton className="max-w-4xl">
           <DialogHeader>
             <DialogTitle>Terminal</DialogTitle>
           </DialogHeader>

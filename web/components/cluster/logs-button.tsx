@@ -100,7 +100,7 @@ export function LogsButton({ clusterId }: LogsButtonProps) {
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent showCloseButton className="max-w-[90vw]">
+        <DialogContent showCloseButton className="max-w-4xl">
           <DialogHeader>
             <DialogTitle>Cluster Logs</DialogTitle>
           </DialogHeader>

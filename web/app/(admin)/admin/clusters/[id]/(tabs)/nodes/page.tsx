@@ -21,16 +21,28 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
 } from "@/components/ui/dialog";
 import { LiveLogDialog } from "@/components/ui/live-log-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText } from "lucide-react";
 
 interface NodeInfo {
   name: string;
   state: string;
   cpus: number;
   memory: number;
+  gpus?: number;
+  gres?: string;
   partitions: string[];
 }
 
@@ -56,6 +68,10 @@ export default function NodesPage() {
   const [newNodeCpus, setNewNodeCpus] = useState(0);
   const [newNodeGpus, setNewNodeGpus] = useState(0);
   const [newNodeMemory, setNewNodeMemory] = useState(0);
+  const [newNodeMemoryMb, setNewNodeMemoryMb] = useState(0);
+  const [newNodeSockets, setNewNodeSockets] = useState(1);
+  const [newNodeCores, setNewNodeCores] = useState(1);
+  const [newNodeThreads, setNewNodeThreads] = useState(1);
   const [addingNode, setAddingNode] = useState(false);
   const [addRequestId, setAddRequestId] = useState<string | null>(null);
   const [addLogOpen, setAddLogOpen] = useState(false);
@@ -65,10 +81,26 @@ export default function NodesPage() {
   const [nodeTestMsg, setNodeTestMsg] = useState("");
   const [detecting, setDetecting] = useState(false);
 
+  // Per-node action state
+  const [fixingNode, setFixingNode] = useState<string | null>(null);
+  const [deletingNode, setDeletingNode] = useState<string | null>(null);
+  const [confirmDeleteNode, setConfirmDeleteNode] = useState<string | null>(null);
+  const [terminalNode, setTerminalNode] = useState<string | null>(null);
+  const [termLines, setTermLines] = useState<string[]>([]);
+  const [termCmd, setTermCmd] = useState("");
+  const [termRunning, setTermRunning] = useState(false);
+
+  // Logs dialog state
+  const [logsNode, setLogsNode] = useState<string | null>(null);
+  const [logsSource, setLogsSource] = useState("slurmd");
+  const [logsLines, setLogsLines] = useState<string[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+
   // SSE log state (for SSH mode)
   const [sseLogLines, setSseLogLines] = useState<string[]>([]);
   const [sseLogOpen, setSseLogOpen] = useState(false);
   const [sseLogStatus, setSseLogStatus] = useState<"streaming" | "complete" | "error">("streaming");
+  const [sseLogTitle, setSseLogTitle] = useState("Adding new node");
 
   const resetNodeTest = () => {
     setNodeTestStatus("idle");
@@ -109,8 +141,12 @@ export default function NodesPage() {
           const detectResult = await detectRes.json();
           if (detectRes.ok && detectResult.success) {
             if (detectResult.cpus) setNewNodeCpus(detectResult.cpus);
+            if (detectResult.memoryMb) setNewNodeMemoryMb(detectResult.memoryMb);
             if (detectResult.memoryGb) setNewNodeMemory(detectResult.memoryGb);
             if (detectResult.gpus !== undefined) setNewNodeGpus(detectResult.gpus);
+            if (detectResult.sockets) setNewNodeSockets(detectResult.sockets);
+            if (detectResult.coresPerSocket) setNewNodeCores(detectResult.coresPerSocket);
+            if (detectResult.threadsPerCore) setNewNodeThreads(detectResult.threadsPerCore);
           }
         } catch {} finally {
           setDetecting(false);
@@ -183,7 +219,10 @@ export default function NodesPage() {
           sshPort: newNodePort,
           cpus: newNodeCpus,
           gpus: newNodeGpus,
-          memoryMb: newNodeMemory,
+          memoryMb: newNodeMemoryMb || newNodeMemory * 1024,
+          sockets: newNodeSockets,
+          coresPerSocket: newNodeCores,
+          threadsPerCore: newNodeThreads,
         }),
       });
 
@@ -193,64 +232,34 @@ export default function NodesPage() {
         return;
       }
 
-      const contentType = res.headers.get("content-type") ?? "";
+      const data = await res.json();
       setAddDialogOpen(false);
 
-      if (contentType.includes("text/event-stream") && res.body) {
-        // SSH mode: stream logs directly
+      if (data.taskId) {
+        // Background task mode: poll for logs
+        setSseLogTitle("Adding new node");
         setSseLogLines([]);
         setSseLogStatus("streaming");
         setSseLogOpen(true);
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const event = JSON.parse(line.slice(6));
-              if (event.type === "stream") {
-                setSseLogLines((prev) => [...prev, event.line]);
-              } else if (event.type === "complete") {
-                if (event.success) {
-                  setSseLogStatus("complete");
-                  toast.success("Node added successfully");
-                  fetchNodes();
-                } else {
-                  setSseLogStatus("error");
-                }
-                return;
-              }
-            } catch {}
-          }
-        }
-        // Flush remaining
-        if (buffer.trim()) {
-          buffer += "\n\n";
-          const parts = buffer.split("\n\n");
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const event = JSON.parse(line.slice(6));
-              if (event.type === "complete") {
-                setSseLogStatus(event.success ? "complete" : "error");
-                if (event.success) { toast.success("Node added successfully"); fetchNodes(); }
-              }
-            } catch {}
-          }
-        }
-      } else {
-        // NATS mode: get request_id and open LiveLogDialog
-        const data = await res.json();
+        const poll = setInterval(async () => {
+          try {
+            const taskRes = await fetch(`/api/tasks/${data.taskId}`);
+            if (!taskRes.ok) return;
+            const task = await taskRes.json();
+            setSseLogLines(task.logs ? task.logs.split("\n") : []);
+            if (task.status === "success") {
+              setSseLogStatus("complete");
+              clearInterval(poll);
+              fetchNodes();
+            } else if (task.status === "failed") {
+              setSseLogStatus("error");
+              clearInterval(poll);
+            }
+          } catch {}
+        }, 2000);
+      } else if (data.request_id) {
+        // NATS mode: open LiveLogDialog
         setAddRequestId(data.request_id);
         setAddLogOpen(true);
       }
@@ -266,6 +275,220 @@ export default function NodesPage() {
     } finally {
       setAddingNode(false);
     }
+  };
+
+  const handleFixNode = async (nodeName: string) => {
+    setFixingNode(nodeName);
+    setSseLogTitle(`Fixing node: ${nodeName}`);
+    setSseLogLines([
+      `[aura] Fixing node: ${nodeName}`,
+      "",
+    ]);
+    setSseLogStatus("streaming");
+    setSseLogOpen(true);
+
+    try {
+      // Step 1: show current state
+      setSseLogLines((prev) => [...prev, "[1/3] Current node state..."]);
+      const stateRes = await fetch(`/api/clusters/${clusterId}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `sudo scontrol show node ${nodeName} 2>&1 | grep -E "State=|Reason=" || echo "(node not found)"` }),
+      });
+      const stateData = await stateRes.json();
+      if (stateData.stdout) {
+        for (const line of stateData.stdout.split("\n")) {
+          if (line.trim()) setSseLogLines((prev) => [...prev, `  ${line.trim()}`]);
+        }
+      }
+      setSseLogLines((prev) => [...prev, ""]);
+
+      // Step 2a: Restart slurmd on the node so it re-registers with slurmctld
+      setSseLogLines((prev) => [...prev, `[2/3] Restarting slurmd on ${nodeName} and setting state to DOWN...`]);
+      const downRes = await fetch(`/api/clusters/${clusterId}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${nodeName} "sudo systemctl restart slurmd 2>&1 || true" && sleep 2 && sudo scontrol update NodeName=${nodeName} State=DOWN Reason='aura fix' 2>&1 && echo "  OK"`,
+        }),
+      });
+      const downData = await downRes.json();
+      if (downData.stdout) {
+        for (const line of downData.stdout.split("\n")) {
+          if (line.trim()) setSseLogLines((prev) => [...prev, line.trimStart().startsWith("OK") ? `  ${line.trim()}` : `  ${line.trim()}`]);
+        }
+      }
+      if (downData.stderr) {
+        for (const line of downData.stderr.split("\n")) {
+          if (line.trim()) setSseLogLines((prev) => [...prev, `  [stderr] ${line.trim()}`]);
+        }
+      }
+      setSseLogLines((prev) => [...prev, ""]);
+
+      // Step 3: RESUME the node
+      setSseLogLines((prev) => [...prev, "[3/3] Setting node state to RESUME..."]);
+      const resumeRes = await fetch(`/api/clusters/${clusterId}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: `sudo scontrol update NodeName=${nodeName} State=RESUME 2>&1 && echo "  OK" && echo "" && echo "--- New state ---" && sudo scontrol show node ${nodeName} | grep -E "State=|Reason="` }),
+      });
+      const resumeData = await resumeRes.json();
+      if (resumeData.stdout) {
+        for (const line of resumeData.stdout.split("\n")) {
+          if (line) setSseLogLines((prev) => [...prev, `  ${line.trim()}`]);
+        }
+      }
+      if (resumeData.stderr) {
+        for (const line of resumeData.stderr.split("\n")) {
+          if (line.trim()) setSseLogLines((prev) => [...prev, `  [stderr] ${line.trim()}`]);
+        }
+      }
+
+      setSseLogLines((prev) => [...prev, "", "[aura] Fix complete."]);
+      setSseLogStatus("complete");
+      setTimeout(fetchNodes, 1500);
+    } catch (err) {
+      setSseLogLines((prev) => [...prev, `[error] ${err instanceof Error ? err.message : "Request failed"}`]);
+      setSseLogStatus("error");
+    } finally {
+      setFixingNode(null);
+    }
+  };
+
+  const confirmDelete = async () => {
+    const nodeName = confirmDeleteNode;
+    if (!nodeName) return;
+    setConfirmDeleteNode(null);
+    await doDeleteNode(nodeName);
+  };
+
+  const doDeleteNode = async (nodeName: string) => {
+    setDeletingNode(nodeName);
+    setSseLogTitle(`Deleting node: ${nodeName}`);
+    setSseLogLines([`[aura] Deleting node: ${nodeName}`, ""]);
+    setSseLogStatus("streaming");
+    setSseLogOpen(true);
+
+    try {
+      // Call the dedicated delete API which cleans up both slurm.conf and DB config
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/${encodeURIComponent(nodeName)}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (res.ok) {
+        for (const line of (data.output || "").split("\n")) {
+          if (line.trim()) setSseLogLines((prev) => [...prev, line]);
+        }
+        setSseLogLines((prev) => [...prev, "", "[aura] Node deleted successfully."]);
+        setSseLogStatus("complete");
+        setTimeout(fetchNodes, 1000);
+      } else {
+        setSseLogLines((prev) => [...prev, `[error] ${data.error ?? "Failed"}`]);
+        setSseLogStatus("error");
+      }
+    } catch (err) {
+      setSseLogLines((prev) => [...prev, `[error] ${err instanceof Error ? err.message : "Request failed"}`]);
+      setSseLogStatus("error");
+    } finally {
+      setDeletingNode(null);
+    }
+  };
+
+  const openNodeTerminal = (nodeName: string) => {
+    setTerminalNode(nodeName);
+    setTermLines([`Connected to ${nodeName} via controller`, ""]);
+  };
+
+  const runNodeCommand = async () => {
+    const cmd = termCmd.trim();
+    if (!cmd || !terminalNode || termRunning) return;
+    setTermCmd("");
+    setTermLines((prev) => [...prev, `$ ${cmd}`]);
+    setTermRunning(true);
+    try {
+      // Just run the command directly on the controller (which is often the node too).
+      // The /exec endpoint handles bastion marker extraction internally.
+      const res = await fetch(`/api/clusters/${clusterId}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      });
+      const data = await res.json();
+      const output = (data.stdout ?? "").replace(/\r/g, "").trim();
+      if (output) {
+        for (const l of output.split("\n")) {
+          const trimmed = l.trim();
+          // Filter bastion welcome banner noise
+          if (trimmed && !trimmed.startsWith("Welcome to") &&
+              !trimmed.includes("System load:") && !trimmed.includes("Usage of /:") &&
+              !trimmed.includes("Memory usage:") && !trimmed.includes("Swap usage:") &&
+              !trimmed.includes("Last login:") && !trimmed.includes("System information as of") &&
+              !trimmed.includes("Processes:") && !trimmed.includes("Users logged in:") &&
+              !trimmed.includes("IPv4 address") && !trimmed.includes("Connection to") &&
+              !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/)) {
+            setTermLines((p) => [...p, l]);
+          }
+        }
+      }
+      if (!data.success && data.exitCode !== null && data.exitCode !== 0) {
+        setTermLines((p) => [...p, `[exit ${data.exitCode}]`]);
+      }
+      if (data.stderr) {
+        for (const l of data.stderr.split("\n")) {
+          if (l && !l.includes("Permanently added") && !l.includes("Connection to")) {
+            setTermLines((p) => [...p, `[stderr] ${l}`]);
+          }
+        }
+      }
+    } catch {
+      setTermLines((p) => [...p, "[error] Request failed"]);
+    } finally {
+      setTermRunning(false);
+    }
+  };
+
+  const fetchNodeLogs = async (nodeName: string, source: string) => {
+    setLogsLoading(true);
+    setLogsLines([]);
+    try {
+      // Run directly on controller (skip nested SSH which breaks through bastion)
+      const cmd = source === "system"
+        ? "sudo dmesg --time-format iso | tail -100"
+        : `sudo journalctl -u ${source} --no-pager -n 100 --output short-iso 2>/dev/null || echo 'Service ${source} not found'`;
+      const res = await fetch(`/api/clusters/${clusterId}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      });
+      const data = await res.json();
+      const output = (data.stdout || "").replace(/\r/g, "").trim();
+      if (output) {
+        // Filter bastion welcome banner noise
+        const filtered = output.split("\n").filter((l) => {
+          const t = l.trim();
+          return t && !t.startsWith("Welcome to") &&
+            !t.includes("System load:") && !t.includes("Usage of /:") &&
+            !t.includes("Memory usage:") && !t.includes("Swap usage:") &&
+            !t.includes("Last login:") && !t.includes("System information as of") &&
+            !t.includes("Processes:") && !t.includes("Users logged in:") &&
+            !t.includes("IPv4 address") && !t.includes("Connection to") &&
+            !t.match(/^[a-z]+@[^:]+:[~\/].*\$/);
+        });
+        setLogsLines(filtered.length > 0 ? filtered : ["(no logs found)"]);
+      } else {
+        setLogsLines(["(no logs found)"]);
+      }
+    } catch {
+      setLogsLines(["[error] Request failed"]);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
+  const openNodeLogs = (nodeName: string) => {
+    setLogsNode(nodeName);
+    setLogsSource("slurmd");
+    fetchNodeLogs(nodeName, "slurmd");
   };
 
   const stateColor = (state: string) => {
@@ -352,7 +575,11 @@ export default function NodesPage() {
                         onChange={(e) => setNewNodeName(e.target.value)}
                         placeholder="slm-node-11"
                       />
-                      <p className="text-xs text-muted-foreground">Node name in slurm.conf. Auto-filled from hostname.</p>
+                      {nodes.some((n) => n.name === newNodeName) ? (
+                        <p className="text-xs text-destructive">A node with this name already exists. Delete it first or choose a different name.</p>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Node name in slurm.conf. Auto-filled from hostname.</p>
+                      )}
                     </div>
                     <div className="grid grid-cols-3 gap-4">
                       <div className="space-y-2">
@@ -385,7 +612,7 @@ export default function NodesPage() {
                     </div>
                     <Button
                       onClick={handleAddNode}
-                      disabled={addingNode || !newNodeName || !newNodeIp}
+                      disabled={addingNode || detecting || !newNodeName || !newNodeIp || nodes.some((n) => n.name === newNodeName)}
                       className="w-full"
                     >
                       {addingNode ? "Adding..." : "Add Node"}
@@ -421,6 +648,7 @@ export default function NodesPage() {
                   <TableHead>State</TableHead>
                   <TableHead>CPUs</TableHead>
                   <TableHead>Memory</TableHead>
+                  <TableHead>GPUs</TableHead>
                   <TableHead>Partitions</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
@@ -436,19 +664,63 @@ export default function NodesPage() {
                     </TableCell>
                     <TableCell>{node.cpus}</TableCell>
                     <TableCell>{node.memory >= 1024 ? Math.round(node.memory / 1024) : node.memory} GB</TableCell>
+                    <TableCell>{(() => {
+                      const g = (node as any).gres ?? "";
+                      const match = g.match(/gpu:(\d+)/);
+                      return match ? match[1] : ((node as any).gpus ?? 0);
+                    })()}</TableCell>
                     <TableCell>{node.partitions?.join(", ") ?? "-"}</TableCell>
                     <TableCell>
-                      {node.state.toLowerCase().includes("future") && (
+                      <div className="flex items-center gap-1">
+                        {node.state.toLowerCase().includes("future") && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            title={activatingNode === node.name ? "Activating..." : "Activate"}
+                            onClick={() => handleActivate(node.name)}
+                            disabled={activatingNode === node.name}
+                          >
+                            {activatingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                          </Button>
+                        )}
+                        {(node.state.toLowerCase().includes("drain") || node.state.toLowerCase().includes("invalid") || node.state.toLowerCase().includes("down")) && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            title="Fix node state"
+                            onClick={() => handleFixNode(node.name)}
+                            disabled={fixingNode === node.name}
+                          >
+                            {fixingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}
+                          </Button>
+                        )}
                         <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleActivate(node.name)}
-                          disabled={activatingNode === node.name}
+                          variant="ghost"
+                          size="icon-sm"
+                          title="Terminal"
+                          onClick={() => openNodeTerminal(node.name)}
                         >
-                          <Zap className="mr-1 h-3 w-3" />
-                          {activatingNode === node.name ? "Queuing..." : "Activate"}
+                          <TerminalIcon className="h-4 w-4" />
                         </Button>
-                      )}
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          title="Logs"
+                          onClick={() => openNodeLogs(node.name)}
+                        >
+                          <FileText className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="text-destructive"
+                          title="Delete node"
+                          onClick={() => setConfirmDeleteNode(node.name)}
+                          disabled={deletingNode === node.name}
+                        >
+                          {deletingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -479,10 +751,10 @@ export default function NodesPage() {
 
       {/* SSH mode log dialog */}
       <Dialog open={sseLogOpen} onOpenChange={sseLogStatus !== "streaming" ? setSseLogOpen : undefined}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center justify-between">
-              Adding new node
+            <DialogTitle className="flex items-center justify-between pr-8">
+              {sseLogTitle}
               <Badge className={
                 sseLogStatus === "streaming" ? "bg-blue-100 text-blue-800" :
                 sseLogStatus === "complete" ? "bg-green-100 text-green-800" :
@@ -492,7 +764,7 @@ export default function NodesPage() {
               </Badge>
             </DialogTitle>
           </DialogHeader>
-          <div className="h-80 overflow-y-auto rounded-md border bg-black p-4 font-mono text-xs text-green-400">
+          <div className="h-[500px] overflow-y-auto rounded-md border bg-black p-4 font-mono text-sm text-green-400">
             {sseLogLines.map((line, i) => (
               <div key={i} className={`whitespace-pre-wrap leading-5 ${line.startsWith("[stderr]") ? "text-yellow-400" : ""}`}>
                 {line || "\u00A0"}
@@ -505,6 +777,125 @@ export default function NodesPage() {
           {sseLogStatus !== "streaming" && (
             <Button variant="outline" onClick={() => setSseLogOpen(false)}>Close</Button>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete node confirmation dialog */}
+      <Dialog open={!!confirmDeleteNode} onOpenChange={(o) => { if (!o) setConfirmDeleteNode(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete node?</DialogTitle>
+            <DialogDescription>
+              This will remove <strong>{confirmDeleteNode}</strong> from the cluster config and slurm.conf, then restart slurmctld. The node machine itself won&apos;t be touched.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button variant="destructive" onClick={confirmDelete}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Node terminal dialog */}
+      <Dialog open={!!terminalNode} onOpenChange={(o) => { if (!o) setTerminalNode(null); }}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Terminal: {terminalNode}</DialogTitle>
+          </DialogHeader>
+          <div className="h-[500px] overflow-y-auto rounded-md border bg-black p-3 font-mono text-sm text-green-400">
+            {termLines.map((line, i) => (
+              <div
+                key={i}
+                className={`whitespace-pre-wrap leading-5 ${
+                  line.startsWith("[stderr]") ? "text-yellow-400" :
+                  line.startsWith("[error]") ? "text-red-400" :
+                  line.startsWith("$") ? "text-cyan-400" : ""
+                }`}
+              >
+                {line || "\u00A0"}
+              </div>
+            ))}
+            {termRunning && (
+              <div className="inline-flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+              </div>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Input
+              value={termCmd}
+              onChange={(e) => setTermCmd(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runNodeCommand(); }}
+              placeholder="Type a command..."
+              className="font-mono text-sm"
+              disabled={termRunning}
+              autoFocus
+            />
+            <Button onClick={runNodeCommand} disabled={termRunning || !termCmd.trim()}>
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Node logs dialog */}
+      <Dialog open={!!logsNode} onOpenChange={(o) => { if (!o) setLogsNode(null); }}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Logs: {logsNode}</DialogTitle>
+          </DialogHeader>
+          <div className="flex items-center gap-3">
+            <Select
+              value={logsSource}
+              onValueChange={(v) => {
+                setLogsSource(v);
+                if (logsNode) fetchNodeLogs(logsNode, v);
+              }}
+            >
+              <SelectTrigger className="w-[280px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="slurmd">Slurm Worker (slurmd)</SelectItem>
+                <SelectItem value="munge">Munge</SelectItem>
+                <SelectItem value="system">System (dmesg)</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => logsNode && fetchNodeLogs(logsNode, logsSource)}
+              disabled={logsLoading}
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${logsLoading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
+          <div className="h-[500px] overflow-y-auto rounded-md border bg-black p-3 font-mono text-sm text-green-400">
+            {logsLoading && logsLines.length === 0 && (
+              <div className="inline-flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Fetching logs...
+              </div>
+            )}
+            {logsLines.map((line, i) => (
+              <div
+                key={i}
+                className={`whitespace-pre-wrap leading-5 ${
+                  line.startsWith("[stderr]") ? "text-yellow-400" :
+                  line.includes("error") || line.includes("ERROR") || line.includes("fatal") ? "text-red-400" :
+                  line.includes("warning") || line.includes("WARN") ? "text-yellow-400" : ""
+                }`}
+              >
+                {line || "\u00A0"}
+              </div>
+            ))}
+          </div>
         </DialogContent>
       </Dialog>
     </div>
