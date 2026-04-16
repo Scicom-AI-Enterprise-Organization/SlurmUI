@@ -67,31 +67,28 @@ export function ConfigEditor({ clusterId, initialConfig }: ConfigEditorProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="font-medium">Cluster Configuration</h3>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={handleReset}>
-            <RotateCcw className="mr-2 h-3 w-3" />
-            Reset
-          </Button>
-          <Button
-            size="sm"
-            onClick={handleSave}
-            disabled={!!parseError || isSaving}
-          >
-            <Save className="mr-2 h-3 w-3" />
-            {isSaving ? "Saving..." : "Save & Propagate"}
-          </Button>
-        </div>
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={handleReset}>
+          <RotateCcw className="mr-2 h-3 w-3" />
+          Reset
+        </Button>
+        <Button
+          size="sm"
+          onClick={handleSave}
+          disabled={!!parseError || isSaving}
+        >
+          <Save className="mr-2 h-3 w-3" />
+          {isSaving ? "Saving..." : "Save & Propagate"}
+        </Button>
       </div>
 
       {parseError && (
         <p className="text-sm text-destructive">JSON Error: {parseError}</p>
       )}
 
-      <ScrollArea className="h-[500px] rounded-md border">
+      <ScrollArea className="h-[500px] rounded-md border bg-white dark:bg-white">
         <textarea
-          className="h-full w-full resize-none bg-background p-4 font-mono text-sm focus:outline-none"
+          className="h-full w-full resize-none bg-white text-black p-4 font-mono text-sm focus:outline-none"
           value={configText}
           onChange={(e) => handleChange(e.target.value)}
           spellCheck={false}

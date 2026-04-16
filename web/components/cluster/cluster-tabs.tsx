@@ -8,8 +8,7 @@ const tabs = [
   { slug: "configuration", label: "Configuration", requiresActive: false },
   { slug: "ssh", label: "SSH", requiresActive: false },
   { slug: "nodes", label: "Nodes", requiresActive: true },
-  { slug: "storage", label: "Storage", requiresActive: true },
-  { slug: "users", label: "Users", requiresActive: true },
+  { slug: "storage", label: "Storages", requiresActive: true },
   { slug: "packages", label: "Packages", requiresActive: true },
 ];
 
@@ -18,7 +17,7 @@ interface ClusterTabsProps {
   isActive: boolean;
 }
 
-export function ClusterTabs({ clusterId, isActive }: ClusterTabsProps) {
+export function ClusterTabs({ clusterId, isActive: clusterIsActive }: ClusterTabsProps) {
   const pathname = usePathname();
   const base = `/admin/clusters/${clusterId}`;
 
@@ -27,7 +26,7 @@ export function ClusterTabs({ clusterId, isActive }: ClusterTabsProps) {
       {tabs.map((tab) => {
         const href = `${base}/${tab.slug}`;
         const isActive = pathname === href || pathname.startsWith(href + "/");
-        const disabled = tab.requiresActive && !isActive;
+        const disabled = tab.requiresActive && !clusterIsActive;
 
         if (disabled) {
           return (

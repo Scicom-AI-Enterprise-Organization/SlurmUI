@@ -225,9 +225,41 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
     setTestMsg("");
 
     try {
+      const res = await fetch(`/api/clusters/${clusterId}/storage/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: newType,
+          nfsServer: newNfsServer,
+          nfsPath: newNfsPath,
+          s3Bucket: newS3Bucket,
+          s3Endpoint: newS3Endpoint,
+          s3AccessKey: newS3AccessKey,
+          s3SecretKey: newS3SecretKey,
+          s3Region: newS3Region,
+        }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        setTestStatus("ok");
+        setTestMsg(result.message ?? "Connection successful");
+      } else {
+        setTestStatus("failed");
+        setTestMsg(result.error ?? "Test failed");
+      }
+    } catch {
+      setTestStatus("failed");
+      setTestMsg("Request failed");
+    }
+  };
+
+  const _oldHandleTest = async () => {
+    setTestStatus("testing");
+    setTestMsg("");
+
+    try {
       let cmd: string;
       if (newType === "nfs") {
-        // Test NFS: install nfs-common if needed, then showmount to verify the export is visible
         cmd = [
           `apt-get install -y -qq nfs-common 2>/dev/null || yum install -y -q nfs-utils 2>/dev/null || true`,
           `showmount -e ${newNfsServer} 2>&1 | grep -q '${newNfsPath}' && echo '__NFS_OK__' || (echo '__NFS_FAIL__' && showmount -e ${newNfsServer} 2>&1)`,
@@ -313,7 +345,7 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div />
-        <Button variant="outline" onClick={() => setAddOpen(true)}>
+        <Button onClick={() => setAddOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
           Add Mount
         </Button>
@@ -321,9 +353,8 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <HardDrive className="h-4 w-4" />
-            Storage Mounts ({mounts.length})
+          <CardTitle className="text-base">
+            Storages ({mounts.length})
           </CardTitle>
         </CardHeader>
         <CardContent>

@@ -34,7 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server } from "lucide-react";
 
 interface NodeInfo {
   name: string;
@@ -501,7 +501,7 @@ export default function NodesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-end">
         <div className="flex gap-2">
           <Button variant="outline" onClick={fetchNodes} disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
@@ -633,7 +633,9 @@ export default function NodesPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Nodes ({nodes.length})</CardTitle>
+          <CardTitle className="text-base">
+            Nodes ({nodes.length})
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
