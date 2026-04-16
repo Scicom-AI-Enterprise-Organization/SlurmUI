@@ -1,4 +1,10 @@
 ---
+- name: Remove loopback alias for hostname (Ubuntu installer artifact)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    state: absent
+
 - name: Create munge group
   ansible.builtin.group:
     name: "{{ munge_group }}"
