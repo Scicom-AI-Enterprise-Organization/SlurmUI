@@ -91,7 +91,14 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 		timeLimit = "2:00:00"
 	}
 
+	// Use srun --uid so the job runs as the provisioned user without sudo.
+	// sudo 1.9.x+ enables use_pty by default which wraps the child in its own
+	// PTY, causing triple-nested PTY (pty.Start → sudo → srun --pty) and
+	// immediate bash exit (code 0).
 	var srunArgs []string
+	if payload.Username != "" {
+		srunArgs = append(srunArgs, "--uid="+payload.Username)
+	}
 	if payload.Partition != "" {
 		srunArgs = append(srunArgs, "--partition="+payload.Partition)
 	}
@@ -109,13 +116,7 @@ func (h *AppHandler) launchShell(ctx context.Context, sessionID string, payload 
 	}
 	srunArgs = append(srunArgs, "--pty", "bash", "--login")
 
-	var c *exec.Cmd
-	if payload.Username != "" {
-		args := append([]string{"-u", payload.Username, "srun"}, srunArgs...)
-		c = exec.CommandContext(ctx, "sudo", args...)
-	} else {
-		c = exec.CommandContext(ctx, "srun", srunArgs...)
-	}
+	c := exec.CommandContext(ctx, "srun", srunArgs...)
 
 	// Own process group so we can kill the whole tree on terminate.
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -217,7 +218,11 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 	// srun reserves the full N-node block and runs the jupyter task on one node.
 	// --ntasks=1 ensures a single task (jupyter) runs; the N nodes remain allocated
 	// so kernels can launch further srun steps across all of them.
+	// Use srun --uid (same reason as launchShell — avoid sudo PTY nesting).
 	var srunArgs []string
+	if payload.Username != "" {
+		srunArgs = append(srunArgs, "--uid="+payload.Username)
+	}
 	if payload.Partition != "" {
 		srunArgs = append(srunArgs, "--partition="+payload.Partition)
 	}
@@ -238,13 +243,7 @@ func (h *AppHandler) launchJupyter(ctx context.Context, sessionID string, payloa
 	)
 	srunArgs = append(srunArgs, "bash", "-c", script)
 
-	var c *exec.Cmd
-	if payload.Username != "" {
-		args := append([]string{"-u", payload.Username, "srun"}, srunArgs...)
-		c = exec.CommandContext(ctx, "sudo", args...)
-	} else {
-		c = exec.CommandContext(ctx, "srun", srunArgs...)
-	}
+	c := exec.CommandContext(ctx, "srun", srunArgs...)
 
 	// Own process group so we can kill the whole tree (srun + jupyter) on terminate.
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
