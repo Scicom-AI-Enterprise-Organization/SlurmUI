@@ -1,0 +1,227 @@
+/**
+ * SSH command execution layer for clusters in SSH connection mode.
+ *
+ * Provides the same streaming interface as the NATS path:
+ *   onStream(line, seq) — live output lines
+ *   onComplete(success, payload) — final result
+ */
+
+import { spawn, type ChildProcess } from "child_process";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+import { prisma } from "./prisma";
+
+interface SshTarget {
+  host: string;
+  user: string;
+  port: number;
+  privateKey: string; // raw PEM content
+}
+
+interface SshExecCallbacks {
+  onStream: (line: string, seq: number) => void;
+  onComplete: (success: boolean, payload?: any) => void;
+}
+
+/**
+ * Resolve SSH connection details for a cluster.
+ * Returns null if the cluster has no SSH key assigned.
+ */
+export async function getClusterSshTarget(clusterId: string): Promise<SshTarget | null> {
+  const cluster = await prisma.cluster.findUnique({
+    where: { id: clusterId },
+    include: { sshKey: true },
+  });
+  if (!cluster || !cluster.sshKey) return null;
+
+  return {
+    host: cluster.controllerHost,
+    user: cluster.sshUser,
+    port: cluster.sshPort,
+    privateKey: cluster.sshKey.privateKey,
+  };
+}
+
+/**
+ * Execute a command on a remote host via SSH and stream output.
+ * Returns a cleanup function and the child process.
+ */
+export function sshExec(
+  target: SshTarget,
+  command: string,
+  callbacks: SshExecCallbacks,
+): { proc: ChildProcess; cleanup: () => void } {
+  const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
+  const keyPath = join(tmpDir, "ssh_key");
+
+  writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+
+  let seq = 0;
+
+  const proc = spawn("ssh", [
+    "-i", keyPath,
+    "-p", String(target.port),
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "ConnectTimeout=15",
+    "-o", "BatchMode=yes",
+    `${target.user}@${target.host}`,
+    command,
+  ], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  proc.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      if (line) callbacks.onStream(line, seq++);
+    }
+  });
+
+  proc.stderr.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      if (line && !line.startsWith("Warning: Permanently added")) {
+        callbacks.onStream(`[stderr] ${line}`, seq++);
+      }
+    }
+  });
+
+  proc.on("close", (code) => {
+    callbacks.onComplete(code === 0, { exitCode: code });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  proc.on("error", (err) => {
+    callbacks.onComplete(false, { error: err.message });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const cleanup = () => {
+    try { proc.kill(); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  };
+
+  return { proc, cleanup };
+}
+
+/**
+ * Execute a command via SSH and return the result as a promise.
+ * Collects all stdout into a string. Good for quick commands like `squeue`, `sinfo`.
+ */
+export function sshExecSimple(
+  target: SshTarget,
+  command: string,
+): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number | null }> {
+  return new Promise((resolve) => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
+    const keyPath = join(tmpDir, "ssh_key");
+
+    writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+
+    const proc = spawn("ssh", [
+      "-i", keyPath,
+      "-p", String(target.port),
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "UserKnownHostsFile=/dev/null",
+      "-o", "ConnectTimeout=15",
+      "-o", "BatchMode=yes",
+      `${target.user}@${target.host}`,
+      command,
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    proc.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk.toString()));
+    proc.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
+
+    proc.on("close", (code) => {
+      rmSync(tmpDir, { recursive: true, force: true });
+      resolve({
+        success: code === 0,
+        stdout: stdoutChunks.join(""),
+        stderr: stderrChunks.join(""),
+        exitCode: code,
+      });
+    });
+
+    proc.on("error", (err) => {
+      rmSync(tmpDir, { recursive: true, force: true });
+      resolve({
+        success: false,
+        stdout: "",
+        stderr: err.message,
+        exitCode: null,
+      });
+    });
+  });
+}
+
+/**
+ * Pipe a script to a remote host via SSH stdin.
+ * Used for multi-line install/setup scripts.
+ */
+export function sshExecScript(
+  target: SshTarget,
+  script: string,
+  callbacks: SshExecCallbacks,
+): { proc: ChildProcess; cleanup: () => void } {
+  const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
+  const keyPath = join(tmpDir, "ssh_key");
+
+  writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+
+  let seq = 0;
+
+  const proc = spawn("ssh", [
+    "-i", keyPath,
+    "-p", String(target.port),
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "ConnectTimeout=15",
+    "-o", "BatchMode=yes",
+    `${target.user}@${target.host}`,
+    "bash -s",
+  ], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  proc.stdin.write(script);
+  proc.stdin.end();
+
+  proc.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      if (line) callbacks.onStream(line, seq++);
+    }
+  });
+
+  proc.stderr.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) {
+      if (line && !line.startsWith("Warning: Permanently added")) {
+        callbacks.onStream(`[stderr] ${line}`, seq++);
+      }
+    }
+  });
+
+  proc.on("close", (code) => {
+    callbacks.onComplete(code === 0, { exitCode: code });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  proc.on("error", (err) => {
+    callbacks.onComplete(false, { error: err.message });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const cleanup = () => {
+    try { proc.kill(); } catch {}
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  };
+
+  return { proc, cleanup };
+}

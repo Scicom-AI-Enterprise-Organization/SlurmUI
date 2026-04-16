@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { name, controllerHost } = body;
+  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort } = body;
   if (!name || !controllerHost) {
     return NextResponse.json(
       { error: "Missing required fields: name, controllerHost" },
@@ -40,13 +40,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // SSH key must be configured before any cluster can be created.
-  const sshKey = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
-  if (!sshKey) {
-    return NextResponse.json(
-      { error: "SSH key not configured. Go to Admin → Settings and add the cluster SSH key before creating a cluster." },
-      { status: 412 }
-    );
+  const mode = connectionMode === "SSH" ? "SSH" : "NATS";
+  if (mode === "NATS" && !natsUrl) {
+    return NextResponse.json({ error: "NATS URL is required for NATS mode" }, { status: 400 });
+  }
+
+  // Validate SSH key exists
+  if (sshKeyId) {
+    const sshKey = await prisma.sshKey.findUnique({ where: { id: sshKeyId } });
+    if (!sshKey) {
+      return NextResponse.json({ error: "SSH key not found" }, { status: 400 });
+    }
+  } else {
+    const keyCount = await prisma.sshKey.count();
+    if (keyCount === 0) {
+      return NextResponse.json(
+        { error: "No SSH keys configured. Go to Admin Settings and add an SSH key first." },
+        { status: 412 },
+      );
+    }
   }
 
   const existing = await prisma.cluster.findUnique({ where: { name } });
@@ -64,11 +76,16 @@ export async function POST(req: NextRequest) {
     data: {
       name,
       controllerHost,
+      connectionMode: mode,
+      natsUrl: natsUrl || null,
       natsCredentials: "",
+      sshUser: sshUser || "root",
+      sshPort: sshPort || 22,
       status: "PROVISIONING",
       config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
       installToken,
       installTokenExpiresAt,
+      ...(sshKeyId ? { sshKeyId } : {}),
     },
   });
 

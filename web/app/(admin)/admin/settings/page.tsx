@@ -2,11 +2,16 @@ import { prisma } from "@/lib/prisma";
 import { SshKeySettings } from "@/components/admin/ssh-key-settings";
 
 export default async function AdminSettingsPage() {
-  const [priv, pub, activeClusters] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "ssh_private_key" } }),
-    prisma.setting.findUnique({ where: { key: "ssh_public_key" } }),
-    prisma.cluster.count({ where: { status: { in: ["ACTIVE", "DEGRADED"] } } }),
-  ]);
+  const keys = await prisma.sshKey.findMany({
+    select: {
+      id: true,
+      name: true,
+      publicKey: true,
+      createdAt: true,
+      _count: { select: { clusters: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -14,11 +19,7 @@ export default async function AdminSettingsPage() {
         <h1 className="text-3xl font-bold">Settings</h1>
         <p className="text-muted-foreground mt-1">Global admin configuration</p>
       </div>
-      <SshKeySettings
-        initialConfigured={!!priv}
-        initialPublicKey={pub?.value ?? null}
-        activeClusters={activeClusters}
-      />
+      <SshKeySettings initialKeys={JSON.parse(JSON.stringify(keys))} />
     </div>
   );
 }

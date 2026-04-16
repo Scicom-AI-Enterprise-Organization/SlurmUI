@@ -16,7 +16,7 @@ interface HostEntry {
   port?: number;
 }
 
-function hostVars(entry: HostEntry, extraVars?: Record<string, string>): string {
+function hostVars(entry: HostEntry, sshKeyFile?: string, extraVars?: Record<string, string>): string {
   const parts: Record<string, string> = {
     ansible_host: entry.ip,
     ansible_user: "root",
@@ -27,10 +27,10 @@ function hostVars(entry: HostEntry, extraVars?: Record<string, string>): string 
     parts.ansible_port = String(entry.port);
   }
 
-  // Global SSH key override (ANSIBLE_SSH_KEY_FILE env var)
-  const sshKey = process.env.ANSIBLE_SSH_KEY_FILE;
-  if (sshKey) {
-    parts.ansible_ssh_private_key_file = sshKey;
+  // Use cluster SSH key file, or fall back to ANSIBLE_SSH_KEY_FILE env var
+  const keyFile = sshKeyFile ?? process.env.ANSIBLE_SSH_KEY_FILE;
+  if (keyFile) {
+    parts.ansible_ssh_private_key_file = keyFile;
   }
 
   Object.assign(parts, extraVars);
@@ -40,7 +40,7 @@ function hostVars(entry: HostEntry, extraVars?: Record<string, string>): string 
     .join(" ");
 }
 
-function buildInventory(config: Record<string, unknown>): string {
+function buildInventory(config: Record<string, unknown>, sshKeyFile?: string): string {
   const controllerHost = config.slurm_controller_host as string;
   const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
 
@@ -48,11 +48,11 @@ function buildInventory(config: Record<string, unknown>): string {
   const workerEntries = hostsEntries.filter((h) => h.hostname !== controllerHost);
 
   const controllerLine = controllerEntry
-    ? `${controllerHost} ${hostVars(controllerEntry)}`
-    : `${controllerHost} ansible_user=root ansible_python_interpreter=/usr/bin/python3`;
+    ? `${controllerHost} ${hostVars(controllerEntry, sshKeyFile)}`
+    : `${controllerHost} ansible_user=root ansible_python_interpreter=/usr/bin/python3${sshKeyFile ? ` ansible_ssh_private_key_file=${sshKeyFile}` : ""}`;
 
   const workerLines = workerEntries
-    .map((h) => `${h.hostname} ${hostVars(h)}`)
+    .map((h) => `${h.hostname} ${hostVars(h, sshKeyFile)}`)
     .join("\n");
 
   return `[slurm_controllers]\n${controllerLine}\n\n[slurm_workers]\n${workerLines}\n`;
@@ -67,7 +67,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  const cluster = await prisma.cluster.findUnique({
+    where: { id },
+    include: { sshKey: true },
+  });
   if (!cluster) {
     return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   }
@@ -109,7 +112,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         const inventoryPath = join(tmpDir, "inventory.ini");
         const configPath = join(tmpDir, "cluster-config.json");
 
-        writeFileSync(inventoryPath, buildInventory(config));
+        // Write cluster SSH key to temp file if available
+        let sshKeyFile: string | undefined;
+        if (cluster.sshKey) {
+          sshKeyFile = join(tmpDir, "ssh_key");
+          writeFileSync(sshKeyFile, cluster.sshKey.privateKey, { mode: 0o600 });
+        }
+
+        writeFileSync(inventoryPath, buildInventory(config, sshKeyFile));
         writeFileSync(configPath, JSON.stringify(config, null, 2));
 
         send({ type: "stream", line: `[aura] Starting bootstrap for cluster: ${cluster.name}`, seq: seq++ });

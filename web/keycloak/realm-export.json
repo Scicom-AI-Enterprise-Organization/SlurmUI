@@ -67,10 +67,43 @@
             "claim.name": "groups",
             "userinfo.token.claim": "true"
           }
+        },
+        {
+          "id": "realm-roles-mapper",
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "userinfo.token.claim": "true"
+          }
         }
       ]
     }
   ],
+  "roles": {
+    "realm": [
+      {
+        "id": "role-aura-admin",
+        "name": "aura-admin",
+        "description": "Aura administrator",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "id": "role-aura-user",
+        "name": "aura-user",
+        "description": "Aura regular user",
+        "composite": false,
+        "clientRole": false
+      }
+    ]
+  },
   "groups": [
     {
       "id": "admin-group",
@@ -103,6 +136,9 @@
       ],
       "groups": [
         "/admin"
+      ],
+      "realmRoles": [
+        "aura-admin"
       ]
     },
     {
@@ -122,6 +158,9 @@
       ],
       "groups": [
         "/user"
+      ],
+      "realmRoles": [
+        "aura-user"
       ]
     }
   ]

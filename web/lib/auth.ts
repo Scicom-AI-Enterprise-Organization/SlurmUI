@@ -42,8 +42,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       profile(profile) {
         const realmRoles: string[] = profile.realm_access?.roles ?? [];
         const clientRoles: string[] = profile.resource_access?.[process.env.KEYCLOAK_ID!]?.roles ?? [];
-        const allRoles = new Set([...realmRoles, ...clientRoles]);
-        const role: UserRole = allRoles.has("aura-admin") ? "ADMIN" : "USER";
+        const groups: string[] = profile.groups ?? [];
+        const allRoles = new Set([...realmRoles, ...clientRoles, ...groups]);
+        const role: UserRole = allRoles.has("aura-admin") || allRoles.has("admin") ? "ADMIN" : "USER";
         return {
           id: profile.sub,
           name: profile.name ?? profile.preferred_username,
@@ -60,22 +61,23 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     async jwt({ token, user, account }) {
       if (user) {
-        // First login — upsert user in database
+        // Upsert user in database — role always comes from Keycloak
+        const role = user.role ?? "USER";
         const dbUser = await prisma.user.upsert({
           where: { keycloakId: user.keycloakId ?? user.id! },
           update: {
             name: user.name,
             email: user.email!,
-            role: user.role ?? "USER",
+            role,
           },
           create: {
             keycloakId: user.keycloakId ?? user.id!,
             email: user.email!,
             name: user.name,
-            role: user.role ?? "USER",
+            role,
           },
         });
-        token.role = dbUser.role;
+        token.role = role;
         token.keycloakId = dbUser.keycloakId;
         token.userId = dbUser.id;
       }

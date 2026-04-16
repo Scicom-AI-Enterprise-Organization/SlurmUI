@@ -28,109 +28,37 @@ The web tier publishes commands (submit job, add node, provision user, etc.) on 
 ### Prerequisites
 
 - Docker + Docker Compose
-- Node.js 20+
-- Go 1.22+
 
-### 1. Start infrastructure
+### 1. Start everything
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-This starts:
+This starts all services:
+- **Web UI** at `http://localhost:3000`
+- **Keycloak** at `http://localhost:8080` (admin console: `admin` / `admin`)
 - **Postgres** on `localhost:5432`
 - **NATS** (JetStream) on `localhost:4222` — monitoring at `http://localhost:8222`
-- **Keycloak** on `http://localhost:8080`
+- **Agent** connected to NATS as `local-cluster`
 
-### 2. Configure Keycloak (one-time)
+Database migrations run automatically on startup.
 
-Open `http://localhost:8080` and log in with `admin` / `admin`.
+### 2. Log in
 
-**Create a realm:**
-1. Top-left dropdown → **Create realm**
-2. Name: `aura-local` → **Create**
+Open `http://localhost:3000` and log in with:
 
-**Create a client:**
-1. Left sidebar → **Clients** → **Create client**
-2. Client ID: `aura-web` → **Next**
-3. Enable **Client authentication** → **Next**
-4. Valid redirect URIs: `http://localhost:3000/*`
-5. Web origins: `http://localhost:3000`
-6. **Save**
-7. Open the **Credentials** tab — copy the **Client secret**
+- **Email:** `admin@aura.local`
+- **Password:** `admin`
 
-**Create a role:**
-1. Left sidebar → **Realm roles** → **Create role**
-2. Role name: `aura-admin` → **Save**
+A second test account is also available:
 
-**Create a user:**
-1. Left sidebar → **Users** → **Create new user**
-2. Username / email / name → **Create**
-3. **Credentials** tab → **Set password** (disable Temporary)
-4. **Role mapping** tab → **Assign role** → select `aura-admin`
+- **Email:** `user@aura.local`
+- **Password:** `user`
 
-### 3. Configure environment
+These accounts are created by the Keycloak realm import. The `admin@aura.local` user has the `aura-admin` role.
 
-```bash
-cp web/.env.example web/.env.local
-```
-
-Edit `web/.env.local`:
-
-```env
-DATABASE_URL="postgresql://aura:aura@localhost:5432/aura?schema=public"
-
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="any-random-string-for-local-dev"
-
-KEYCLOAK_ID="aura-web"
-KEYCLOAK_SECRET="<client-secret-from-step-2>"
-KEYCLOAK_ISSUER="http://localhost:8080/realms/aura-local"
-
-NATS_URL="nats://localhost:4222"
-
-# Leave blank for local dev — FreeIPA not required
-FREEIPA_URL=""
-FREEIPA_USER=""
-FREEIPA_PASSWORD=""
-
-ANSIBLE_PLAYBOOKS_DIR="./ansible"
-```
-
-### 4. Set up the database
-
-```bash
-cd web
-npm install
-npm run db:push       # apply schema to local Postgres
-```
-
-### 5. Start the web app
-
-```bash
-npm run dev:custom    # custom server.ts — required for SSE + NATS bridge
-```
-
-App runs at `http://localhost:3000`. Log in with the Keycloak user you created.
-
----
-
-### Agent (optional — for agent development)
-
-The agent needs NATS and a `CLUSTER_ID`. It does not need Slurm to start — it will just fail to execute Slurm commands if they're invoked.
-
-```bash
-cd agent
-make build-local      # builds ./bin/aura-agent for the host OS/arch
-
-export NATS_URL=nats://localhost:4222
-export CLUSTER_ID=local-dev
-export ANSIBLE_PLAYBOOK_DIR=../ansible
-
-./bin/aura-agent
-```
-
-To connect it to the web, create a cluster record in the DB with the matching `CLUSTER_ID` (use Prisma Studio: `npm run db:studio`).
+The web service hot-reloads — any changes to files in `web/` are picked up automatically.
 
 ---
 

@@ -14,7 +14,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  const cluster = await prisma.cluster.findUnique({
+    where: { id },
+    include: { sshKey: true },
+  });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   if (cluster.status !== "ACTIVE" && cluster.status !== "DEGRADED") {
     return NextResponse.json({ error: "Cluster is not active" }, { status: 503 });
@@ -33,9 +36,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     .filter((n) => n.hostname !== cluster.controllerHost)
     .map((n) => ({ hostname: n.hostname, ip: n.ip }));
 
-  const sshKeySetting = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
-  const sshPrivateKey = sshKeySetting
-    ? Buffer.from(sshKeySetting.value).toString("base64")
+  const sshPrivateKey = cluster.sshKey
+    ? Buffer.from(cluster.sshKey.privateKey).toString("base64")
     : "";
 
   // Persist packages to cluster config (optimistic, before publish)

@@ -8,13 +8,28 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model SshKey {
+  id         String    @id @default(uuid())
+  name       String    @unique
+  privateKey String    @db.Text
+  publicKey  String    @db.Text
+  createdAt  DateTime  @default(now())
+  clusters   Cluster[]
+}
+
 model Cluster {
-  id              String        @id @default(uuid())
-  name            String        @unique
+  id              String         @id @default(uuid())
+  name            String         @unique
   controllerHost  String
-  natsCredentials String        // encrypted at rest
-  status          ClusterStatus @default(PROVISIONING)
-  config          Json          // full cluster-config.json
+  connectionMode  ConnectionMode @default(NATS)
+  natsUrl         String?        // NATS URL the agent uses to connect back (NATS mode only)
+  natsCredentials String         // encrypted at rest
+  sshUser         String         @default("root")
+  sshPort         Int            @default(22)
+  status          ClusterStatus  @default(PROVISIONING)
+  config          Json           // full cluster-config.json
+  sshKeyId              String?
+  sshKey                SshKey?       @relation(fields: [sshKeyId], references: [id])
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
   installToken          String?       @unique
@@ -23,6 +38,11 @@ model Cluster {
   jobs                  Job[]
   clusterUsers          ClusterUser[]
   appSessions           AppSession[]
+}
+
+enum ConnectionMode {
+  NATS
+  SSH
 }
 
 enum ClusterStatus {

@@ -13,7 +13,10 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  const cluster = await prisma.cluster.findUnique({
+    where: { id },
+    include: { sshKey: true },
+  });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
   const clusterConfig = (cluster.config ?? {}) as Record<string, any>;
@@ -23,9 +26,8 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   // Exclude the controller from the workers list — it's always localhost in the playbook.
   const workerNodes = nodes.filter((n) => n.hostname !== cluster.controllerHost);
 
-  const sshKeySetting = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
-  const sshPrivateKey = sshKeySetting
-    ? Buffer.from(sshKeySetting.value).toString("base64")
+  const sshPrivateKey = cluster.sshKey
+    ? Buffer.from(cluster.sshKey.privateKey).toString("base64")
     : "";
 
   const requestId = randomUUID();

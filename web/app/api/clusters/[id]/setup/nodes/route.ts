@@ -13,7 +13,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const cluster = await prisma.cluster.findUnique({ where: { id } });
+  const cluster = await prisma.cluster.findUnique({
+    where: { id },
+    include: { sshKey: true },
+  });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
   const body = await req.json();
@@ -22,18 +25,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "nodes array is required" }, { status: 400 });
   }
 
-  // NOTE: The SSH private key is forwarded to the agent in the NATS message payload.
-  // NATS is currently configured without TLS (nats://), so this key transits the network
-  // in plaintext. This is acceptable for a private management network, but TLS should be
-  // added before deployment on untrusted networks.
-  const sshKeySetting = await prisma.setting.findUnique({ where: { key: "ssh_private_key" } });
-  if (!sshKeySetting) {
+  if (!cluster.sshKey) {
     return NextResponse.json(
-      { error: "No SSH key configured. Go to Admin → Settings and add the cluster SSH key before onboarding nodes." },
+      { error: "No SSH key assigned to this cluster." },
       { status: 412 },
     );
   }
-  const sshPrivateKey = Buffer.from(sshKeySetting.value).toString("base64");
+  const sshPrivateKey = Buffer.from(cluster.sshKey.privateKey).toString("base64");
 
   // Save nodes to config
   const config = {

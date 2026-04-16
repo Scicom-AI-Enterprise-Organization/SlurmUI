@@ -2,171 +2,239 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Check, Copy, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 interface StepInstallProps {
   clusterId: string | null;
+  connectionMode: "NATS" | "SSH";
+  sshUser: string;
+  sshPort: string;
+  natsUrl: string;
 }
 
-type ConnState = "waiting" | "connecting" | "connected" | "timeout" | "error";
-type TokenState = "valid" | "used" | "expired" | "loading";
+type DeployState = "idle" | "deploying" | "waiting-heartbeat" | "connected" | "failed";
 
-export function StepInstall({ clusterId }: StepInstallProps) {
-  const [connState, setConnState] = useState<ConnState>("waiting");
-  const [copied, setCopied] = useState(false);
+export function StepInstall({ clusterId, connectionMode, sshUser, sshPort, natsUrl }: StepInstallProps) {
+  const [state, setState] = useState<DeployState>("idle");
+  const [lines, setLines] = useState<string[]>([]);
   const [errorMsg, setErrorMsg] = useState("");
   const startedRef = useRef(false);
+  const logRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
-  const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
+  const addLine = (line: string) => {
+    setLines((prev) => [...prev, line]);
+  };
 
-  // Fetch the actual token from the cluster record to build real URL
-  const [installCmd, setInstallCmd] = useState<string | null>(null);
-  const [tokenState, setTokenState] = useState<TokenState>("loading");
-
+  // Auto-scroll log to bottom
   useEffect(() => {
-    if (!clusterId) return;
-    fetch(`/api/clusters/${clusterId}`)
-      .then((r) => r.json())
-      .then((c) => {
-        if (c.installToken) {
-          const now = new Date();
-          if (c.installTokenUsedAt) {
-            setTokenState("used");
-            setInstallCmd(null);
-          } else if (c.installTokenExpiresAt && new Date(c.installTokenExpiresAt) < now) {
-            setTokenState("expired");
-            setInstallCmd(null);
-          } else {
-            setTokenState("valid");
-            setInstallCmd(`curl -fsSL ${baseUrl}/api/install/${c.installToken} | bash`);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [clusterId, baseUrl]);
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [lines]);
+
+  // Parse SSE stream helper
+  async function readSSE(
+    res: Response,
+    handlers: {
+      onStream?: (line: string) => void;
+      onDeployed?: () => void;
+      onConnected?: () => void;
+      onComplete?: (success: boolean, message?: string) => void;
+      onTimeout?: () => void;
+      onError?: (message: string) => void;
+    },
+    cancelledRef: { current: boolean },
+  ) {
+    if (!res.body) return;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (!cancelledRef.current) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "stream") handlers.onStream?.(event.line);
+          else if (event.type === "deployed") handlers.onDeployed?.();
+          else if (event.type === "connected") handlers.onConnected?.();
+          else if (event.type === "timeout") handlers.onTimeout?.();
+          else if (event.type === "error") handlers.onError?.(event.message ?? "Unknown error");
+          else if (event.type === "complete") handlers.onComplete?.(event.success, event.message);
+        } catch {}
+      }
+    }
+  }
 
   useEffect(() => {
     if (!clusterId || startedRef.current) return;
     startedRef.current = true;
-    setConnState("connecting");
+    setState("deploying");
 
-    let cancelled = false;
+    const cancelledRef = { current: false };
 
-    (async () => {
-      try {
-        const res = await fetch(`/api/clusters/${clusterId}/heartbeat/stream`);
-        if (!res.ok || !res.body) {
-          setConnState("error");
-          setErrorMsg("Failed to open heartbeat stream");
-          return;
-        }
+    if (connectionMode === "SSH") {
+      // SSH mode: just verify connectivity
+      (async () => {
+        try {
+          const res = await fetch(`/api/clusters/${clusterId}/verify-ssh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
+          if (!res.ok || !res.body) {
+            const err = await res.json().catch(() => ({ error: "Unknown error" }));
+            setState("failed");
+            setErrorMsg(err.error ?? "Failed to verify SSH");
+            return;
+          }
 
-        while (!cancelled) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const event = JSON.parse(line.slice(6));
-              if (event.type === "connected") {
-                setConnState("connected");
-                return;
-              } else if (event.type === "timeout") {
-                setConnState("timeout");
-                return;
-              } else if (event.type === "error") {
-                setConnState("error");
-                setErrorMsg(event.message ?? "Unknown error");
-                return;
+          await readSSE(res, {
+            onStream: addLine,
+            onComplete: (success, message) => {
+              if (success) {
+                setState("connected");
+              } else {
+                setState("failed");
+                setErrorMsg(message ?? "SSH verification failed");
               }
-            } catch {}
+            },
+          }, cancelledRef);
+        } catch (err) {
+          if (!cancelledRef.current) {
+            setState("failed");
+            setErrorMsg(err instanceof Error ? err.message : "Unknown error");
           }
         }
-      } catch (err) {
-        if (!cancelled) {
-          setConnState("error");
-          setErrorMsg(err instanceof Error ? err.message : "Unknown error");
+      })();
+    } else {
+      // NATS mode: deploy agent then wait for heartbeat
+      (async () => {
+        try {
+          // Phase 1: Deploy agent via SSH
+          const deployRes = await fetch(`/api/clusters/${clusterId}/deploy-agent`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sshUser: sshUser || "root",
+              sshPort: sshPort || "22",
+              natsUrl,
+            }),
+          });
+
+          if (!deployRes.ok || !deployRes.body) {
+            const err = await deployRes.json().catch(() => ({ error: "Unknown error" }));
+            setState("failed");
+            setErrorMsg(err.error ?? "Failed to start deployment");
+            return;
+          }
+
+          let deployed = false;
+
+          await readSSE(deployRes, {
+            onStream: addLine,
+            onDeployed: () => { deployed = true; },
+            onComplete: (success, message) => {
+              if (!success) {
+                setState("failed");
+                setErrorMsg(message ?? "Deployment failed");
+              }
+            },
+          }, cancelledRef);
+
+          if (cancelledRef.current || !deployed) {
+            if (!deployed && state !== "failed") {
+              setState("failed");
+              setErrorMsg("Deployment stream ended unexpectedly");
+            }
+            return;
+          }
+
+          // Phase 2: Wait for heartbeat
+          setState("waiting-heartbeat");
+          addLine("");
+          addLine("[aura] Waiting for agent heartbeat...");
+
+          const hbRes = await fetch(`/api/clusters/${clusterId}/heartbeat/stream`);
+          if (!hbRes.ok || !hbRes.body) {
+            setState("failed");
+            setErrorMsg("Failed to open heartbeat stream");
+            return;
+          }
+
+          await readSSE(hbRes, {
+            onConnected: () => {
+              addLine("[aura] Agent connected!");
+              setState("connected");
+            },
+            onTimeout: () => {
+              setState("failed");
+              setErrorMsg("Timed out waiting for agent heartbeat");
+            },
+            onError: (msg) => {
+              setState("failed");
+              setErrorMsg(msg);
+            },
+          }, cancelledRef);
+        } catch (err) {
+          if (!cancelledRef.current) {
+            setState("failed");
+            setErrorMsg(err instanceof Error ? err.message : "Unknown error");
+          }
         }
-      }
-    })();
+      })();
+    }
 
-    return () => { cancelled = true; };
-  }, [clusterId]);
-
-  const copyCmd = () => {
-    if (!installCmd) return;
-    navigator.clipboard.writeText(installCmd);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    return () => { cancelledRef.current = true; };
+  }, [clusterId, connectionMode, sshUser, sshPort, natsUrl]);
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">
-          Run the following command on your master node as <strong>root</strong>. It will download
-          the agent binary, configure it with this cluster&apos;s ID, and start it as a systemd
-          service.
-        </p>
+    <div className="space-y-4">
+      {/* Log output */}
+      <div
+        ref={logRef}
+        className="h-80 overflow-y-auto rounded-md border bg-black p-3 font-mono text-xs text-green-400"
+      >
+        {lines.length === 0 && state === "idle" && (
+          <span className="text-muted-foreground">Waiting to start...</span>
+        )}
+        {lines.map((line, i) => (
+          <div key={i} className={line.startsWith("[stderr]") ? "text-yellow-400" : ""}>
+            {line || "\u00A0"}
+          </div>
+        ))}
+        {(state === "deploying" || state === "waiting-heartbeat") && (
+          <div className="inline-flex items-center gap-2 text-muted-foreground mt-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {state === "deploying"
+              ? (connectionMode === "SSH" ? "Verifying SSH..." : "Deploying...")
+              : "Waiting for heartbeat..."}
+          </div>
+        )}
       </div>
 
-      <Card>
-        <CardContent className="pt-4">
-          {(tokenState === "used" || tokenState === "expired") ? (
-            <div className="rounded-md bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-200">
-              {tokenState === "used"
-                ? "This install token has already been used."
-                : "This install token has expired."}
-              {" "}Go to the cluster detail page to regenerate it.
-            </div>
-          ) : (
-            <div className="flex items-center justify-between gap-2">
-              <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-sm break-all">
-                {installCmd ?? "Loading..."}
-              </code>
-              <Button variant="outline" size="sm" onClick={copyCmd} disabled={!installCmd}>
-                {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
+      {/* Status bar */}
       <div className="flex items-center gap-3">
-        {connState === "connecting" && (
-          <>
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">Waiting for agent to connect...</span>
-          </>
-        )}
-        {connState === "connected" && (
+        {state === "connected" && (
           <>
             <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-              Agent connected
+              {connectionMode === "SSH" ? "SSH verified" : "Agent connected"}
             </Badge>
             <Button onClick={() => router.push(`/admin/clusters/${clusterId}`)}>
-              Continue to cluster setup →
+              Continue to cluster setup
             </Button>
           </>
         )}
-        {connState === "timeout" && (
-          <Badge variant="outline" className="text-yellow-700">
-            Timed out — regenerate the install command from the cluster page and try again
-          </Badge>
-        )}
-        {connState === "error" && (
+        {state === "failed" && (
           <Badge variant="destructive">Error: {errorMsg}</Badge>
         )}
       </div>

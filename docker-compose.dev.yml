@@ -1,11 +1,20 @@
-# Local development infrastructure — Postgres, NATS, Keycloak.
-# Does NOT start the web or agent (run those from source).
+# Full local dev stack: infrastructure + web + agent.
 #
-#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml up -d --build
 #
-version: "3.8"
+# Services:
+#   Web UI       -> http://localhost:3000
+#   Keycloak     -> http://localhost:8080  (admin/admin)
+#   NATS Monitor -> http://localhost:8222
+#   Postgres     -> localhost:5432
+#
+# Test accounts (created by Keycloak realm import):
+#   admin@aura.local / admin  -> ADMIN role
+#   user@aura.local  / user   -> USER role
 
 services:
+  # ---- Infrastructure ----
+
   postgres:
     image: postgres:15-alpine
     environment:
@@ -15,34 +24,115 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata_dev:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aura"]
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   nats:
     image: nats:2-alpine
     ports:
       - "4222:4222"
-      - "8222:8222"   # monitoring UI: http://localhost:8222
+      - "8222:8222"
     command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
     volumes:
-      - natsdata_dev:/data
+      - natsdata:/data
+    restart: unless-stopped
 
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
-    command: start-dev
+    command: start-dev --import-realm
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+      # Advertise localhost:8080 so the OIDC issuer matches from both
+      # the browser and the web container (which reaches host via extra_hosts).
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: 8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
     ports:
       - "8080:8080"
     volumes:
-      - kcdata_dev:/opt/keycloak/data
+      - ./web/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---- Database migration (runs once then exits) ----
+
+  migrate:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "apk add --no-cache openssl && npm install && npx prisma db push"
+    environment:
+      DATABASE_URL: postgresql://aura:aura@postgres:5432/aura?schema=public
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---- Web UI + API (dev mode with hot reload) ----
+
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    # Host networking so the container can reach Tailscale IPs and all
+    # localhost services (postgres, nats, keycloak) directly.
+    network_mode: host
+    command: sh -c "apk add --no-cache openssl openssh-client && npm install && npx prisma generate && npm run dev"
+    environment:
+      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: any-random-string-for-local-dev
+      KEYCLOAK_ID: aura-web
+      KEYCLOAK_SECRET: aura-web-secret
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom
+      NATS_URL: nats://localhost:4222
+      FREEIPA_URL: ""
+      FREEIPA_USER: ""
+      FREEIPA_PASSWORD: ""
+      ANSIBLE_PLAYBOOKS_DIR: /opt/aura/ansible
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---- Cluster agent ----
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      CLUSTER_ID: local-cluster
+      SLURM_USER: root
+    depends_on:
+      nats:
+        condition: service_started
+    restart: unless-stopped
 
 volumes:
-  pgdata_dev:
-  natsdata_dev:
-  kcdata_dev:
+  pgdata:
+  natsdata:
+  web_node_modules:
