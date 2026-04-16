@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { sshExec } from "@/lib/ssh-exec";
 
 interface RouteParams {
@@ -32,6 +33,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     user: cluster.sshUser,
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
+      bastion: cluster.sshBastion,
   };
 
   const enc = new TextEncoder();
@@ -108,6 +110,12 @@ echo "============================================"
               data: { status: "ACTIVE" },
             });
             send({ type: "complete", success: true });
+            logAudit({
+              action: "cluster.verify",
+              entity: "Cluster",
+              entityId: id,
+              metadata: { host: target.host, user: target.user },
+            });
           } else {
             send({
               type: "complete",

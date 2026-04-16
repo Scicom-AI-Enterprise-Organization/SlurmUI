@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { sshPublicKeyFromPrivate, normaliseKey } from "@/lib/ssh-key";
 import type { Session } from "next-auth";
 
@@ -66,6 +67,13 @@ export async function POST(req: NextRequest) {
       publicKey: true,
       createdAt: true,
     },
+  });
+
+  await logAudit({
+    action: "ssh_key.create",
+    entity: "SshKey",
+    entityId: key.id,
+    metadata: { name: key.name },
   });
 
   return NextResponse.json(key, { status: 201 });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
 
 export async function GET() {
@@ -87,6 +88,13 @@ export async function POST(req: NextRequest) {
       installTokenExpiresAt,
       ...(sshKeyId ? { sshKeyId } : {}),
     },
+  });
+
+  await logAudit({
+    action: "cluster.create",
+    entity: "Cluster",
+    entityId: cluster.id,
+    metadata: { name, controllerHost, connectionMode: mode },
   });
 
   return NextResponse.json(cluster, { status: 201 });

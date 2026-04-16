@@ -67,11 +67,54 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
       setPhase("failed");
       return;
     }
-    const { request_id } = await res.json();
+
+    const contentType = res.headers.get("content-type") ?? "";
+
+    // SSH mode: teardown returns an SSE stream directly
+    if (contentType.includes("text/event-stream") && res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const readStream = async () => {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const event = JSON.parse(line.slice(6));
+              if (event.type === "stream") {
+                appendLog(event.line);
+              } else if (event.type === "complete") {
+                if (event.success) {
+                  appendLog("[aura] Removing cluster record...");
+                  await deleteDbRecord();
+                } else {
+                  setError(event.payload?.error ?? "Teardown failed");
+                  setPhase("failed");
+                }
+                return;
+              }
+            } catch {}
+          }
+        }
+      };
+
+      await readStream();
+      return;
+    }
+
+    // NATS mode: teardown returns { request_id }, stream via EventSource
+    const data = await res.json();
+    const request_id = data.request_id;
 
     const evtSource = new EventSource(`/api/clusters/${clusterId}/stream/${request_id}`);
 
-    // Client-side timeout: surface Force Delete after 3 minutes if no completion
     const timeout = setTimeout(() => {
       evtSource.close();
       setError("Teardown timed out after 3 minutes — agent may be unreachable.");

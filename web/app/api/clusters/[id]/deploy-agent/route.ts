@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
 import { join } from "path";
@@ -274,6 +275,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               send({ type: "stream", line: `[ssh] SSH session closed (exit code 0)`, seq: seq++ });
               send({ type: "stream", line: `[aura] Agent deployed successfully. Waiting for heartbeat...`, seq: seq++ });
               send({ type: "deployed", success: true });
+              logAudit({
+                action: "cluster.deploy",
+                entity: "Cluster",
+                entityId: cluster.id,
+                metadata: { name: cluster.name, controllerHost, sshUser },
+              });
             } else {
               send({ type: "stream", line: `[ssh] SSH session closed with exit code ${code}`, seq: seq++ });
               send({

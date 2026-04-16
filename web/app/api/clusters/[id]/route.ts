@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -45,15 +46,27 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, status, config } = body;
+  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId } = body;
 
   const VALID_STATUSES = ["PROVISIONING", "ACTIVE", "DEGRADED", "OFFLINE", "ERROR"];
   if (status && !VALID_STATUSES.includes(status)) {
     return NextResponse.json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` }, { status: 400 });
   }
 
+  if (sshKeyId) {
+    const sshKey = await prisma.sshKey.findUnique({ where: { id: sshKeyId } });
+    if (!sshKey) return NextResponse.json({ error: "SSH key not found" }, { status: 400 });
+  }
+
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
+
+  // Merge config fields into existing config instead of replacing
+  let mergedConfig = undefined;
+  if (config) {
+    const existingConfig = (cluster.config ?? {}) as Record<string, unknown>;
+    mergedConfig = { ...existingConfig, ...config };
+  }
 
   const updated = await prisma.cluster.update({
     where: { id },
@@ -61,7 +74,11 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       ...(name && { name }),
       ...(controllerHost && { controllerHost }),
       ...(status && { status }),
-      ...(config && { config }),
+      ...(mergedConfig && { config: mergedConfig }),
+      ...(sshUser !== undefined && { sshUser }),
+      ...(sshPort !== undefined && { sshPort }),
+      ...(sshBastion !== undefined && { sshBastion }),
+      ...(sshKeyId && { sshKeyId }),
     },
   });
 
@@ -76,11 +93,20 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  const cluster = await prisma.cluster.findUnique({ where: { id }, select: { name: true } });
+
   // Delete all dependent records before removing the cluster (FK constraints).
   await prisma.appSession.deleteMany({ where: { clusterId: id } });
   await prisma.job.deleteMany({ where: { clusterId: id } });
   await prisma.clusterUser.deleteMany({ where: { clusterId: id } });
   await prisma.cluster.delete({ where: { id } });
+
+  await logAudit({
+    action: "cluster.delete",
+    entity: "Cluster",
+    entityId: id,
+    metadata: { name: cluster?.name },
+  });
 
   return NextResponse.json({ success: true });
 }

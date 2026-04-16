@@ -17,6 +17,7 @@ interface SshTarget {
   user: string;
   port: number;
   privateKey: string; // raw PEM content
+  bastion?: boolean;  // true if SSH server is a bastion that only supports interactive shell
 }
 
 interface SshExecCallbacks {
@@ -108,6 +109,7 @@ export function sshExec(
 /**
  * Execute a command via SSH and return the result as a promise.
  * Collects all stdout into a string. Good for quick commands like `squeue`, `sinfo`.
+ * For bastion mode: sends command via stdin with -tt, wraps with markers to extract output.
  */
 export function sshExecSimple(
   target: SshTarget,
@@ -123,6 +125,69 @@ export function sshExecSimple(
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
 
+    if (target.bastion) {
+      // Bastion mode: use -tt and pipe commands via stdin with markers
+      const marker = `__AURA_${Date.now()}__`;
+      const wrappedCmd = `echo ${marker}_START; ${command}; echo ${marker}_EXIT_$?; exit\n`;
+
+      const proc = spawn("ssh", [
+        "-i", keyPath,
+        "-p", String(target.port),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=15",
+        "-tt",
+        `${target.user}@${target.host}`,
+      ], { stdio: ["pipe", "pipe", "pipe"] });
+
+      // Delay sending command to let the shell initialize
+      setTimeout(() => {
+        proc.stdin.write(wrappedCmd);
+        proc.stdin.end();
+      }, 1500);
+
+      proc.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk.toString()));
+      proc.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
+
+      // Timeout after 30s
+      const timeout = setTimeout(() => {
+        proc.kill();
+        rmSync(tmpDir, { recursive: true, force: true });
+        resolve({ success: false, stdout: stdoutChunks.join(""), stderr: "Timeout", exitCode: null });
+      }, 30000);
+
+      proc.on("close", () => {
+        clearTimeout(timeout);
+        rmSync(tmpDir, { recursive: true, force: true });
+
+        const fullOutput = stdoutChunks.join("");
+        const startIdx = fullOutput.indexOf(`${marker}_START`);
+        const exitMatch = fullOutput.match(new RegExp(`${marker}_EXIT_(\\d+)`));
+
+        if (startIdx !== -1 && exitMatch) {
+          const exitCode = parseInt(exitMatch[1]);
+          const output = fullOutput
+            .slice(startIdx + `${marker}_START`.length, exitMatch.index)
+            .replace(/\r\n/g, "\n")
+            .replace(/\r/g, "")
+            .trim();
+          resolve({ success: exitCode === 0, stdout: output + "\n", stderr: stderrChunks.join(""), exitCode });
+        } else {
+          // Fallback: return raw output
+          resolve({ success: false, stdout: fullOutput, stderr: stderrChunks.join(""), exitCode: null });
+        }
+      });
+
+      proc.on("error", (err) => {
+        clearTimeout(timeout);
+        rmSync(tmpDir, { recursive: true, force: true });
+        resolve({ success: false, stdout: "", stderr: err.message, exitCode: null });
+      });
+
+      return;
+    }
+
+    // Normal SSH mode
     const proc = spawn("ssh", [
       "-i", keyPath,
       "-p", String(target.port),
@@ -164,6 +229,7 @@ export function sshExecSimple(
 /**
  * Pipe a script to a remote host via SSH stdin.
  * Used for multi-line install/setup scripts.
+ * For bastion mode: uses -tt and delays script delivery.
  */
 export function sshExecScript(
   target: SshTarget,
@@ -178,21 +244,48 @@ export function sshExecScript(
 
   let seq = 0;
 
-  const proc = spawn("ssh", [
+  const sshArgs = [
     "-i", keyPath,
     "-p", String(target.port),
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "ConnectTimeout=15",
-    "-o", "BatchMode=yes",
-    `${target.user}@${target.host}`,
-    "bash -s",
-  ], {
+  ];
+
+  if (target.bastion) {
+    sshArgs.push("-tt");
+  } else {
+    sshArgs.push("-o", "BatchMode=yes");
+  }
+
+  sshArgs.push(`${target.user}@${target.host}`);
+
+  if (!target.bastion) {
+    sshArgs.push("bash -s");
+  }
+
+  const proc = spawn("ssh", sshArgs, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  proc.stdin.write(script);
-  proc.stdin.end();
+  if (target.bastion) {
+    // Bastion mode: encode script as base64, decode on remote, execute.
+    // Can't pipe large scripts through bastion stdin reliably.
+    const b64 = Buffer.from(script).toString("base64");
+    // Split base64 into 76-char lines for echo compatibility
+    const b64Lines = b64.match(/.{1,76}/g) ?? [b64];
+    const catBlock = b64Lines.map((l) => `echo "${l}"`).join("; ");
+    const remoteFile = "/tmp/.aura-run.sh";
+
+    const fullCmd = `(${catBlock}) | base64 -d > ${remoteFile} && chmod +x ${remoteFile} && bash ${remoteFile}; rm -f ${remoteFile}; exit\n`;
+
+    setTimeout(() => {
+      proc.stdin.write(fullCmd);
+    }, 2000);
+  } else {
+    proc.stdin.write(script);
+    proc.stdin.end();
+  }
 
   proc.stdout.on("data", (chunk: Buffer) => {
     for (const line of chunk.toString().split("\n")) {

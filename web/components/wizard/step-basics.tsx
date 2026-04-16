@@ -1,7 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -9,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Loader2, Check, X } from "lucide-react";
 
 export interface ClusterBasics {
   clusterName: string;
@@ -25,15 +29,61 @@ export interface SshKeyOption {
   name: string;
 }
 
+export type SshTestStatus = "idle" | "testing" | "ok" | "failed";
+
 interface StepBasicsProps {
   data: ClusterBasics;
   onChange: (data: ClusterBasics) => void;
   sshKeys: SshKeyOption[];
+  onSshTestChange?: (status: SshTestStatus) => void;
 }
 
-export function StepBasics({ data, onChange, sshKeys }: StepBasicsProps) {
+export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBasicsProps) {
+  const [sshTest, setSshTest] = useState<SshTestStatus>("idle");
+  const [sshTestMsg, setSshTestMsg] = useState("");
+
   const update = (field: keyof ClusterBasics, value: string) => {
     onChange({ ...data, [field]: value });
+    // Reset SSH test when connection details change
+    if (["controllerHost", "sshUser", "sshPort", "sshKeyId"].includes(field)) {
+      setSshTest("idle");
+      setSshTestMsg("");
+      onSshTestChange?.("idle");
+    }
+  };
+
+  const canTestSsh = !!(data.controllerHost && data.sshKeyId);
+
+  const testSsh = async () => {
+    setSshTest("testing");
+    setSshTestMsg("");
+    onSshTestChange?.("testing");
+    try {
+      const res = await fetch("/api/admin/ssh-keys/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sshKeyId: data.sshKeyId,
+          host: data.controllerHost,
+          user: data.sshUser || "root",
+          port: parseInt(data.sshPort) || 22,
+        }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        setSshTest("ok");
+        setSshTestMsg(result.hostname ? `Connected to ${result.hostname}` : "Connection successful");
+        onSshTestChange?.("ok");
+      } else {
+        setSshTest("failed");
+        setSshTestMsg(result.error ?? "Connection failed");
+        onSshTestChange?.("failed");
+      }
+    } catch {
+      setSshTest("failed");
+      setSshTestMsg("Request failed");
+      onSshTestChange?.("failed");
+    }
   };
 
   return (
@@ -116,7 +166,7 @@ export function StepBasics({ data, onChange, sshKeys }: StepBasicsProps) {
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-[1fr_1fr_auto] gap-4 items-end">
         <div className="space-y-2">
           <Label htmlFor="sshUser">SSH User</Label>
           <Input
@@ -136,7 +186,27 @@ export function StepBasics({ data, onChange, sshKeys }: StepBasicsProps) {
             onChange={(e) => update("sshPort", e.target.value)}
           />
         </div>
+        <Button
+          type="button"
+          variant={sshTest === "ok" ? "outline" : "secondary"}
+          size="default"
+          disabled={!canTestSsh || sshTest === "testing"}
+          onClick={testSsh}
+        >
+          {sshTest === "testing" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          {sshTest === "ok" && <Check className="mr-2 h-4 w-4 text-green-600" />}
+          {sshTest === "failed" && <X className="mr-2 h-4 w-4 text-destructive" />}
+          {sshTest === "testing" ? "Testing..." : "Test SSH"}
+        </Button>
       </div>
+      {sshTest === "ok" && (
+        <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+          {sshTestMsg}
+        </Badge>
+      )}
+      {sshTest === "failed" && (
+        <p className="text-sm text-destructive">{sshTestMsg}</p>
+      )}
     </div>
   );
 }

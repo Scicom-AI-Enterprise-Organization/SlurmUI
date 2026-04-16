@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { sendCommandAndWait, publishCommand } from "@/lib/nats";
 
 interface RouteParams {
@@ -132,9 +133,24 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }).catch(() => {});
     }
 
+    await logAudit({
+      action: "job.submit",
+      entity: "Job",
+      entityId: job.id,
+      metadata: { clusterId: id, clusterName: cluster.name, partition, slurmJobId: result.slurm_job_id },
+    });
+
     return NextResponse.json(updated, { status: 201 });
   } catch (err) {
     await prisma.job.update({ where: { id: job.id }, data: { status: "FAILED" } });
+
+    await logAudit({
+      action: "job.submit_failed",
+      entity: "Job",
+      entityId: job.id,
+      metadata: { clusterId: id, clusterName: cluster.name, partition, error: err instanceof Error ? err.message : "Unknown" },
+    });
+
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: `Job submission failed: ${message}`, job }, { status: 502 });
   }

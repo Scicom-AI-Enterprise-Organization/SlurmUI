@@ -26,6 +26,7 @@ model Cluster {
   natsCredentials String         // encrypted at rest
   sshUser         String         @default("root")
   sshPort         Int            @default(22)
+  sshBastion      Boolean        @default(false) // true if SSH host is a bastion/jump server
   status          ClusterStatus  @default(PROVISIONING)
   config          Json           // full cluster-config.json
   sshKeyId              String?
@@ -139,4 +140,33 @@ model Setting {
   key       String   @id
   value     String   @db.Text
   updatedAt DateTime @updatedAt
+}
+
+model BackgroundTask {
+  id          String   @id @default(uuid())
+  clusterId   String
+  type        String   // "bootstrap", "teardown", "add_node", etc.
+  status      String   @default("running") // "running", "success", "failed"
+  logs        String   @db.Text @default("")
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([clusterId])
+  @@index([status])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String   // e.g. "cluster.create", "ssh_key.delete", "user.provision"
+  entity    String   // e.g. "Cluster", "SshKey", "User"
+  entityId  String?  // ID of the affected entity
+  userId    String?  // who performed the action
+  userEmail String?  // denormalized for display
+  metadata  Json?    // extra context (cluster name, old/new values, etc.)
+  createdAt DateTime @default(now())
+
+  @@index([action])
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([createdAt])
 }

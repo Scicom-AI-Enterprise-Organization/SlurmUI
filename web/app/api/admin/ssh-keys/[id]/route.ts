@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import type { Session } from "next-auth";
 
 interface RouteParams {
@@ -35,5 +36,13 @@ export async function DELETE(_req: NextRequest, { params }: RouteParams) {
   }
 
   await prisma.sshKey.delete({ where: { id } });
+
+  await logAudit({
+    action: "ssh_key.delete",
+    entity: "SshKey",
+    entityId: id,
+    metadata: { name: key.name },
+  });
+
   return NextResponse.json({ deleted: true });
 }

@@ -8,11 +8,11 @@ import {
   LayoutDashboard,
   Server,
   Plus,
-  Monitor,
   Briefcase,
   PanelLeftOpen,
   PanelLeftClose,
   Settings,
+  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,28 +20,30 @@ interface SidebarProps {
   role: "ADMIN" | "USER";
 }
 
-type NavLink = { href: string; label: string; icon: React.ElementType };
+type NavAction = { href: string; icon: React.ElementType; label: string };
+type NavLink = { href: string; label: string; icon: React.ElementType; action?: NavAction };
 type NavSection = { title?: string; links: NavLink[] };
 
-const workloadSection: NavSection = {
-  links: [
-    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { href: "/jobs", label: "Jobs", icon: Briefcase },
-    { href: "/clusters", label: "Clusters", icon: Monitor },
-  ],
-};
+const userSections: NavSection[] = [
+  {
+    links: [
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/jobs", label: "Jobs", icon: Briefcase },
+    ],
+  },
+];
 
-const managementSection: NavSection = {
-  title: "Management",
-  links: [
-    { href: "/admin/clusters", label: "Manage Clusters", icon: Server },
-    { href: "/admin/clusters/new", label: "New Cluster", icon: Plus },
-    { href: "/admin/settings", label: "Settings", icon: Settings },
-  ],
-};
-
-const userSections: NavSection[] = [workloadSection];
-const adminSections: NavSection[] = [workloadSection, managementSection];
+const adminSections: NavSection[] = [
+  {
+    links: [
+      { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { href: "/jobs", label: "Jobs", icon: Briefcase },
+      { href: "/admin/clusters", label: "Clusters", icon: Server, action: { href: "/admin/clusters/new", icon: Plus, label: "New Cluster" } },
+      { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText },
+      { href: "/admin/settings", label: "Settings", icon: Settings },
+    ],
+  },
+];
 
 const EXPANDED_WIDTH = 256;
 const COLLAPSED_WIDTH = 44;
@@ -117,23 +119,33 @@ export function Sidebar({ role }: SidebarProps) {
                     pathname === "/clusters"
                   : pathname === link.href || pathname.startsWith(link.href + "/");
               return (
-                <Link
-                  key={link.href}
-                  href={link.href}
-                  title={isCollapsed ? link.label : undefined}
-                  className={cn(
-                    "flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors",
-                    isCollapsed ? "justify-center" : "",
-                    isActive
-                      ? "bg-sidebar-accent text-sidebar-primary font-semibold"
-                      : "text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                <div key={link.href} className="flex items-center gap-0.5">
+                  <Link
+                    href={link.href}
+                    title={isCollapsed ? link.label : undefined}
+                    className={cn(
+                      "flex flex-1 items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors",
+                      isCollapsed ? "justify-center" : "",
+                      isActive
+                        ? "bg-sidebar-accent text-sidebar-primary font-semibold"
+                        : "text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                    )}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    {!isCollapsed && (
+                      <span className="whitespace-nowrap">{link.label}</span>
+                    )}
+                  </Link>
+                  {link.action && !isCollapsed && (
+                    <Link
+                      href={link.action.href}
+                      title={link.action.label}
+                      className="flex w-8 self-stretch items-center justify-center rounded-md text-sidebar-foreground/40 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors"
+                    >
+                      <link.action.icon className="h-4 w-4" />
+                    </Link>
                   )}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {!isCollapsed && (
-                    <span className="whitespace-nowrap">{link.label}</span>
-                  )}
-                </Link>
+                </div>
               );
             })}
           </div>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
 import { sendCommandAndWait } from "@/lib/nats";
 import { randomUUID } from "crypto";
 
@@ -115,6 +116,13 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
   const updatedJob = await prisma.job.update({
     where: { id: jobId },
     data: { status: "CANCELLED" },
+  });
+
+  await logAudit({
+    action: "job.cancel",
+    entity: "Job",
+    entityId: jobId,
+    metadata: { clusterId: id, slurmJobId: job.slurmJobId },
   });
 
   return NextResponse.json(updatedJob);

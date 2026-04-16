@@ -53,10 +53,7 @@ export function StepInstall({ clusterId, connectionMode, sshUser, sshPort, natsU
     const decoder = new TextDecoder();
     let buffer = "";
 
-    while (!cancelledRef.current) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    const processBuffer = () => {
       const parts = buffer.split("\n\n");
       buffer = parts.pop() ?? "";
       for (const part of parts) {
@@ -72,6 +69,19 @@ export function StepInstall({ clusterId, connectionMode, sshUser, sshPort, natsU
           else if (event.type === "complete") handlers.onComplete?.(event.success, event.message);
         } catch {}
       }
+    };
+
+    while (!cancelledRef.current) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      processBuffer();
+    }
+
+    // Process any remaining data in buffer after stream ends
+    if (buffer.trim()) {
+      buffer += "\n\n";
+      processBuffer();
     }
   }
 
@@ -83,32 +93,26 @@ export function StepInstall({ clusterId, connectionMode, sshUser, sshPort, natsU
     const cancelledRef = { current: false };
 
     if (connectionMode === "SSH") {
-      // SSH mode: just verify connectivity
+      // SSH mode: SSH was already tested in step 1, just activate the cluster
       (async () => {
         try {
-          const res = await fetch(`/api/clusters/${clusterId}/verify-ssh`, {
-            method: "POST",
+          addLine("[aura] SSH connectivity already verified in previous step");
+          addLine("[aura] Activating cluster...");
+
+          const res = await fetch(`/api/clusters/${clusterId}`, {
+            method: "PATCH",
             headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "ACTIVE" }),
           });
 
-          if (!res.ok || !res.body) {
+          if (res.ok) {
+            addLine("[aura] Cluster is now ACTIVE");
+            setState("connected");
+          } else {
             const err = await res.json().catch(() => ({ error: "Unknown error" }));
             setState("failed");
-            setErrorMsg(err.error ?? "Failed to verify SSH");
-            return;
+            setErrorMsg(err.error ?? "Failed to activate cluster");
           }
-
-          await readSSE(res, {
-            onStream: addLine,
-            onComplete: (success, message) => {
-              if (success) {
-                setState("connected");
-              } else {
-                setState("failed");
-                setErrorMsg(message ?? "SSH verification failed");
-              }
-            },
-          }, cancelledRef);
         } catch (err) {
           if (!cancelledRef.current) {
             setState("failed");
