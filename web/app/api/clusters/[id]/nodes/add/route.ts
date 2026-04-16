@@ -47,6 +47,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     data: { config: config as any },
   });
 
+  // Gather existing ACTIVE users for replication on the new node
+  const activeClusterUsers = await prisma.clusterUser.findMany({
+    where: { clusterId: id, status: "ACTIVE" },
+    include: { user: { select: { unixUsername: true, unixUid: true, unixGid: true } } },
+  });
+  const existingUsers = activeClusterUsers
+    .filter((cu) => cu.user.unixUsername && cu.user.unixUid != null && cu.user.unixGid != null)
+    .map((cu) => ({
+      username: cu.user.unixUsername!,
+      uid: cu.user.unixUid!,
+      gid: cu.user.unixGid!,
+    }));
+
+  // Gather previously installed packages
+  const extraPackages: string[] = (config.installed_packages as string[]) ?? [];
+
   const requestId = randomUUID();
 
   try {
@@ -55,7 +71,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       type: "add_node",
       payload: {
         target_node: nodeName,
+        target_ip: ip,
         config,
+        existing_users: existingUsers,
+        extra_packages: extraPackages,
       },
     });
 

@@ -38,6 +38,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     ? Buffer.from(sshKeySetting.value).toString("base64")
     : "";
 
+  // Persist packages to cluster config (optimistic, before publish)
+  const existingPackages: string[] = clusterConfig.installed_packages ?? [];
+  const merged = Array.from(new Set([...existingPackages, ...packages]));
+  await prisma.cluster.update({
+    where: { id },
+    data: { config: { ...clusterConfig, installed_packages: merged } as any },
+  });
+
   const requestId = randomUUID();
   await publishCommand(id, {
     request_id: requestId,

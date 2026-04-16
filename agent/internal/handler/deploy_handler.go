@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/scicom/aura/agent/internal/ansible"
 	"github.com/scicom/aura/agent/internal/message"
@@ -92,7 +93,8 @@ func (h *DeployHandler) HandleActivateNode(ctx context.Context, cmd *message.Com
 	return h.runPlaybook(ctx, cmd.RequestID, opts)
 }
 
-// HandleAddNode runs the add_node.yml playbook.
+// HandleAddNode runs the add_node.yml playbook, then replicates existing users
+// and previously installed packages to the new node.
 func (h *DeployHandler) HandleAddNode(ctx context.Context, cmd *message.Command) error {
 	var payload message.AddNodePayload
 	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
@@ -102,24 +104,124 @@ func (h *DeployHandler) HandleAddNode(ctx context.Context, cmd *message.Command)
 	h.logger.Info("adding node",
 		"request_id", cmd.RequestID,
 		"target_node", payload.TargetNode,
+		"existing_users", len(payload.ExistingUsers),
+		"extra_packages", len(payload.ExtraPackages),
 	)
 
+	seq := 0
+	emit := func(line string) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq)
+		seq++
+	}
+	streamFn := func(line string, s int) {
+		_ = h.publisher.SendStreamLine(cmd.RequestID, line, seq+s)
+	}
+
+	// --- Step 1: run add_node.yml ---
 	varsFile, cleanup, err := resolveVarsFile(payload.VarsFile, payload.Config)
 	if err != nil {
 		return h.publisher.SendError(cmd.RequestID, err)
 	}
 	defer cleanup()
 
-	opts := &ansible.RunOpts{
+	addOpts := &ansible.RunOpts{
 		PlaybookDir: h.playbookDir,
 		Playbook:    "add_node.yml",
 		VarsFile:    varsFile,
-		ExtraVars: map[string]string{
-			"target_node": payload.TargetNode,
-		},
+		ExtraVars:   map[string]string{"target_node": payload.TargetNode},
+	}
+	addResult, err := h.runner.Run(ctx, addOpts, streamFn)
+	if err != nil {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("add_node playbook failed: %w", err))
+	}
+	if addResult.ExitCode != 0 {
+		return h.publisher.SendError(cmd.RequestID, fmt.Errorf("add_node exited with code %d: %s", addResult.ExitCode, addResult.Stderr))
 	}
 
-	return h.runPlaybook(ctx, cmd.RequestID, opts)
+	// Build a single-host inventory pointing at the new node.
+	sshKeyArg := ""
+	if _, statErr := os.Stat("/root/.ssh/aura_cluster_key"); statErr == nil {
+		sshKeyArg = " ansible_ssh_private_key_file=/root/.ssh/aura_cluster_key"
+	}
+	nodeInventory := fmt.Sprintf(
+		"[workers]\n%s ansible_host=%s ansible_user=root ansible_python_interpreter=/usr/bin/python3%s\n",
+		payload.TargetNode, payload.TargetIP, sshKeyArg,
+	)
+
+	// --- Step 2: replicate existing users ---
+	if len(payload.ExistingUsers) > 0 {
+		emit(fmt.Sprintf("[aura] Replicating %d existing user(s) to %s...", len(payload.ExistingUsers), payload.TargetNode))
+
+		invFile, invErr := os.CreateTemp("", "aura-addnode-inv-*.ini")
+		if invErr != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create inventory: %w", invErr))
+		}
+		invFile.WriteString(nodeInventory)
+		invFile.Close()
+		defer os.Remove(invFile.Name())
+
+		for _, u := range payload.ExistingUsers {
+			emit(fmt.Sprintf("[aura] Provisioning user %s (uid=%d) on %s", u.Username, u.UID, payload.TargetNode))
+			type userVars struct {
+				Username string `json:"username"`
+				UID      int    `json:"uid"`
+				GID      int    `json:"gid"`
+			}
+			varsData, _ := json.Marshal(userVars{Username: u.Username, UID: u.UID, GID: u.GID})
+			uVarsPath, uErr := writeTempConfig(json.RawMessage(varsData))
+			if uErr != nil {
+				emit(fmt.Sprintf("[aura] Warning: could not write vars for user %s: %v", u.Username, uErr))
+				continue
+			}
+			uResult, uRunErr := h.runner.Run(ctx, &ansible.RunOpts{
+				PlaybookDir: h.playbookDir,
+				Playbook:    "user_provision.yml",
+				VarsFile:    uVarsPath,
+				Inventory:   invFile.Name(),
+			}, streamFn)
+			os.Remove(uVarsPath)
+			if uRunErr != nil || (uResult != nil && uResult.ExitCode != 0) {
+				emit(fmt.Sprintf("[aura] Warning: failed to replicate user %s — continuing", u.Username))
+			}
+		}
+		emit("[aura] User replication done")
+	}
+
+	// --- Step 3: install previously installed packages ---
+	if len(payload.ExtraPackages) > 0 {
+		emit(fmt.Sprintf("[aura] Installing %d extra package(s) on %s: %v", len(payload.ExtraPackages), payload.TargetNode, payload.ExtraPackages))
+
+		pkgInvFile, pkgInvErr := os.CreateTemp("", "aura-addnode-pkg-inv-*.ini")
+		if pkgInvErr != nil {
+			return h.publisher.SendError(cmd.RequestID, fmt.Errorf("failed to create package inventory: %w", pkgInvErr))
+		}
+		// install_packages.yml targets [all]
+		pkgInvFile.WriteString(strings.Replace(nodeInventory, "[workers]", "[all]", 1))
+		pkgInvFile.Close()
+		defer os.Remove(pkgInvFile.Name())
+
+		pkgVarsData, _ := json.Marshal(map[string]interface{}{"packages": payload.ExtraPackages})
+		pkgVarsPath, pkgVarsErr := writeTempConfig(json.RawMessage(pkgVarsData))
+		if pkgVarsErr != nil {
+			emit(fmt.Sprintf("[aura] Warning: could not write package vars: %v", pkgVarsErr))
+		} else {
+			defer os.Remove(pkgVarsPath)
+			pkgResult, pkgErr := h.runner.Run(ctx, &ansible.RunOpts{
+				PlaybookDir: h.playbookDir,
+				Playbook:    "install_packages.yml",
+				VarsFile:    pkgVarsPath,
+				Inventory:   pkgInvFile.Name(),
+			}, streamFn)
+			if pkgErr != nil || (pkgResult != nil && pkgResult.ExitCode != 0) {
+				emit("[aura] Warning: package installation failed — node is functional but may be missing packages")
+			} else {
+				emit("[aura] Extra packages installed")
+			}
+		}
+	}
+
+	emit(fmt.Sprintf("[aura] Node %s fully onboarded", payload.TargetNode))
+	return h.publisher.SendResult(cmd.RequestID, addResult)
 }
 
 // HandlePropagateConfig runs the propagate_config.yml playbook.

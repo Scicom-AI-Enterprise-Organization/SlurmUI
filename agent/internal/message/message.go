@@ -131,11 +131,21 @@ type ActivateNodePayload struct {
 	Config     json.RawMessage `json:"config,omitempty"`    // inline config (alternative to VarsFile)
 }
 
+// UserEntry is a minimal user record used when replicating existing users to a new node.
+type UserEntry struct {
+	Username string `json:"username"`
+	UID      int    `json:"uid"`
+	GID      int    `json:"gid"`
+}
+
 // AddNodePayload is the payload for add_node commands.
 type AddNodePayload struct {
-	TargetNode string          `json:"target_node"`
-	VarsFile   string          `json:"vars_file,omitempty"`
-	Config     json.RawMessage `json:"config,omitempty"`
+	TargetNode    string          `json:"target_node"`
+	TargetIP      string          `json:"target_ip"`               // IP of the new node (for SSH inventory)
+	VarsFile      string          `json:"vars_file,omitempty"`
+	Config        json.RawMessage `json:"config,omitempty"`
+	ExistingUsers []UserEntry     `json:"existing_users,omitempty"` // ACTIVE cluster users to replicate
+	ExtraPackages []string        `json:"extra_packages,omitempty"` // previously installed packages
 }
 
 // PropagateConfigPayload is the payload for propagate_config commands.
