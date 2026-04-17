@@ -63,6 +63,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   nodes.push({ expression: nodeName, cpus, gpus: gpus ?? 0, memory_mb: memoryMb });
   config.slurm_nodes = nodes;
 
+  // New nodes default to the first partition (or seed a "main" partition if
+  // none exist). Admins can reassign via the Partitions tab.
+  const partitions = (config.slurm_partitions ?? []) as Array<Record<string, unknown>>;
+  if (partitions.length === 0) {
+    partitions.push({ name: "main", default: true, nodes: nodeName, max_time: "INFINITE", state: "UP" });
+  } else {
+    const first = partitions[0] as any;
+    const cur = typeof first.nodes === "string" ? first.nodes : "";
+    if (cur !== "ALL" && !cur.split(",").map((n: string) => n.trim()).includes(nodeName)) {
+      first.nodes = cur ? `${cur},${nodeName}` : nodeName;
+    }
+  }
+  config.slurm_partitions = partitions;
+
   await prisma.cluster.update({
     where: { id },
     data: { config: config as any },

@@ -8,6 +8,16 @@ import { JobStatusBadge } from "@/components/jobs/job-status-badge";
 import { LiveOutput } from "@/components/jobs/live-output";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { XCircle, RefreshCw } from "lucide-react";
 
@@ -34,6 +44,32 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
+  const [fetchedOutput, setFetchedOutput] = useState<string | null>(null);
+  const [fetchingOutput, setFetchingOutput] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelResult, setCancelResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [infoSections, setInfoSections] = useState<Record<string, string> | null>(null);
+  const [infoLoading, setInfoLoading] = useState(false);
+  const [infoError, setInfoError] = useState<string | null>(null);
+
+  const fetchInfo = async () => {
+    setInfoLoading(true);
+    setInfoError(null);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/jobs/${jobId}/info`);
+      if (res.ok) {
+        const d = await res.json();
+        setInfoSections(d.sections ?? {});
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setInfoError(err.error ?? `Server returned ${res.status}`);
+      }
+    } catch {
+      setInfoError("Network error");
+    } finally {
+      setInfoLoading(false);
+    }
+  };
 
   const fetchJob = async () => {
     setLoading(true);
@@ -61,19 +97,38 @@ export default function JobDetailPage() {
     return () => clearInterval(interval);
   }, [job?.status]);
 
+  // For completed jobs without stored output, pull it from the cluster on demand.
+  useEffect(() => {
+    if (!job) return;
+    const terminal = job.status === "COMPLETED" || job.status === "FAILED" || job.status === "CANCELLED";
+    if (!terminal || job.output || fetchedOutput !== null || fetchingOutput) return;
+    setFetchingOutput(true);
+    fetch(`/api/clusters/${clusterId}/jobs/${jobId}/output`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setFetchedOutput(d.output ?? ""))
+      .catch(() => setFetchedOutput(""))
+      .finally(() => setFetchingOutput(false));
+  }, [job, clusterId, jobId, fetchedOutput, fetchingOutput]);
+
   const handleCancel = async () => {
+    setConfirmCancel(false);
     setCancelling(true);
     try {
       const res = await fetch(`/api/clusters/${clusterId}/jobs/${jobId}`, {
         method: "DELETE",
       });
       if (res.ok) {
-        toast.success("Job cancelled");
+        setCancelResult({ ok: true, message: "Job cancelled successfully." });
         fetchJob();
       } else {
-        const err = await res.json();
-        toast.error(err.error ?? "Failed to cancel");
+        const err = await res.json().catch(() => ({}));
+        setCancelResult({ ok: false, message: err.error ?? "Failed to cancel job." });
       }
+    } catch (e) {
+      setCancelResult({
+        ok: false,
+        message: e instanceof Error ? e.message : "Network error — could not reach the cluster API.",
+      });
     } finally {
       setCancelling(false);
     }
@@ -111,7 +166,7 @@ export default function JobDetailPage() {
             <Button
               variant="destructive"
               size="sm"
-              onClick={handleCancel}
+              onClick={() => setConfirmCancel(true)}
               disabled={cancelling}
             >
               <XCircle className="mr-2 h-3 w-3" />
@@ -150,24 +205,64 @@ export default function JobDetailPage() {
 
       <Separator />
 
-      {/* Live output for running jobs */}
-      {isRunning && (
-        <LiveOutput clusterId={clusterId} jobId={jobId} isRunning={true} />
-      )}
+      <Tabs defaultValue="output" onValueChange={(v) => { if (v === "info" && !infoSections && !infoLoading) fetchInfo(); }}>
+        <TabsList>
+          <TabsTrigger value="output">Output</TabsTrigger>
+          <TabsTrigger value="info">Slurm Info</TabsTrigger>
+        </TabsList>
 
-      {/* Stored output for completed/failed jobs */}
-      {!isRunning && (
-        <div className="space-y-2">
-          <h3 className="font-medium">Output</h3>
-          <ScrollArea className="h-96 rounded-md border bg-black p-4">
-            {job.output ? (
-              <pre className="font-mono text-xs text-green-400">{job.output}</pre>
-            ) : (
-              <p className="font-mono text-xs text-gray-500">No output captured.</p>
-            )}
-          </ScrollArea>
-        </div>
-      )}
+        <TabsContent value="output" className="mt-4">
+          {isRunning ? (
+            <LiveOutput clusterId={clusterId} jobId={jobId} isRunning={true} />
+          ) : (
+            <div className="space-y-2">
+              <h3 className="font-medium">Output</h3>
+              <ScrollArea className="h-96 rounded-md border bg-black p-4">
+                {job.output ? (
+                  <pre className="font-mono text-xs text-green-400">{job.output}</pre>
+                ) : fetchingOutput ? (
+                  <p className="font-mono text-xs text-gray-500">Loading output from cluster...</p>
+                ) : fetchedOutput ? (
+                  <pre className="font-mono text-xs text-green-400">{fetchedOutput}</pre>
+                ) : (
+                  <p className="font-mono text-xs text-gray-500">No output captured.</p>
+                )}
+              </ScrollArea>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="info" className="mt-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              Live output from <code>scontrol</code>, <code>sacct</code>, <code>squeue</code>, <code>sinfo</code> on the controller.
+            </p>
+            <Button variant="outline" size="sm" onClick={fetchInfo} disabled={infoLoading}>
+              <RefreshCw className={`mr-2 h-3 w-3 ${infoLoading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
+
+          {infoError && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+              {infoError}
+            </div>
+          )}
+
+          {infoLoading && !infoSections && (
+            <p className="text-sm text-muted-foreground">Loading diagnostics...</p>
+          )}
+
+          {infoSections && Object.entries(infoSections).map(([name, body]) => (
+            <div key={name} className="space-y-1">
+              <h4 className="font-mono text-xs uppercase tracking-wider text-muted-foreground">{name}</h4>
+              <div className="max-h-72 overflow-auto rounded-md border bg-black p-3">
+                <pre className="font-mono text-xs text-green-400 whitespace-pre">{body || "(empty)"}</pre>
+              </div>
+            </div>
+          ))}
+        </TabsContent>
+      </Tabs>
 
       <Separator />
 
@@ -178,6 +273,44 @@ export default function JobDetailPage() {
           <pre className="p-4 font-mono text-sm">{job.script}</pre>
         </ScrollArea>
       </div>
+
+      {/* Confirm cancel dialog */}
+      <Dialog open={confirmCancel} onOpenChange={setConfirmCancel}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel this job?</DialogTitle>
+            <DialogDescription>
+              This will send <code>scancel</code> to Slurm for job
+              {job.slurmJobId ? ` ${job.slurmJobId}` : ""}. Any partial output
+              written so far will be preserved.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Keep running</Button>
+            </DialogClose>
+            <Button variant="destructive" onClick={handleCancel} disabled={cancelling}>
+              <XCircle className="mr-2 h-4 w-4" />
+              Cancel Job
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cancel result dialog */}
+      <Dialog open={!!cancelResult} onOpenChange={(o) => { if (!o) setCancelResult(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={cancelResult?.ok ? "" : "text-destructive"}>
+              {cancelResult?.ok ? "Job cancelled" : "Cancel failed"}
+            </DialogTitle>
+            <DialogDescription>{cancelResult?.message}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

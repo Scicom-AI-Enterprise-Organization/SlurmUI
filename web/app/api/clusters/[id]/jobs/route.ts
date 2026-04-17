@@ -3,6 +3,8 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sendCommandAndWait, publishCommand } from "@/lib/nats";
+import { sshExecScript } from "@/lib/ssh-exec";
+import { startJobWatcher } from "@/lib/job-watcher";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -85,12 +87,97 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   try {
     const config = cluster.config as Record<string, unknown>;
-    // Derive username — same logic as provisioning. Falls back to empty string
-    // for admins who may not have a Linux account (sbatch runs as root).
     const username = dbUser.unixUsername ?? "";
-    // Job working directory = user's NFS home. Outputs land here naturally.
     const dataNfsPath = (config.data_nfs_path as string | undefined) ?? "";
     const workDir = username && dataNfsPath ? `${dataNfsPath}/${username}` : "";
+
+    // SSH mode: run sbatch directly on the controller via SSH.
+    if (cluster.connectionMode === "SSH") {
+      const clusterWithKey = await prisma.cluster.findUnique({
+        where: { id },
+        include: { sshKey: true },
+      });
+      if (!clusterWithKey?.sshKey) {
+        throw new Error("Cluster has no SSH key assigned");
+      }
+
+      const target = {
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: clusterWithKey.sshKey.privateKey,
+        bastion: cluster.sshBastion,
+      };
+
+      if (!username) {
+        throw new Error("Cannot submit — your user has not been provisioned with a Linux account.");
+      }
+      const submitDir = workDir || `/tmp`;
+      const scriptName = `.aura-job-${job.id.slice(0, 8)}.sh`;
+      const scriptPath = `${submitDir}/${scriptName}`;
+      const scriptB64 = Buffer.from(script).toString("base64");
+
+      const wrapper = `#!/bin/bash
+set +e
+S=""; [ "$(id -u)" != "0" ] && S="sudo"
+
+# Ensure submission dir exists and is writable by the user
+$S mkdir -p ${submitDir}
+$S chown ${username}:${username} ${submitDir} 2>/dev/null || true
+
+# Write the user's script (base64-decoded to preserve quoting)
+echo "${scriptB64}" | base64 -d | $S tee ${scriptPath} > /dev/null
+$S chown ${username}:${username} ${scriptPath}
+$S chmod 755 ${scriptPath}
+
+# Submit as the target user. --parsable prints "<jobid>[;cluster]" to stdout.
+OUT=$(sudo -u ${username} -H bash -c "cd ${submitDir} && sbatch --parsable ${scriptPath}" 2>&1)
+RC=$?
+echo "__AURA_SBATCH_EXIT__=$RC"
+echo "__AURA_SBATCH_OUT__=$OUT"
+exit $RC
+`;
+
+      const stdoutLines: string[] = [];
+      const success = await new Promise<boolean>((resolve) => {
+        sshExecScript(target, wrapper, {
+          onStream: (line) => stdoutLines.push(line),
+          onComplete: (ok) => resolve(ok),
+        });
+      });
+
+      const full = stdoutLines.join("\n");
+      const outMatch = full.match(/__AURA_SBATCH_OUT__=([\s\S]*?)(?:\n__|$)/);
+      const sbatchOut = outMatch ? outMatch[1].trim() : full;
+
+      if (!success) {
+        throw new Error(sbatchOut || "sbatch failed");
+      }
+
+      const idMatch = sbatchOut.match(/(\d+)/);
+      if (!idMatch) {
+        throw new Error(sbatchOut || "Could not parse Slurm job ID");
+      }
+      const slurmJobId = parseInt(idMatch[1], 10);
+
+      const updated = await prisma.job.update({
+        where: { id: job.id },
+        data: { slurmJobId, status: "RUNNING" },
+      });
+
+      // Detached watcher — survives tab close. Writes output + final status
+      // to the DB; the SSE stream polls the DB rather than tailing directly.
+      startJobWatcher(clusterWithKey as any, updated as any);
+
+      await logAudit({
+        action: "job.submit",
+        entity: "Job",
+        entityId: job.id,
+        metadata: { clusterId: id, clusterName: cluster.name, partition, slurmJobId, mode: "ssh" },
+      });
+
+      return NextResponse.json(updated, { status: 201 });
+    }
 
     const result = await sendCommandAndWait(
       id,

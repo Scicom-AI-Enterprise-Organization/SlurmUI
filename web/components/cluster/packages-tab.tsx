@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Trash2, Package, Loader2, Play } from "lucide-react";
+import { Plus, Trash2, Package, Loader2, Play, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 interface PackagesTabProps {
@@ -43,6 +43,34 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
   const logRef = useRef<HTMLDivElement>(null);
+
+  // Install status per package across nodes
+  const [pkgStatuses, setPkgStatuses] = useState<Record<string, Record<string, string>>>({});
+  const [targetHosts, setTargetHosts] = useState<string[]>([]);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+
+  const fetchStatuses = async () => {
+    if (packages.length === 0) {
+      setPkgStatuses({});
+      return;
+    }
+    setCheckingStatus(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/packages/status`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setPkgStatuses(data.statuses ?? {});
+        setTargetHosts(data.targets ?? []);
+      }
+    } catch {} finally {
+      setCheckingStatus(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [packages.length, clusterId]);
 
   // Fetch installed packages on mount
   useEffect(() => {
@@ -155,6 +183,14 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
       <div className="flex items-center justify-end gap-2">
         <Button
           variant="outline"
+          onClick={fetchStatuses}
+          disabled={packages.length === 0 || checkingStatus}
+        >
+          <RefreshCw className={`mr-2 h-4 w-4 ${checkingStatus ? "animate-spin" : ""}`} />
+          Refresh Status
+        </Button>
+        <Button
+          variant="outline"
           onClick={handleInstallAll}
           disabled={packages.length === 0 || installing}
         >
@@ -185,17 +221,39 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead className="w-[120px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {packages.map((pkg) => (
+                {packages.map((pkg) => {
+                  const status = pkgStatuses[pkg] ?? {};
+                  const totalTargets = targetHosts.length;
+                  const installedCount = Object.values(status).filter((s) => s === "installed").length;
+                  return (
                   <TableRow key={pkg}>
                     <TableCell>
                       <div className="flex items-center gap-2 font-mono text-sm">
                         <Package className="h-3 w-3 text-muted-foreground" />
                         {pkg}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      {totalTargets === 0 ? (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      ) : installedCount === totalTargets ? (
+                        <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                          Installed ({installedCount}/{totalTargets})
+                        </Badge>
+                      ) : installedCount === 0 ? (
+                        <Badge variant="outline" className="text-muted-foreground">
+                          Not installed
+                        </Badge>
+                      ) : (
+                        <Badge className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">
+                          Partial ({installedCount}/{totalTargets})
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Button
@@ -209,7 +267,8 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           )}

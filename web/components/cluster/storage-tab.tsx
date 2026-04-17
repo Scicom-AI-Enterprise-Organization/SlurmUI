@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,7 @@ import {
   DialogTitle,
   DialogFooter,
   DialogClose,
+  DialogDescription,
 } from "@/components/ui/dialog";
 import {
   Table,
@@ -30,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Trash2, HardDrive, Loader2, Check, X } from "lucide-react";
+import { Plus, Trash2, HardDrive, Loader2, Check, X, Plug } from "lucide-react";
 import { toast } from "sonner";
 
 interface StorageMount {
@@ -58,6 +59,9 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
   const [mounts, setMounts] = useState<StorageMount[]>(initialMounts);
   const [addOpen, setAddOpen] = useState(false);
   const [deploying, setDeploying] = useState<string | null>(null);
+  const [mountStatuses, setMountStatuses] = useState<Record<string, Record<string, string>>>({});
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [targetHosts, setTargetHosts] = useState<string[]>([]);
   const [deployLogOpen, setDeployLogOpen] = useState(false);
   const [deployLines, setDeployLines] = useState<string[]>([]);
   const [deployStatus, setDeployStatus] = useState<"running" | "success" | "failed">("running");
@@ -96,6 +100,27 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
     setTestMsg("");
   };
 
+  const fetchStatuses = async () => {
+    if (mounts.length === 0) return;
+    setCheckingStatus(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/storage/status`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setMountStatuses(data.statuses ?? {});
+        setTargetHosts(data.targets ?? []);
+      }
+    } catch {} finally {
+      setCheckingStatus(false);
+    }
+  };
+
+  // Fetch on mount and whenever mounts change
+  useEffect(() => {
+    fetchStatuses();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounts.length, clusterId]);
+
   const saveConfig = async (updatedMounts: StorageMount[]) => {
     const res = await fetch(`/api/clusters/${clusterId}`, {
       method: "PATCH",
@@ -131,10 +156,71 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
     await saveConfig(updated);
   };
 
-  const handleRemove = async (id: string) => {
-    const updated = mounts.filter((m) => m.id !== id);
-    setMounts(updated);
-    await saveConfig(updated);
+  const [confirmRemove, setConfirmRemove] = useState<StorageMount | null>(null);
+
+  const doRemove = async () => {
+    const mount = confirmRemove;
+    if (!mount) return;
+    setConfirmRemove(null);
+
+    setDeploying(mount.id);
+    setDeployLines([]);
+    setDeployStatus("running");
+    setDeployLogOpen(true);
+
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/storage/deploy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mount, action: "remove" }),
+      });
+
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        setDeployStatus("failed");
+        setDeployLines([`[error] ${err.error ?? "Failed to remove"}`]);
+        setDeploying(null);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "stream") {
+              setDeployLines((prev) => [...prev, event.line]);
+            } else if (event.type === "complete") {
+              if (event.success) {
+                setDeployStatus("success");
+                const updated = mounts.filter((m) => m.id !== mount.id);
+                setMounts(updated);
+                await saveConfig(updated);
+              } else {
+                setDeployStatus("failed");
+                setDeployLines((prev) => [...prev, `[error] ${event.message ?? "Failed"}`]);
+              }
+              return;
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      setDeployStatus("failed");
+      setDeployLines((prev) => [...prev, "[error] Request failed"]);
+    } finally {
+      setDeploying(null);
+    }
   };
 
   const handleDeploy = async (mount: StorageMount) => {
@@ -178,7 +264,8 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
             } else if (event.type === "complete") {
               if (event.success) {
                 setDeployStatus("success");
-                toast.success(`Mounted ${mount.mountPath} on worker nodes`);
+                // Refresh status after deploy completes
+                setTimeout(fetchStatuses, 1000);
               } else {
                 setDeployStatus("failed");
                 setDeployLines((prev) => [...prev, `[error] ${event.message ?? "Failed"}`]);
@@ -200,7 +287,6 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
             const event = JSON.parse(line.slice(6));
             if (event.type === "complete") {
               setDeployStatus(event.success ? "success" : "failed");
-              if (event.success) toast.success(`Mounted ${mount.mountPath} on worker nodes`);
             }
           } catch {}
         }
@@ -343,8 +429,11 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div />
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="outline" onClick={fetchStatuses} disabled={checkingStatus || mounts.length === 0}>
+          {checkingStatus ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Check className="mr-2 h-4 w-4" />}
+          Refresh Status
+        </Button>
         <Button onClick={() => setAddOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
           Add Mount
@@ -369,6 +458,7 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
                   <TableHead>Type</TableHead>
                   <TableHead>Mount Path</TableHead>
                   <TableHead>Source</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -391,25 +481,54 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
                         : `s3://${mount.s3Bucket}`}
                     </TableCell>
                     <TableCell>
+                      {(() => {
+                        const status = mountStatuses[mount.id] ?? {};
+                        const totalTargets = targetHosts.length;
+                        const mountedCount = Object.values(status).filter((s) => s === "mounted").length;
+
+                        if (totalTargets === 0) {
+                          return <span className="text-xs text-muted-foreground">—</span>;
+                        }
+                        if (mountedCount === totalTargets) {
+                          return (
+                            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                              Active ({mountedCount}/{totalTargets})
+                            </Badge>
+                          );
+                        }
+                        if (mountedCount === 0) {
+                          return (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              Not mounted
+                            </Badge>
+                          );
+                        }
+                        return (
+                          <Badge className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">
+                            Partial ({mountedCount}/{totalTargets})
+                          </Badge>
+                        );
+                      })()}
+                    </TableCell>
+                    <TableCell>
                       <div className="flex gap-1">
                         <Button
-                          variant="outline"
-                          size="sm"
+                          variant="ghost"
+                          size="icon-sm"
+                          title={deploying === mount.id ? "Mounting..." : "Connect mount"}
                           onClick={() => handleDeploy(mount)}
                           disabled={deploying === mount.id}
                         >
-                          {deploying === mount.id ? (
-                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                          ) : null}
-                          {deploying === mount.id ? "Mounting..." : "Deploy"}
+                          {deploying === mount.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plug className="h-4 w-4" />}
                         </Button>
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon-sm"
                           className="text-destructive"
-                          onClick={() => handleRemove(mount.id)}
+                          title="Remove mount"
+                          onClick={() => setConfirmRemove(mount)}
                         >
-                          <Trash2 className="h-3 w-3" />
+                          <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>
                     </TableCell>
@@ -555,8 +674,8 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
       <Dialog open={deployLogOpen} onOpenChange={deployStatus !== "running" ? setDeployLogOpen : undefined}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center justify-between">
-              Deploying Storage
+            <DialogTitle className="flex items-center justify-between pr-8">
+              Storage Mount
               <Badge className={
                 deployStatus === "running" ? "bg-blue-100 text-blue-800" :
                 deployStatus === "success" ? "bg-green-100 text-green-800" :
@@ -588,6 +707,29 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
           {deployStatus !== "running" && (
             <Button variant="outline" onClick={() => setDeployLogOpen(false)}>Close</Button>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove mount confirmation dialog */}
+      <Dialog open={!!confirmRemove} onOpenChange={(o) => { if (!o) setConfirmRemove(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove storage mount?</DialogTitle>
+            <DialogDescription>
+              This will unmount <strong>{confirmRemove?.mountPath}</strong> from all worker nodes,
+              remove it from <code>/etc/fstab</code>, and delete the credentials file.
+              The remote data ({confirmRemove?.type === "nfs" ? "NFS export" : "S3 bucket"}) is not affected.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button variant="destructive" onClick={doRemove}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Remove
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

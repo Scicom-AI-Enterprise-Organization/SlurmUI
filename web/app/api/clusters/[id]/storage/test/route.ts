@@ -39,71 +39,123 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   if (type === "nfs") {
     script = `#!/bin/bash
-S=""
-if [ "$(id -u)" != "0" ]; then S="sudo"; fi
-
 echo "${marker}_START"
 
-$S apt-get install -y -qq nfs-common 2>/dev/null || $S yum install -y -q nfs-utils 2>/dev/null || true
-
-SHOWMOUNT=$(showmount -e ${nfsServer} 2>&1)
-if echo "$SHOWMOUNT" | grep -q "${nfsPath}"; then
+# Simple reachability check: ping (ICMP) then fallback to TCP port 2049
+if ping -c 2 -W 3 ${nfsServer} > /dev/null 2>&1; then
+  echo "RESULT_OK"
+elif (echo > /dev/tcp/${nfsServer}/2049) 2>/dev/null; then
   echo "RESULT_OK"
 else
   echo "RESULT_FAIL"
-  echo "$SHOWMOUNT"
+  echo "NFS server ${nfsServer} is not reachable"
 fi
 
 echo "${marker}_END"
 `;
   } else {
+    // S3: validate credentials by making a signed HEAD request to the bucket.
+    // Use python's hmac/hashlib which is always available, no extra packages needed.
+    const region = s3Region || "us-east-1";
+    const endpoint = s3Endpoint || `https://s3.${region}.amazonaws.com`;
     script = `#!/bin/bash
-S=""
-if [ "$(id -u)" != "0" ]; then S="sudo"; fi
-
 echo "${marker}_START"
 
-# Install s3fs
-$S apt-get install -y -qq s3fs fuse curl 2>/dev/null || $S yum install -y -q s3fs-fuse fuse curl 2>/dev/null || true
+python3 -W ignore - <<'PYEOF'
+import hashlib, hmac, datetime, urllib.request, urllib.error, ssl, sys, warnings
+warnings.filterwarnings("ignore")
 
-if ! command -v s3fs &>/dev/null; then
-  echo "RESULT_FAIL"
-  echo "s3fs is not installed on the controller"
-  echo "${marker}_END"
-  exit 0
-fi
+access_key = "${s3AccessKey}"
+secret_key = "${s3SecretKey}"
+region = "${region}"
+bucket = "${s3Bucket}"
+endpoint = "${endpoint}".rstrip("/")
 
-# Check endpoint reachability
-${s3Endpoint ? `
-if ! curl -sf --max-time 10 -o /dev/null "${s3Endpoint}"; then
-  echo "RESULT_FAIL"
-  echo "Cannot reach S3 endpoint: ${s3Endpoint}"
-  echo "${marker}_END"
-  exit 0
-fi
-` : ""}
+# Parse endpoint
+if endpoint.startswith("https://"):
+    host = endpoint[8:]
+    scheme = "https"
+elif endpoint.startswith("http://"):
+    host = endpoint[7:]
+    scheme = "http"
+else:
+    host = endpoint
+    scheme = "https"
 
-# Write credentials and try to mount
-CRED=/tmp/.aura-s3-test-$$
-MNT=/tmp/.aura-s3-mnt-$$
-echo '${s3AccessKey}:${s3SecretKey}' > $CRED
-chmod 600 $CRED
-mkdir -p $MNT
+# Determine if using path-style (custom endpoint) or virtual-hosted style (AWS)
+is_aws = "amazonaws.com" in host
+if is_aws:
+    url_host = f"{bucket}.{host}"
+    canonical_uri = "/"
+else:
+    url_host = host
+    canonical_uri = f"/{bucket}"
 
-$S s3fs ${s3Bucket} $MNT -o passwd_file=$CRED ${s3Endpoint ? `-o url=${s3Endpoint} -o use_path_request_style` : ""} ${s3Region ? `-o endpoint=${s3Region}` : ""} -o allow_other 2>/tmp/.aura-s3-err-$$
+url = f"{scheme}://{url_host}{canonical_uri}"
+method = "HEAD"
 
-sleep 2
+now = datetime.datetime.utcnow()
+amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+date_stamp = now.strftime("%Y%m%d")
+# Avoid datetime.utcnow() deprecation
+now = datetime.datetime.now(datetime.timezone.utc) if hasattr(datetime, 'timezone') else now
 
-if mountpoint -q $MNT 2>/dev/null; then
-  echo "RESULT_OK"
-  $S fusermount -u $MNT 2>/dev/null || $S umount $MNT 2>/dev/null || true
-else
-  echo "RESULT_FAIL"
-  cat /tmp/.aura-s3-err-$$ 2>/dev/null || echo "Mount failed silently"
-fi
+# Canonical request
+payload_hash = hashlib.sha256(b"").hexdigest()
+canonical_headers = f"host:{url_host}\\nx-amz-content-sha256:{payload_hash}\\nx-amz-date:{amz_date}\\n"
+signed_headers = "host;x-amz-content-sha256;x-amz-date"
+canonical_request = f"{method}\\n{canonical_uri}\\n\\n{canonical_headers}\\n{signed_headers}\\n{payload_hash}"
 
-rm -f $CRED /tmp/.aura-s3-err-$$
-rmdir $MNT 2>/dev/null || true
+# String to sign
+algorithm = "AWS4-HMAC-SHA256"
+credential_scope = f"{date_stamp}/{region}/s3/aws4_request"
+string_to_sign = f"{algorithm}\\n{amz_date}\\n{credential_scope}\\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+
+# Signing key
+def sign(key, msg):
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+k_date = sign(("AWS4" + secret_key).encode(), date_stamp)
+k_region = sign(k_date, region)
+k_service = sign(k_region, "s3")
+k_signing = sign(k_service, "aws4_request")
+signature = hmac.new(k_signing, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+auth_header = f"{algorithm} Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+
+req = urllib.request.Request(url, method=method)
+req.add_header("Host", url_host)
+req.add_header("x-amz-date", amz_date)
+req.add_header("x-amz-content-sha256", payload_hash)
+req.add_header("Authorization", auth_header)
+
+ctx = ssl.create_default_context()
+
+try:
+    resp = urllib.request.urlopen(req, context=ctx, timeout=10)
+    print("RESULT_OK")
+except urllib.error.HTTPError as e:
+    if e.code == 200:
+        print("RESULT_OK")
+    elif e.code == 403:
+        print("RESULT_FAIL")
+        print(f"Access denied (403): invalid credentials or no permission on bucket '{bucket}'")
+    elif e.code == 404:
+        print("RESULT_FAIL")
+        print(f"Bucket '{bucket}' not found (404)")
+    elif e.code == 301 or e.code == 307:
+        print("RESULT_FAIL")
+        print(f"Wrong region: server returned {e.code}. Check the Region field.")
+    else:
+        print("RESULT_FAIL")
+        print(f"HTTP {e.code}: {e.reason}")
+except urllib.error.URLError as e:
+    print("RESULT_FAIL")
+    print(f"Cannot reach endpoint: {e.reason}")
+except Exception as e:
+    print("RESULT_FAIL")
+    print(f"Error: {e}")
+PYEOF
 
 echo "${marker}_END"
 `;
@@ -128,17 +180,20 @@ echo "${marker}_END"
   const body_output = full.slice(startIdx + `${marker}_START`.length, endIdx).replace(/\r/g, "").trim();
   const lines = body_output.split("\n").filter(Boolean);
 
-  if (lines[0] === "RESULT_OK") {
+  // Find the RESULT_OK or RESULT_FAIL line (may be preceded by warnings/noise)
+  const resultIdx = lines.findIndex((l) => l === "RESULT_OK" || l === "RESULT_FAIL");
+
+  if (resultIdx !== -1 && lines[resultIdx] === "RESULT_OK") {
     return NextResponse.json({
       success: true,
       message: type === "nfs"
-        ? `NFS export ${nfsServer}:${nfsPath} is accessible`
+        ? `NFS server ${nfsServer} is reachable`
         : `S3 bucket "${s3Bucket}" is accessible`,
     });
   }
 
-  if (lines[0] === "RESULT_FAIL") {
-    const detail = lines.slice(1).join("\n");
+  if (resultIdx !== -1 && lines[resultIdx] === "RESULT_FAIL") {
+    const detail = lines.slice(resultIdx + 1).join("\n");
     return NextResponse.json({
       success: false,
       error: detail || "Test failed",

@@ -53,7 +53,11 @@ echo "${MARKER}_END"
       const rawChunks: string[] = [];
       await new Promise<void>((resolve) => {
         sshExecScript(target, script, {
-          onStream: (line) => rawChunks.push(line),
+          // Skip stderr — ssh welcome banners and warnings otherwise land in
+          // the stream and break JSON.parse on sinfo --json output.
+          onStream: (line) => {
+            if (!line.startsWith("[stderr]")) rawChunks.push(line);
+          },
           onComplete: () => resolve(),
         });
       });
@@ -88,37 +92,54 @@ echo "${MARKER}_END"
       }
 
       const raw = result.stdout.trim();
+      const looksLikeJson = raw.startsWith("{") || raw.startsWith("[");
 
       // Try JSON format first (sinfo --json in Slurm 23+)
-      try {
-        const sinfo = JSON.parse(raw);
-        if (sinfo.sinfo && Array.isArray(sinfo.sinfo)) {
-          // Slurm 23+ format: flatten nodes from each sinfo entry
-          const nodes: any[] = [];
-          for (const entry of sinfo.sinfo) {
-            const nodeList = entry.nodes?.nodes ?? [];
-            const states = entry.node?.state ?? [];
-            const state = Array.isArray(states) ? states.join(",").toLowerCase() : String(states).toLowerCase();
-            const gres = entry.gres?.total ?? entry.node?.gres ?? "";
-            const gresMatch = typeof gres === "string" ? gres.match(/gpu:(\d+)/) : null;
-            const gpus = gresMatch ? parseInt(gresMatch[1]) : 0;
-            for (const name of nodeList) {
-              nodes.push({
-                name,
-                state,
-                cpus: entry.cpus?.total ?? 0,
-                memory: entry.memory?.total ?? entry.memory?.maximum ?? 0,
-                gres,
-                gpus,
-                partitions: entry.partition?.name ? [entry.partition.name] : [],
-              });
+      if (looksLikeJson) {
+        try {
+          const sinfo = JSON.parse(raw);
+          if (sinfo.sinfo && Array.isArray(sinfo.sinfo)) {
+            // Slurm 23+/24+ format: each entry contains a node group.
+            const nodes: any[] = [];
+            for (const entry of sinfo.sinfo) {
+              const nodeList = entry.nodes?.nodes ?? [];
+              const states = entry.node?.state ?? [];
+              const state = Array.isArray(states) ? states.join(",").toLowerCase() : String(states).toLowerCase();
+              const gres = entry.gres?.total ?? entry.node?.gres ?? "";
+              const gresMatch = typeof gres === "string" ? gres.match(/gpu:(\d+)/) : null;
+              const gpus = gresMatch ? parseInt(gresMatch[1]) : 0;
+              // Memory/cpus fields are nested objects in Slurm 24+; unwrap.
+              const cpus = typeof entry.cpus?.total === "number"
+                ? entry.cpus.total
+                : entry.cpus?.maximum ?? 0;
+              const memory = typeof entry.memory?.maximum === "number"
+                ? entry.memory.maximum
+                : entry.memory?.total ?? 0;
+              for (const name of nodeList) {
+                nodes.push({
+                  name,
+                  state: state || "unknown",
+                  cpus,
+                  memory,
+                  gres,
+                  gpus,
+                  partitions: entry.partition?.name ? [entry.partition.name] : [],
+                });
+              }
             }
+            return NextResponse.json({ nodes });
           }
-          return NextResponse.json({ nodes });
+          return NextResponse.json({ nodes: sinfo.nodes ?? [] });
+        } catch (parseErr) {
+          // JSON-looking but unparseable — surface the error instead of
+          // falling through to the pipe parser (which would treat every
+          // curly-brace line as a separate node row).
+          return NextResponse.json({
+            nodes: [],
+            error: `Failed to parse sinfo JSON: ${parseErr instanceof Error ? parseErr.message : "Unknown"}`,
+          });
         }
-        // Older format
-        return NextResponse.json({ nodes: sinfo.nodes ?? [] });
-      } catch {}
+      }
 
       // Fallback: parse line format (Name|State|CPUs|Memory|Gres|Partitions)
       const nodes = raw.split("\n").filter(Boolean).map((line) => {

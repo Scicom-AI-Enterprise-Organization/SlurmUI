@@ -8,8 +8,11 @@ const tabs = [
   { slug: "configuration", label: "Configuration", requiresActive: false },
   { slug: "ssh", label: "SSH", requiresActive: false },
   { slug: "nodes", label: "Nodes", requiresActive: true },
+  { slug: "partitions", label: "Partitions", requiresActive: true },
   { slug: "storage", label: "Storages", requiresActive: true },
   { slug: "packages", label: "Packages", requiresActive: true },
+  { slug: "python", label: "Python", requiresActive: true },
+  { slug: "users", label: "Users", requiresActive: true },
 ];
 
 interface ClusterTabsProps {

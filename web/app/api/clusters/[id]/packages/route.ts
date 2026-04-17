@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { registerRunningTask } from "@/lib/running-tasks";
 import { randomUUID } from "crypto";
 
 interface RouteParams { params: Promise<{ id: string }> }
@@ -41,7 +42,14 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 
   const config = cluster.config as Record<string, unknown>;
   const packages: string[] = (config.installed_packages as string[]) ?? [];
-  return NextResponse.json({ packages });
+
+  const latestTask = await prisma.backgroundTask.findFirst({
+    where: { clusterId: id, type: "install_packages" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, status: true, createdAt: true },
+  });
+
+  return NextResponse.json({ packages, latestTask });
 }
 
 // PUT /api/clusters/[id]/packages — update the package list in config (no install)
@@ -148,7 +156,7 @@ echo "============================================"
     // Run in background
     (async () => {
       await appendLog(task.id, `[aura] Installing ${packages.length} package(s): ${pkgList}`);
-      sshExecScript(target, script, {
+      const handle = sshExecScript(target, script, {
         onStream: (line) => {
           const trimmed = line.replace(/\r/g, "").trim();
           if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
@@ -160,11 +168,12 @@ echo "============================================"
             await appendLog(task.id, "\n[aura] Packages installed successfully.");
             logAudit({ action: "packages.install", entity: "Cluster", entityId: id, metadata: { packages, mode: "ssh" } });
           } else {
-            await appendLog(task.id, "\n[aura] Package installation failed.");
+            await appendLog(task.id, "\n[aura] Package installation failed or was cancelled.");
           }
           await finishTask(task.id, success);
         },
       });
+      registerRunningTask(task.id, handle);
     })();
 
     return NextResponse.json({ taskId: task.id });
