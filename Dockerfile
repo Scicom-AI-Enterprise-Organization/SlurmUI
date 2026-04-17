@@ -31,6 +31,15 @@ COPY web/ .
 RUN apk add --no-cache openssl
 RUN npx prisma generate
 RUN npm run build
+# Compile the custom server to plain JS so production runs with `node` (not tsx).
+# Running tsx in prod registers a require-hook that breaks Next's export-condition
+# resolution for async-local-storage.
+RUN npm install --no-save esbuild && \
+    npx esbuild server.ts \
+      --bundle --platform=node --target=node20 --format=cjs \
+      --outfile=server.js \
+      --external:next --external:next-auth --external:next-auth/* \
+      --external:@auth/prisma-adapter --external:@prisma/client
 
 # ---- Production runner ----
 FROM node:20-alpine AS runner
@@ -57,9 +66,8 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Custom TypeScript server (needs tsx + runtime deps above)
-COPY web/server.ts ./server.ts
-COPY web/lib ./lib
+# Pre-compiled custom server (see esbuild step in builder stage)
+COPY --from=builder /app/server.js ./server.js
 
 # Ansible playbooks bundled into the image
 COPY ansible/ /opt/aura/ansible/
@@ -77,4 +85,4 @@ EXPOSE 3000
 ENV ANSIBLE_PLAYBOOKS_DIR=/opt/aura/ansible
 ENV AURA_AGENT_BINARY_DIR=/opt/aura
 
-CMD ["npx", "tsx", "server.ts"]
+CMD ["node", "server.js"]
