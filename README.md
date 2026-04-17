@@ -31,6 +31,9 @@ wraps the day-to-day operations in a single web UI:
   slurmd status, recent logs), a **Fix** button that resumes stuck CG/DRAIN
   nodes, a **Reset Queue** button that scancels zombie pending jobs, and a
   Prometheus `/api/metrics` endpoint for alerts.
+- **For disaster recovery & migration** — one-way **Git Sync** exports every
+  cluster's config, SSH keys (optional), and job history as YAML into a git
+  repo; a **Restore from git** button rebuilds a fresh SlurmUI from that repo.
 
 Two connection modes, pick whichever fits your network:
 
@@ -118,6 +121,31 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
+### Global admin settings
+
+Under **/admin/settings** (sub-sidebar):
+
+| Page | What it does |
+|---|---|
+| **SSH Keys** | Generate or import SSH key pairs, see which clusters use each, delete unused. |
+| **Git Sync** | Configure a backing git repo; one-way export of state, and **Restore from git** for migrating to a new SlurmUI. |
+
+### Git sync & migration
+
+Point SlurmUI at a private git repo (SSH deploy key or HTTPS PAT, optionally username:password inline in the URL). **Sync now** commits every cluster's YAML, attached SSH key metadata, optionally the private key material, and the most recent 500 jobs. Layout:
+
+```
+clusters/<name>/{cluster,config,partitions,nodes,storage,packages-apt,
+                 packages-python,environment,users}.yaml
+ssh-keys/_index.yaml
+ssh-keys/private/<key>.key   # only when "Include secrets" is on
+jobs/<cluster>/<date>/<id>.yaml
+```
+
+**Restore from git** (same page) upserts clusters by name and SSH keys by name
+into a new SlurmUI. Live clusters aren't touched; re-Apply each settings tab
+to push state back to nodes after restore.
+
 ### Observability
 
 - Prometheus scrape endpoint at `GET /api/metrics` (optional `METRICS_TOKEN`
@@ -186,14 +214,47 @@ See `docker-compose.dev.yml` for the full working example.
 
 ### Metrics
 
-`/api/metrics` (Prometheus text format). Key series:
+`/api/metrics` (Prometheus text format, `slurmui_*` namespace). Highlights:
 
-- `aura_clusters_total`, `aura_clusters_by_mode`, `aura_cluster_info{name,status,mode}`
-- `aura_cluster_nodes{cluster}`, `aura_cluster_storage_mounts{cluster}`, `aura_cluster_packages{cluster}`
-- `aura_jobs_total{status}`, `aura_cluster_jobs{cluster,status}`
-- `aura_cluster_users{cluster,status}`, `aura_users_total`, `aura_ssh_keys_total`
-- `aura_app_sessions`, `aura_background_tasks_total{type,status}`
-- `aura_audit_logs_total`, `aura_audit_logs_last_24h{action}`
+**Clusters & capacity**
+
+- `slurmui_clusters_total{status}`, `slurmui_clusters_by_mode{mode}`, `slurmui_clusters_by_bastion{bastion}`
+- `slurmui_cluster_info{cluster,cluster_id,status,mode,bastion}` — metadata, value always 1
+- `slurmui_cluster_nodes{cluster}`, `slurmui_cluster_cpus_total{cluster}`, `slurmui_cluster_gpus_total{cluster}`, `slurmui_cluster_memory_mb_total{cluster}`
+- `slurmui_cluster_partitions{cluster}`, `slurmui_cluster_partition_nodes{cluster,partition}`
+- `slurmui_cluster_storage_mounts{cluster}`, `slurmui_cluster_storage_mounts_by_type{cluster,type}`
+- `slurmui_cluster_apt_packages{cluster}`, `slurmui_cluster_python_packages{cluster}`, `slurmui_cluster_env_vars{cluster}`
+- `slurmui_cluster_age_seconds{cluster}`
+
+**Jobs**
+
+- `slurmui_jobs_total{status}`, `slurmui_cluster_jobs{cluster,status}`
+- `slurmui_cluster_partition_jobs{cluster,partition,status}`
+- `slurmui_jobs_by_exit_code{exit_code}`
+- `slurmui_jobs_24h{status}`, `slurmui_jobs_1h{status}`, `slurmui_jobs_5m{status}` — rate-friendly windows
+- `slurmui_jobs_running_count{cluster}`, `slurmui_running_job_age_seconds{stat=min|p50|p90|p99|max|count}`
+- `slurmui_job_duration_seconds_{bucket,count,sum}{cluster,status,le}` — Prometheus histogram over the 24h finished-job window
+- `slurmui_cluster_last_submit_timestamp_seconds{cluster}`, `slurmui_cluster_last_finished_timestamp_seconds{cluster}`
+
+**Users / templates / sessions**
+
+- `slurmui_users_total{role}`, `slurmui_cluster_users{cluster,status}`
+- `slurmui_top_user_jobs_24h{cluster,user}` — top 20, bounded cardinality
+- `slurmui_cluster_templates{cluster}`, `slurmui_templates_total`
+- `slurmui_app_sessions{cluster,type,status}`
+
+**SSH keys & git sync**
+
+- `slurmui_ssh_keys_total`, `slurmui_ssh_keys_unused`, `slurmui_ssh_key_clusters_using{key}`
+- `slurmui_git_sync_enabled`, `slurmui_git_sync_last_sync_timestamp_seconds`, `slurmui_git_sync_last_success`
+
+**Ops / background**
+
+- `slurmui_background_tasks_total{status}`, `slurmui_background_tasks_by_type{type,status}`
+- `slurmui_background_tasks_running{cluster,type}`, `slurmui_background_task_oldest_age_seconds`
+- `slurmui_background_tasks_failed_24h{type}`
+- `slurmui_audit_logs_24h{action}`, `slurmui_audit_logs_1h{action}`, `slurmui_audit_logs_total`
+- `slurmui_scrape_timestamp_seconds`, `slurmui_scrape_duration_seconds`
 
 ---
 
@@ -250,6 +311,7 @@ Near-term:
 - Resource dashboard per user (GPU-hours, queue time percentiles).
 - FreeIPA integration for centralized users (already stubbed in config).
 - Agent auto-update channel.
+- Two-way GitOps: webhook-driven reconcile on `git push`, drift detection, PR-review workflow (MVP one-way sync + restore already shipped).
 
 Longer term:
 - Multi-tenant quotas via `sacctmgr` fair-share automation.
