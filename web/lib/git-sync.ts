@@ -232,6 +232,63 @@ async function collectState(includeSecrets: boolean) {
     });
   }
 
+  // Global users (all SlurmUI accounts, keyed by email). Needed so restore
+  // can reattach jobs + cluster provisioning + templates to matching users.
+  const allUsers = await prisma.user.findMany({
+    orderBy: { createdAt: "asc" },
+    select: {
+      email: true, name: true, unixUsername: true, unixUid: true, unixGid: true,
+      role: true, createdAt: true, keycloakId: true,
+    },
+  });
+  files.push({
+    rel: "users/_index.yaml",
+    content: toYamlFile(allUsers.map((u) => ({
+      email: u.email,
+      name: u.name,
+      role: u.role,
+      unixUsername: u.unixUsername,
+      unixUid: u.unixUid,
+      unixGid: u.unixGid,
+      keycloakId: u.keycloakId,
+      createdAt: u.createdAt.toISOString(),
+    }))),
+  });
+
+  // Per-user, per-cluster saved job templates.
+  const templates = await prisma.jobTemplate.findMany({
+    include: {
+      cluster: { select: { name: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+  const tmplUserIds = Array.from(new Set(templates.map((t) => t.userId)));
+  const tmplUsersById = new Map(
+    (await prisma.user.findMany({
+      where: { id: { in: tmplUserIds } },
+      select: { id: true, email: true, unixUsername: true },
+    })).map((u) => [u.id, u])
+  );
+  for (const t of templates) {
+    const owner = tmplUsersById.get(t.userId);
+    const ownerKey = owner?.email ?? owner?.unixUsername ?? t.userId;
+    const safeName = t.name.replace(/[^A-Za-z0-9._-]/g, "_");
+    const safeOwner = ownerKey.replace(/[^A-Za-z0-9._@-]/g, "_");
+    files.push({
+      rel: `clusters/${t.cluster.name}/templates/${safeOwner}__${safeName}.yaml`,
+      content: toYamlFile({
+        name: t.name,
+        owner: owner?.email ?? null,
+        ownerUnixUsername: owner?.unixUsername ?? null,
+        description: t.description,
+        partition: t.partition,
+        createdAt: t.createdAt.toISOString(),
+        updatedAt: t.updatedAt.toISOString(),
+        script: t.script,
+      }),
+    });
+  }
+
   // SSH keys. Public always; private only when user opts into full export.
   const sshKeys = await prisma.sshKey.findMany({
     orderBy: { createdAt: "asc" },
@@ -262,13 +319,22 @@ async function collectState(includeSecrets: boolean) {
     }
   }
 
-  // Job history (most recent 500 to keep the repo small). Job has no Prisma
-  // relation to User (only a userId column), so look users up separately.
-  const jobs = await prisma.job.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 500,
-    include: { cluster: { select: { name: true } } },
-  });
+  // Jobs: always include every PENDING/RUNNING job, plus the most recent 500
+  // finished jobs for history. Active jobs must survive a migration regardless
+  // of age, so we can't just rely on a recency cap.
+  const [activeJobs, recentJobs] = await Promise.all([
+    prisma.job.findMany({
+      where: { status: { in: ["PENDING", "RUNNING"] } },
+      include: { cluster: { select: { name: true } } },
+    }),
+    prisma.job.findMany({
+      where: { status: { in: ["COMPLETED", "FAILED", "CANCELLED"] } },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+      include: { cluster: { select: { name: true } } },
+    }),
+  ]);
+  const jobs = [...activeJobs, ...recentJobs];
   const userIds = Array.from(new Set(jobs.map((j) => j.userId)));
   const usersById = new Map(
     (await prisma.user.findMany({
@@ -448,7 +514,11 @@ export interface RestoreSummary {
   sshKeysCreated: number;
   sshKeysUpdated: number;
   sshKeysSkipped: string[];
-  templatesRestored: number;
+  usersCreated: number;
+  usersUpdated: number;
+  templatesCreated: number;
+  templatesUpdated: number;
+  templatesSkipped: string[];
   jobsRestored: number;
   warnings: string[];
 }
@@ -512,7 +582,11 @@ export async function runRestore(
     sshKeysCreated: 0,
     sshKeysUpdated: 0,
     sshKeysSkipped: [],
-    templatesRestored: 0,
+    usersCreated: 0,
+    usersUpdated: 0,
+    templatesCreated: 0,
+    templatesUpdated: 0,
+    templatesSkipped: [],
     jobsRestored: 0,
     warnings: [],
   };
@@ -538,7 +612,54 @@ export async function runRestore(
 
     const rootDir = cfg.path ? join(repoDir, cfg.path) : repoDir;
 
-    // ── SSH keys first, since clusters reference them by name ──
+    // ── Users first: jobs, cluster provisioning, and templates all reference them.
+    const usersYaml = readYaml<Array<{
+      email: string; name?: string | null; role?: string;
+      unixUsername?: string | null; unixUid?: number | null; unixGid?: number | null;
+      keycloakId?: string | null;
+    }>>(join(rootDir, "users", "_index.yaml")) ?? [];
+    for (const u of usersYaml) {
+      if (!u?.email) continue;
+      const existing = await prisma.user.findUnique({ where: { email: u.email } });
+      if (existing) {
+        // Preserve the existing user's keycloakId (local auth mapping) unless
+        // we have one and the DB row is empty.
+        await prisma.user.update({
+          where: { email: u.email },
+          data: {
+            name: u.name ?? existing.name,
+            role: (u.role as any) ?? existing.role,
+            unixUsername: u.unixUsername ?? existing.unixUsername,
+            unixUid: u.unixUid ?? existing.unixUid,
+            unixGid: u.unixGid ?? existing.unixGid,
+          },
+        });
+        summary.usersUpdated++;
+      } else {
+        // New user row. keycloakId is unique — if the repo has one use it,
+        // otherwise fall back to the email as a placeholder so the row is
+        // still creatable (admin can rebind via Keycloak later).
+        try {
+          await prisma.user.create({
+            data: {
+              email: u.email,
+              name: u.name ?? null,
+              role: (u.role as any) ?? "USER",
+              unixUsername: u.unixUsername ?? null,
+              unixUid: u.unixUid ?? null,
+              unixGid: u.unixGid ?? null,
+              keycloakId: u.keycloakId ?? `import:${u.email}`,
+            },
+          });
+          summary.usersCreated++;
+          onLog(`[restore] created user ${u.email}`);
+        } catch (e: any) {
+          summary.warnings.push(`could not create user ${u.email}: ${e?.message ?? "unknown"}`);
+        }
+      }
+    }
+
+    // ── SSH keys, since clusters reference them by name ──
     const sshKeysIndex = readYaml<Array<{ name: string; publicKey: string }>>(
       join(rootDir, "ssh-keys", "_index.yaml")
     ) ?? [];
@@ -624,21 +745,93 @@ export async function runRestore(
       };
 
       const existing = await prisma.cluster.findUnique({ where: { name: meta.name } });
+      let clusterId: string;
       if (existing) {
         await prisma.cluster.update({ where: { id: existing.id }, data });
+        clusterId = existing.id;
         summary.clustersUpdated++;
         onLog(`[restore] updated cluster "${meta.name}"`);
       } else {
-        await prisma.cluster.create({ data: { ...data, natsCredentials: "" } });
+        const created = await prisma.cluster.create({ data: { ...data, natsCredentials: "" } });
+        clusterId = created.id;
         summary.clustersCreated++;
         onLog(`[restore] created cluster "${meta.name}"`);
       }
-    }
 
-    // ── Templates (best-effort; only restores for users that already exist) ──
-    // Skipped in MVP — templates are user-scoped and require mapping across
-    // deployments. If you need them, add a future "import templates for current
-    // user" action.
+      // Per-cluster provisioned users (ClusterUser rows) — link by email.
+      const cuYaml = readYaml<Array<{
+        email: string; status?: string; provisionedAt?: string | null;
+      }>>(join(dir, "users.yaml")) ?? [];
+      for (const cu of cuYaml) {
+        if (!cu?.email) continue;
+        const u = await prisma.user.findUnique({ where: { email: cu.email } });
+        if (!u) {
+          summary.warnings.push(`cluster "${meta.name}" provisioned user ${cu.email} not in users/_index.yaml`);
+          continue;
+        }
+        await prisma.clusterUser.upsert({
+          where: { userId_clusterId: { userId: u.id, clusterId } },
+          create: {
+            userId: u.id,
+            clusterId,
+            status: (cu.status as any) ?? "PENDING",
+            provisionedAt: cu.provisionedAt ? new Date(cu.provisionedAt) : null,
+          },
+          update: {
+            status: (cu.status as any) ?? "PENDING",
+            provisionedAt: cu.provisionedAt ? new Date(cu.provisionedAt) : null,
+          },
+        });
+      }
+
+      // Per-cluster saved templates.
+      const tplDir = join(dir, "templates");
+      if (existsSync(tplDir)) {
+        for (const f of readdirSync(tplDir)) {
+          if (!f.endsWith(".yaml")) continue;
+          const t = readYaml<{
+            name?: string; owner?: string | null; ownerUnixUsername?: string | null;
+            description?: string | null; partition?: string; script?: string;
+          }>(join(tplDir, f));
+          if (!t?.name || !t?.script || !t?.partition) {
+            summary.templatesSkipped.push(`${meta.name}/${f} (incomplete)`);
+            continue;
+          }
+          const ownerEmail = t.owner ?? "";
+          const owner = ownerEmail ? await prisma.user.findUnique({ where: { email: ownerEmail } }) : null;
+          if (!owner) {
+            summary.templatesSkipped.push(`${meta.name}/${t.name} (owner ${ownerEmail || "unknown"} not in users)`);
+            continue;
+          }
+          const existingTpl = await prisma.jobTemplate.findUnique({
+            where: { clusterId_userId_name: { clusterId, userId: owner.id, name: t.name } },
+          });
+          if (existingTpl) {
+            await prisma.jobTemplate.update({
+              where: { id: existingTpl.id },
+              data: {
+                description: t.description ?? null,
+                partition: t.partition,
+                script: t.script,
+              },
+            });
+            summary.templatesUpdated++;
+          } else {
+            await prisma.jobTemplate.create({
+              data: {
+                clusterId,
+                userId: owner.id,
+                name: t.name,
+                description: t.description ?? null,
+                partition: t.partition,
+                script: t.script,
+              },
+            });
+            summary.templatesCreated++;
+          }
+        }
+      }
+    }
 
     // ── Jobs (historical records) ──
     const jobsBase = join(rootDir, "jobs");

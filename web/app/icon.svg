@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Rounded square background -->
+  <rect width="64" height="64" rx="14" fill="#1e3a8a"/>
+
+  <!-- 2x2 node grid representing a Slurm cluster -->
+  <!-- Top-left node (idle) -->
+  <rect x="10" y="10" width="18" height="18" rx="4" fill="#3b82f6"/>
+  <!-- Top-right node (running — brighter accent) -->
+  <rect x="36" y="10" width="18" height="18" rx="4" fill="#22d3ee"/>
+  <!-- Bottom-left node (running) -->
+  <rect x="10" y="36" width="18" height="18" rx="4" fill="#22d3ee"/>
+  <!-- Bottom-right node (idle) -->
+  <rect x="36" y="36" width="18" height="18" rx="4" fill="#3b82f6"/>
+
+  <!-- Connecting lines in the middle suggesting interconnect -->
+  <line x1="19" y1="28" x2="19" y2="36" stroke="#60a5fa" stroke-width="1.5" opacity="0.7"/>
+  <line x1="45" y1="28" x2="45" y2="36" stroke="#60a5fa" stroke-width="1.5" opacity="0.7"/>
+  <line x1="28" y1="19" x2="36" y2="19" stroke="#60a5fa" stroke-width="1.5" opacity="0.7"/>
+  <line x1="28" y1="45" x2="36" y2="45" stroke="#60a5fa" stroke-width="1.5" opacity="0.7"/>
+</svg>

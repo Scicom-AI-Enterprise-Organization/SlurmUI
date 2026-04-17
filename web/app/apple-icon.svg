@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+  <!-- Rounded square background with subtle gradient for iOS -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+  </defs>
+  <rect width="180" height="180" rx="40" fill="url(#bg)"/>
+
+  <!-- 2x2 node grid -->
+  <rect x="28" y="28" width="56" height="56" rx="12" fill="#3b82f6"/>
+  <rect x="96" y="28" width="56" height="56" rx="12" fill="#22d3ee"/>
+  <rect x="28" y="96" width="56" height="56" rx="12" fill="#22d3ee"/>
+  <rect x="96" y="96" width="56" height="56" rx="12" fill="#3b82f6"/>
+
+  <!-- Interconnect lines -->
+  <line x1="56" y1="84" x2="56" y2="96" stroke="#60a5fa" stroke-width="4" opacity="0.7"/>
+  <line x1="124" y1="84" x2="124" y2="96" stroke="#60a5fa" stroke-width="4" opacity="0.7"/>
+  <line x1="84" y1="56" x2="96" y2="56" stroke="#60a5fa" stroke-width="4" opacity="0.7"/>
+  <line x1="84" y1="124" x2="96" y2="124" stroke="#60a5fa" stroke-width="4" opacity="0.7"/>
+
+  <!-- "S" monogram in the center for SlurmUI -->
+  <text x="90" y="108" text-anchor="middle" font-family="system-ui, sans-serif" font-size="48" font-weight="700" fill="white" opacity="0.92">S</text>
+</svg>

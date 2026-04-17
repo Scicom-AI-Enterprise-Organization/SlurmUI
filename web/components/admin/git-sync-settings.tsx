@@ -357,10 +357,12 @@ export function GitSyncSettings() {
           <div className="space-y-2 text-sm">
             <p>This will <strong>upsert</strong> clusters, SSH keys, and job history from the repo into this SlurmUI:</p>
             <ul className="list-disc pl-5 text-muted-foreground">
+              <li>Users are matched by <strong>email</strong>. New users get created; existing rows get metadata updated.</li>
               <li>Clusters are matched by <strong>name</strong>. Existing clusters with the same name get their config overwritten.</li>
               <li>SSH keys are matched by <strong>name</strong>. Only restored if the repo snapshot had <em>Include secrets</em> on.</li>
-              <li>Job records with the same ID are skipped (existing jobs never clobbered).</li>
-              <li>Templates are not restored (user-scoped).</li>
+              <li>Per-cluster provisioned users (ClusterUser) restored — requires the user to be in the users index.</li>
+              <li>Templates are matched by <strong>(cluster, owner email, template name)</strong>. Skipped if owner isn&apos;t in the user table.</li>
+              <li>Active (PENDING/RUNNING) jobs plus the last 500 finished jobs are inserted; jobs with a matching ID are never clobbered.</li>
             </ul>
             <p className="pt-2 text-muted-foreground">
               Your live clusters aren&apos;t touched — after restore, open each cluster&apos;s
