@@ -61,9 +61,12 @@ COPY web/prisma ./prisma/
 RUN npm ci --omit=dev && npx prisma generate && \
     chown -R nextjs:nodejs node_modules/.prisma node_modules/@prisma/engines
 
-# Next.js standalone output + static assets
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+# Next.js build output + static assets.
+# We copy the full .next/ (not .next/standalone) because we run the app via our
+# custom compiled server (server.js) with the full npm ci node_modules above.
+# Standalone's trimmed node_modules would overwrite the real next/package.json
+# exports map and break next-auth's `import from 'next/server'`.
+COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 
 # Pre-compiled custom server (see esbuild step in builder stage)
