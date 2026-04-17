@@ -149,7 +149,12 @@ export default function JobDetailPage() {
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">Job {job.id.slice(0, 8)}</h1>
+            <h1 className="text-2xl font-bold">
+              {(() => {
+                const m = job.script?.match(/#SBATCH\s+(?:--job-name|-J)[=\s]+(\S+)/);
+                return m ? m[1] : `Job ${job.id.slice(0, 8)}`;
+              })()}
+            </h1>
             <JobStatusBadge status={job.status} />
           </div>
           <p className="text-sm text-muted-foreground">

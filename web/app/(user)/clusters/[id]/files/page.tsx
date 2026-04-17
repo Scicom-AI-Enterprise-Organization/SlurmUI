@@ -3,6 +3,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
 import {
   Folder, File, Download, ArrowLeft, RefreshCw, ChevronRight, Home,
@@ -28,21 +35,26 @@ export default function FilesPage() {
   const clusterId = params.id as string;
 
   const [path, setPath] = useState("");
+  const [rootId, setRootId] = useState("home");
+  const [roots, setRoots] = useState<Array<{ id: string; label: string; base: string; type: string }>>([]);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState<string | null>(null);
 
-  const load = useCallback(async (p: string) => {
+  const load = useCallback(async (p: string, r: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/clusters/${clusterId}/files?path=${encodeURIComponent(p)}`);
+      const qs = new URLSearchParams({ path: p, root: r }).toString();
+      const res = await fetch(`/api/clusters/${clusterId}/files?${qs}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed to list files" }));
         throw new Error(err.error);
       }
       const data = await res.json();
       setEntries(data.entries ?? []);
+      setRoots(data.roots ?? []);
       setPath(p);
+      setRootId(r);
     } catch (e: any) {
       toast.error(e.message ?? "Failed to list files");
     } finally {
@@ -50,27 +62,28 @@ export default function FilesPage() {
     }
   }, [clusterId]);
 
-  useEffect(() => { load(""); }, [load]);
+  useEffect(() => { load("", "home"); }, [load]);
+
+  const activeRoot = roots.find((r) => r.id === rootId);
 
   const navigate = (entry: FileEntry) => {
     if (!entry.is_dir) return;
     const next = path ? `${path}/${entry.name}` : entry.name;
-    load(next);
+    load(next, rootId);
   };
 
   const goUp = () => {
     const parts = path.split("/").filter(Boolean);
     parts.pop();
-    load(parts.join("/"));
+    load(parts.join("/"), rootId);
   };
 
   const download = async (entry: FileEntry) => {
     const filePath = path ? `${path}/${entry.name}` : entry.name;
     setDownloading(filePath);
     try {
-      const res = await fetch(
-        `/api/clusters/${clusterId}/files/download?path=${encodeURIComponent(filePath)}`
-      );
+      const qs = new URLSearchParams({ path: filePath, root: rootId }).toString();
+      const res = await fetch(`/api/clusters/${clusterId}/files/download?${qs}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Download failed" }));
         throw new Error(err.error);
@@ -99,20 +112,41 @@ export default function FilesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold">Files</h1>
-          <p className="text-muted-foreground">Browse your NFS home directory (read-only)</p>
+          <p className="text-muted-foreground">
+            Browse {activeRoot ? activeRoot.label : "your storage"} (read-only)
+          </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => load(path)}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {roots.length > 1 && (
+            <Select
+              value={rootId}
+              onValueChange={(v) => { if (v) load("", v); }}
+            >
+              <SelectTrigger className="w-72">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {roots.map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Button variant="outline" size="sm" onClick={() => load(path, rootId)}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Breadcrumb */}
       <div className="flex items-center gap-1 text-sm">
         <button
-          onClick={() => load("")}
+          onClick={() => load("", rootId)}
           className="flex items-center gap-1 text-muted-foreground hover:text-foreground"
         >
           <Home className="h-3.5 w-3.5" /> Home
@@ -123,7 +157,7 @@ export default function FilesPage() {
             <span key={crumbPath} className="flex items-center gap-1">
               <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
               <button
-                onClick={() => load(crumbPath)}
+                onClick={() => load(crumbPath, rootId)}
                 className="text-muted-foreground hover:text-foreground"
               >
                 {part}

@@ -19,24 +19,74 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const where: Record<string, unknown> = { clusterId: id };
-  if ((session.user as any).role !== "ADMIN") {
-    where.userId = session.user.id;
-  }
-
   const url = new URL(req.url);
   const page = parseInt(url.searchParams.get("page") ?? "1");
   const limit = parseInt(url.searchParams.get("limit") ?? "20");
   const skip = (page - 1) * limit;
+  const nameFilter = (url.searchParams.get("name") ?? "").trim();
+  const statusFilter = (url.searchParams.get("status") ?? "").trim();
+  const partitionFilter = (url.searchParams.get("partition") ?? "").trim();
+  const fromFilter = (url.searchParams.get("from") ?? "").trim();
+  const toFilter = (url.searchParams.get("to") ?? "").trim();
 
-  const [jobs, total] = await Promise.all([
+  const where: Record<string, unknown> = { clusterId: id };
+  if ((session.user as any).role !== "ADMIN") {
+    where.userId = session.user.id;
+  }
+  if (statusFilter) where.status = statusFilter;
+  if (partitionFilter) where.partition = partitionFilter;
+  if (nameFilter) {
+    // job-name lives inside the stored SBATCH script.
+    where.script = { contains: nameFilter, mode: "insensitive" };
+  }
+  if (fromFilter || toFilter) {
+    const range: Record<string, Date> = {};
+    if (fromFilter) {
+      const d = new Date(fromFilter);
+      if (!isNaN(d.getTime())) range.gte = d;
+    }
+    if (toFilter) {
+      const d = new Date(toFilter);
+      if (!isNaN(d.getTime())) {
+        // "to" is inclusive for the whole day the user picked.
+        d.setHours(23, 59, 59, 999);
+        range.lte = d;
+      }
+    }
+    if (Object.keys(range).length > 0) where.createdAt = range;
+  }
+
+  const [jobs, total, partitionsRaw, clusterRow] = await Promise.all([
     prisma.job.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: limit }),
     prisma.job.count({ where }),
+    prisma.job.findMany({
+      where: { clusterId: id, ...(((session.user as any).role !== "ADMIN") ? { userId: session.user.id } : {}) },
+      distinct: ["partition"],
+      select: { partition: true },
+    }),
+    prisma.cluster.findUnique({ where: { id }, select: { config: true } }),
   ]);
 
+  // Derive job name from the stored SBATCH script so we can show a Name column.
+  const nameRe = /#SBATCH\s+(?:--job-name|-J)[=\s]+(\S+)/;
+  const withName = jobs.map((j) => {
+    const m = j.script?.match(nameRe);
+    return { ...j, name: m ? m[1] : null };
+  });
+
+  // Available partitions for the filter dropdown: union of (cluster-config
+  // partitions) + (distinct partitions used by any past job).
+  const cfg = (clusterRow?.config ?? {}) as Record<string, unknown>;
+  const configPartitions = (cfg.slurm_partitions as Array<{ name: string }> | undefined)?.map((p) => p.name) ?? [];
+  const availablePartitions = Array.from(new Set([
+    ...configPartitions,
+    ...partitionsRaw.map((p) => p.partition),
+  ])).filter(Boolean).sort();
+
   return NextResponse.json({
-    jobs,
+    jobs: withName,
     pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    partitions: availablePartitions,
   });
 }
 

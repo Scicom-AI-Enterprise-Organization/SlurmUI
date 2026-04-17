@@ -39,6 +39,7 @@ model Cluster {
   jobs                  Job[]
   clusterUsers          ClusterUser[]
   appSessions           AppSession[]
+  jobTemplates          JobTemplate[]
 }
 
 enum ConnectionMode {
@@ -72,6 +73,24 @@ model Job {
   @@index([status])
 }
 
+model JobTemplate {
+  id          String   @id @default(uuid())
+  clusterId   String
+  cluster     Cluster  @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  script      String   @db.Text
+  partition   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([clusterId])
+  @@index([userId])
+  @@unique([clusterId, userId, name])
+}
+
 enum JobStatus {
   PENDING
   RUNNING
@@ -92,6 +111,7 @@ model User {
   createdAt     DateTime      @default(now())
   clusters      ClusterUser[]
   appSessions   AppSession[]
+  jobTemplates  JobTemplate[]
 }
 
 model AppSession {

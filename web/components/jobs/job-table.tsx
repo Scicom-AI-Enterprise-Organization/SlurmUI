@@ -16,6 +16,7 @@ interface Job {
   partition: string;
   status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   createdAt: string;
+  name?: string | null;
   cluster?: { name: string };
 }
 
@@ -36,6 +37,7 @@ export function JobTable({ jobs, showCluster = false }: JobTableProps) {
       <TableHeader>
         <TableRow>
           <TableHead>Job ID</TableHead>
+          <TableHead>Name</TableHead>
           <TableHead>Slurm ID</TableHead>
           {showCluster && <TableHead>Cluster</TableHead>}
           <TableHead>Partition</TableHead>
@@ -54,6 +56,7 @@ export function JobTable({ jobs, showCluster = false }: JobTableProps) {
                 {job.id.slice(0, 8)}...
               </Link>
             </TableCell>
+            <TableCell className="font-mono text-sm">{job.name ?? <span className="text-muted-foreground">-</span>}</TableCell>
             <TableCell>{job.slurmJobId ?? "-"}</TableCell>
             {showCluster && (
               <TableCell>{job.cluster?.name ?? job.clusterId.slice(0, 8)}</TableCell>

@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -20,6 +21,8 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { JobTable } from "@/components/jobs/job-table";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { TemplatesPanel } from "@/components/jobs/templates-panel";
 import { toast } from "sonner";
 import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2 } from "lucide-react";
 import Link from "next/link";
@@ -31,7 +34,10 @@ interface Job {
   partition: string;
   status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   createdAt: string;
+  name?: string | null;
 }
+
+const STATUSES = ["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] as const;
 
 interface Pagination {
   page: number;
@@ -45,12 +51,50 @@ const PAGE_SIZES = [10, 20, 50, 100];
 export default function JobListPage() {
   const params = useParams();
   const clusterId = params.id as string;
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
 
+  // Initialize state from URL so the page is shareable/bookmarkable and
+  // filter state survives refresh.
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(1);
-  const [limit, setLimit] = useState(20);
+  const [page, setPage] = useState(() => parseInt(searchParams.get("page") ?? "1") || 1);
+  const [limit, setLimit] = useState(() => parseInt(searchParams.get("limit") ?? "20") || 20);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 20, total: 0, pages: 1 });
+
+  const [nameFilter, setNameFilter] = useState(() => searchParams.get("name") ?? "");
+  const [debouncedName, setDebouncedName] = useState(() => searchParams.get("name") ?? "");
+  const [statusFilter, setStatusFilter] = useState(() => searchParams.get("status") ?? "");
+  const [partitionFilter, setPartitionFilter] = useState(() => searchParams.get("partition") ?? "");
+  const [partitions, setPartitions] = useState<string[]>([]);
+  const [fromDate, setFromDate] = useState(() => searchParams.get("from") ?? "");
+  const [toDate, setToDate] = useState(() => searchParams.get("to") ?? "");
+
+  // Debounce name input so every keystroke doesn't hit the API.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedName(nameFilter), 300);
+    return () => clearTimeout(t);
+  }, [nameFilter]);
+
+  // Reset to page 1 whenever a filter changes (otherwise current page may be empty).
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedName, statusFilter, partitionFilter, fromDate, toDate]);
+
+  // Reflect state → URL so filters are shareable/back-navigable.
+  useEffect(() => {
+    const qs = new URLSearchParams();
+    if (debouncedName) qs.set("name", debouncedName);
+    if (statusFilter) qs.set("status", statusFilter);
+    if (partitionFilter) qs.set("partition", partitionFilter);
+    if (fromDate) qs.set("from", fromDate);
+    if (toDate) qs.set("to", toDate);
+    if (page > 1) qs.set("page", String(page));
+    if (limit !== 20) qs.set("limit", String(limit));
+    const qsStr = qs.toString();
+    router.replace(qsStr ? `${pathname}?${qsStr}` : pathname, { scroll: false });
+  }, [debouncedName, statusFilter, partitionFilter, fromDate, toDate, page, limit, pathname, router]);
 
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -58,11 +102,22 @@ export default function JobListPage() {
 
   const fetchJobs = () => {
     setLoading(true);
-    fetch(`/api/clusters/${clusterId}/jobs?page=${page}&limit=${limit}`)
+    const qs = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+    });
+    if (debouncedName) qs.set("name", debouncedName);
+    if (statusFilter) qs.set("status", statusFilter);
+    if (partitionFilter) qs.set("partition", partitionFilter);
+    if (fromDate) qs.set("from", fromDate);
+    if (toDate) qs.set("to", toDate);
+
+    fetch(`/api/clusters/${clusterId}/jobs?${qs.toString()}`)
       .then((res) => res.json())
       .then((data) => {
         setJobs(data.jobs ?? []);
         setPagination(data.pagination ?? { page: 1, limit, total: 0, pages: 1 });
+        setPartitions(data.partitions ?? []);
       })
       .catch(() => toast.error("Failed to load jobs"))
       .finally(() => setLoading(false));
@@ -71,7 +126,16 @@ export default function JobListPage() {
   useEffect(() => {
     fetchJobs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId, page, limit]);
+  }, [clusterId, page, limit, debouncedName, statusFilter, partitionFilter, fromDate, toDate]);
+
+  const hasFilters = !!(nameFilter || statusFilter || partitionFilter || fromDate || toDate);
+  const clearFilters = () => {
+    setNameFilter("");
+    setStatusFilter("");
+    setPartitionFilter("");
+    setFromDate("");
+    setToDate("");
+  };
 
   const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
   const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
@@ -124,6 +188,71 @@ export default function JobListPage() {
             </Button>
           </Link>
         </div>
+      </div>
+
+      <Tabs defaultValue="jobs">
+        <TabsList>
+          <TabsTrigger value="jobs">Jobs</TabsTrigger>
+          <TabsTrigger value="templates">Templates</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="jobs" className="mt-4 space-y-4">
+      {/* Filters — inline toolbar, no box. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          placeholder="Search by job name..."
+          value={nameFilter}
+          onChange={(e) => setNameFilter(e.target.value)}
+          className="h-9 w-64"
+        />
+        <Select
+          value={statusFilter || "__any__"}
+          onValueChange={(v) => setStatusFilter(v === "__any__" ? "" : (v ?? ""))}
+        >
+          <SelectTrigger className="h-9 w-36">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__any__">Any status</SelectItem>
+            {STATUSES.map((s) => (
+              <SelectItem key={s} value={s}>{s}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={partitionFilter || "__any__"}
+          onValueChange={(v) => setPartitionFilter(v === "__any__" ? "" : (v ?? ""))}
+        >
+          <SelectTrigger className="h-9 w-40">
+            <SelectValue placeholder="Partition" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__any__">Any partition</SelectItem>
+            {partitions.map((p) => (
+              <SelectItem key={p} value={p}>{p}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          type="date"
+          value={fromDate}
+          onChange={(e) => setFromDate(e.target.value)}
+          className="h-9 w-40"
+          aria-label="From date"
+        />
+        <span className="text-sm text-muted-foreground">→</span>
+        <Input
+          type="date"
+          value={toDate}
+          onChange={(e) => setToDate(e.target.value)}
+          className="h-9 w-40"
+          aria-label="To date"
+        />
+        {hasFilters && (
+          <Button variant="ghost" size="sm" onClick={clearFilters}>
+            Clear
+          </Button>
+        )}
       </div>
 
       {loading ? (
@@ -180,6 +309,12 @@ export default function JobListPage() {
           )}
         </>
       )}
+        </TabsContent>
+
+        <TabsContent value="templates" className="mt-4">
+          <TemplatesPanel clusterId={clusterId} />
+        </TabsContent>
+      </Tabs>
 
       {/* Reset Queue confirm */}
       <Dialog open={confirmReset} onOpenChange={setConfirmReset}>

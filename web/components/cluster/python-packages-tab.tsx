@@ -331,7 +331,7 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
 
   const locationOptions: Array<{ value: string; label: string; hint?: string }> = [];
   if (dataNfsPath) {
-    locationOptions.push({ value: dataNfsPath, label: `${dataNfsPath} (NFS home)`, hint: "NFS" });
+    locationOptions.push({ value: dataNfsPath, label: `${dataNfsPath} (home)`, hint: "home" });
   }
   for (const m of storageMounts) {
     locationOptions.push({
