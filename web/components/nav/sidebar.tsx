@@ -13,6 +13,7 @@ import {
   PanelLeftClose,
   Settings,
   ScrollText,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,7 @@ const userSections: NavSection[] = [
     links: [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/jobs", label: "Jobs", icon: Briefcase },
+      { href: "/explain", label: "Learn Slurm", icon: BookOpen },
     ],
   },
 ];
@@ -41,6 +43,7 @@ const adminSections: NavSection[] = [
       { href: "/admin/clusters", label: "Clusters", icon: Server, action: { href: "/admin/clusters/new", icon: Plus, label: "New Cluster" } },
       { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText },
       { href: "/admin/settings", label: "Settings", icon: Settings },
+      { href: "/explain", label: "Learn Slurm", icon: BookOpen },
     ],
   },
 ];

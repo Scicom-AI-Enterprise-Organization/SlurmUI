@@ -161,13 +161,23 @@ export function sshExecSimple(
         rmSync(tmpDir, { recursive: true, force: true });
 
         const fullOutput = stdoutChunks.join("");
-        const startIdx = fullOutput.indexOf(`${marker}_START`);
-        const exitMatch = fullOutput.match(new RegExp(`${marker}_EXIT_(\\d+)`));
+        // A PTY echoes the command we piped in, which contains the START marker
+        // literal. The real command output starts at the SECOND START occurrence
+        // (when the remote shell actually evaluates `echo <marker>_START`).
+        // Use lastIndexOf so we skip the echoed copy.
+        const startNeedle = `${marker}_START`;
+        const startIdx = fullOutput.lastIndexOf(startNeedle);
+        const exitRegex = new RegExp(`${marker}_EXIT_(\\d+)`, "g");
+        let exitMatch: RegExpExecArray | null = null;
+        let m: RegExpExecArray | null;
+        while ((m = exitRegex.exec(fullOutput)) !== null) {
+          if (m.index > startIdx) { exitMatch = m; break; }
+        }
 
         if (startIdx !== -1 && exitMatch) {
           const exitCode = parseInt(exitMatch[1]);
           const output = fullOutput
-            .slice(startIdx + `${marker}_START`.length, exitMatch.index)
+            .slice(startIdx + startNeedle.length, exitMatch.index)
             .replace(/\r\n/g, "\n")
             .replace(/\r/g, "")
             .trim();

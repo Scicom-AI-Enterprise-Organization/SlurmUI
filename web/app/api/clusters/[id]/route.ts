@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { redactConfig } from "@/lib/redact-config";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -28,13 +29,16 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   }
 
+  // Redact secret config values (S3 keys, passwords, etc.) before sending.
+  const redacted = { ...cluster, config: redactConfig(cluster.config) };
+
   // Only admins see install token fields
   if ((session.user as any).role !== "ADMIN") {
-    const { installToken, installTokenExpiresAt, installTokenUsedAt, ...safe } = cluster;
+    const { installToken, installTokenExpiresAt, installTokenUsedAt, ...safe } = redacted;
     return NextResponse.json(safe);
   }
 
-  return NextResponse.json(cluster);
+  return NextResponse.json(redacted);
 }
 
 // PATCH /api/clusters/[id] — update cluster (admin only)

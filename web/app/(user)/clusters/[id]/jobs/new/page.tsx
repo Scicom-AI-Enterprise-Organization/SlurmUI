@@ -39,16 +39,24 @@ const FORM_EXAMPLES = {
     ntasks: 2,
     cpusPerTask: 4,
     gpus: 1,
-    memoryGb: 0,
+    memoryGb: 8,
     time: "00:10:00",
     command: `# Multi-node PyTorch all-reduce over NCCL (GPU).
 # One task per node; each rank uses the local GPU.
+echo "[launcher] $(date -u +%H:%M:%S) sbatch host=$(hostname) nodelist=$SLURM_JOB_NODELIST"
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
 export MASTER_PORT=29500
+echo "[launcher] MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+
+# Optional: activate the shared venv set up under Settings -> Python.
+# Uncomment and set the right path for your cluster:
+# source /mnt/shared/aura-venv/bin/activate   # shared mode
+# source /opt/aura-venv/bin/activate          # per-node mode
 
 srun --ntasks=\${SLURM_NTASKS} --ntasks-per-node=1 bash -c '
-python3 - <<PY
-import os, torch, torch.distributed as dist
+echo "[srun] $(date -u +%H:%M:%S) rank=$SLURM_PROCID host=$(hostname) gpu_id=$SLURM_LOCALID"
+python3 -u - <<PY
+import os, socket, torch, torch.distributed as dist
 
 rank = int(os.environ["SLURM_PROCID"])
 world = int(os.environ["SLURM_NTASKS"])
@@ -57,6 +65,15 @@ local_rank = int(os.environ.get("SLURM_LOCALID", 0))
 os.environ["RANK"] = str(rank)
 os.environ["WORLD_SIZE"] = str(world)
 os.environ["LOCAL_RANK"] = str(local_rank)
+
+print(f"[rank {rank}] host={socket.gethostname()} local_rank={local_rank}", flush=True)
+print(f"[rank {rank}] CUDA available: {torch.cuda.is_available()}", flush=True)
+print(f"[rank {rank}] CUDA_VISIBLE_DEVICES=" + os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"), flush=True)
+print(f"[rank {rank}] device count: {torch.cuda.device_count()}", flush=True)
+for i in range(torch.cuda.device_count()):
+    p = torch.cuda.get_device_properties(i)
+    print(f"[rank {rank}]   cuda:{i}  {p.name}  {p.total_memory // (1024*1024)} MiB  SM={p.major}.{p.minor}", flush=True)
+print(f"[rank {rank}] torch={torch.__version__}  cuda={torch.version.cuda}  nccl={torch.cuda.nccl.version() if torch.cuda.is_available() else None}", flush=True)
 
 torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
@@ -76,20 +93,19 @@ PY
     ntasks: 2,
     cpusPerTask: 2,
     gpus: 0,
-    memoryGb: 0,
+    memoryGb: 4,
     time: "00:10:00",
     command: `# Multi-node PyTorch all-reduce over Gloo (CPU).
-# Uses srun so each rank is launched on its allocated node.
+# scontrol expands the compressed nodelist so MASTER_ADDR is a real hostname.
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+export MASTER_PORT=29500
+
 srun --ntasks=\${SLURM_NTASKS} --ntasks-per-node=1 bash -c '
 python3 - <<PY
 import os, torch, torch.distributed as dist
 
 rank = int(os.environ["SLURM_PROCID"])
 world = int(os.environ["SLURM_NTASKS"])
-master = os.environ.get("SLURM_JOB_NODELIST", "").split(",")[0].split("-")[0] or "127.0.0.1"
-
-os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", master)
-os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
 os.environ["RANK"] = str(rank)
 os.environ["WORLD_SIZE"] = str(world)
 
@@ -108,7 +124,7 @@ PY
     ntasks: 1,
     cpusPerTask: 1,
     gpus: 0,
-    memoryGb: 0,
+    memoryGb: 1,
     time: "00:05:00",
     command: `echo "Hello from $(hostname)"
 echo "Job started at $(date)"
@@ -140,7 +156,7 @@ torchrun \\
     ntasks: 1,
     cpusPerTask: 4,
     gpus: 2,
-    memoryGb: 0,
+    memoryGb: 64,
     time: "0",
     command: `source /path/to/venv/bin/activate
 
@@ -162,14 +178,22 @@ const RAW_EXAMPLES = {
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
+#SBATCH --mem=8G
 #SBATCH --time=00:10:00
 
+echo "[launcher] $(date -u +%H:%M:%S) sbatch host=$(hostname) nodelist=$SLURM_JOB_NODELIST"
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
 export MASTER_PORT=29500
+echo "[launcher] MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+
+# Optional: activate the shared venv set up under Settings -> Python.
+# source /mnt/shared/aura-venv/bin/activate   # shared mode
+# source /opt/aura-venv/bin/activate          # per-node mode
 
 srun --ntasks=$SLURM_NTASKS --ntasks-per-node=1 bash -c '
-python3 - <<PY
-import os, torch, torch.distributed as dist
+echo "[srun] $(date -u +%H:%M:%S) rank=$SLURM_PROCID host=$(hostname) gpu_id=$SLURM_LOCALID"
+python3 -u - <<PY
+import os, socket, torch, torch.distributed as dist
 
 rank = int(os.environ["SLURM_PROCID"])
 world = int(os.environ["SLURM_NTASKS"])
@@ -178,6 +202,15 @@ local_rank = int(os.environ.get("SLURM_LOCALID", 0))
 os.environ["RANK"] = str(rank)
 os.environ["WORLD_SIZE"] = str(world)
 os.environ["LOCAL_RANK"] = str(local_rank)
+
+print(f"[rank {rank}] host={socket.gethostname()} local_rank={local_rank}", flush=True)
+print(f"[rank {rank}] CUDA available: {torch.cuda.is_available()}", flush=True)
+print(f"[rank {rank}] CUDA_VISIBLE_DEVICES=" + os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"), flush=True)
+print(f"[rank {rank}] device count: {torch.cuda.device_count()}", flush=True)
+for i in range(torch.cuda.device_count()):
+    p = torch.cuda.get_device_properties(i)
+    print(f"[rank {rank}]   cuda:{i}  {p.name}  {p.total_memory // (1024*1024)} MiB  SM={p.major}.{p.minor}", flush=True)
+print(f"[rank {rank}] torch={torch.__version__}  cuda={torch.version.cuda}  nccl={torch.cuda.nccl.version() if torch.cuda.is_available() else None}", flush=True)
 
 torch.cuda.set_device(local_rank)
 dist.init_process_group(backend="nccl")
@@ -198,6 +231,7 @@ PY
 #SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
+#SBATCH --mem=4G
 #SBATCH --time=00:10:00
 
 # All ranks need to agree on MASTER_ADDR — use the first allocated node.
@@ -228,6 +262,7 @@ PY
 #SBATCH --partition=${partition || "main"}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --mem=1G
 #SBATCH --time=00:05:00
 
 echo "Hello from $(hostname)"
@@ -263,6 +298,7 @@ torchrun \\
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:2
+#SBATCH --mem=64G
 #SBATCH --time=0
 
 source /path/to/venv/bin/activate
@@ -300,8 +336,9 @@ export default function NewJobPage() {
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [partition, setPartition] = useState("");
   const [partitions, setPartitions] = useState<string[]>([]);
-  const [storage, setStorage] = useState(""); // "" = default (NFS home)
+  const [storage, setStorage] = useState("");
   const [storageMounts, setStorageMounts] = useState<Array<{ id: string; mountPath: string; type: string }>>([]);
+  const [pythonVenvPath, setPythonVenvPath] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -323,6 +360,26 @@ export default function NewJobPage() {
 
         const mounts = (config.storage_mounts ?? []) as Array<{ id: string; mountPath: string; type: string }>;
         setStorageMounts(mounts);
+        setStorage(mounts.length > 0 ? mounts[0].mountPath : "/opt");
+
+        // Compute the python venv path from Python Packages settings.
+        // Per-node mode: python_local_venv_path is the venv itself.
+        // Shared mode:   python_venv_location holds the parent dir — venv is at "<loc>/aura-venv".
+        // Prefer whichever is populated so stale install_mode fields don't hide the path.
+        const pyMode = (config.python_install_mode as string) ?? "";
+        const localPath = ((config.python_local_venv_path as string) ?? "").trim();
+        const sharedLoc = ((config.python_venv_location as string) ?? "").trim();
+        let venv = "";
+        if (pyMode === "per-node" && localPath) {
+          venv = localPath;
+        } else if (pyMode === "shared" && sharedLoc) {
+          venv = `${sharedLoc.replace(/\/+$/, "")}/aura-venv`;
+        } else if (localPath) {
+          venv = localPath;
+        } else if (sharedLoc) {
+          venv = `${sharedLoc.replace(/\/+$/, "")}/aura-venv`;
+        }
+        setPythonVenvPath(venv.replace(/\/+$/, ""));
       })
       .catch(() => {
         toast.error("Failed to load cluster config");
@@ -440,21 +497,25 @@ export default function NewJobPage() {
 
             <div className="space-y-2">
               <Label>Working Directory</Label>
-              <Select value={storage || "__home__"} onValueChange={(v) => setStorage(v === "__home__" ? "" : v)}>
+              <Select
+                value={storage}
+                onValueChange={(v) => { if (v !== null) setStorage(v); }}
+              >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue placeholder="Select a directory" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__home__">Home (NFS)</SelectItem>
                   {storageMounts.map((m) => (
                     <SelectItem key={m.id} value={m.mountPath}>
                       {m.mountPath} ({m.type})
                     </SelectItem>
                   ))}
+                  <SelectItem value="/opt">/opt (local to each node)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 Job runs from this directory. Output files land here.
+                {storage === "/opt" && " Note: /opt is local per-node, so outputs on multi-node jobs only appear on the first allocated node."}
               </p>
             </div>
           </div>
@@ -558,6 +619,32 @@ export default function NewJobPage() {
                     onChange={(e) => setTime(e.target.value)}
                   />
                 </div>
+              </div>
+
+              <div className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">
+                <div className="font-medium text-foreground">Python venv</div>
+                {pythonVenvPath ? (
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <code className="font-mono text-muted-foreground break-all">
+                      source {pythonVenvPath}/bin/activate
+                    </code>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const line = `source ${pythonVenvPath}/bin/activate`;
+                        setCommand(command ? `${line}\n\n${command}` : line);
+                      }}
+                    >
+                      Insert into command
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">
+                    Not configured. Set up a shared venv under Settings → Python to get a ready-to-activate path here.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">

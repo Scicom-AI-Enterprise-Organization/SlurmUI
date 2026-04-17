@@ -40,7 +40,12 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   const partitions = (config.slurm_partitions ?? []) as Partition[];
   const hostsEntries = (config.slurm_hosts_entries ?? []) as Array<{ hostname: string }>;
   const nodes = hostsEntries.map((h) => h.hostname);
-  return NextResponse.json({ partitions, nodes });
+  const latestTask = await prisma.backgroundTask.findFirst({
+    where: { clusterId: id, type: "apply_partitions" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, status: true, createdAt: true },
+  });
+  return NextResponse.json({ partitions, nodes, latestTask });
 }
 
 // PUT — save partitions in cluster.config (without applying to slurm.conf)

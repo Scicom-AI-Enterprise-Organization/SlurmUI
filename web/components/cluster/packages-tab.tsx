@@ -39,6 +39,8 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
   const [newPackage, setNewPackage] = useState("");
 
   const [installing, setInstalling] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [logDialog, setLogDialog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
@@ -72,16 +74,61 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packages.length, clusterId]);
 
-  // Fetch installed packages on mount
+  // Fetch installed packages on mount + re-attach to an in-progress install.
   useEffect(() => {
     fetch(`/api/clusters/${clusterId}/packages`)
       .then((r) => r.json())
       .then((d) => {
         setPackages(d.packages ?? []);
         setLoaded(true);
+        if (d.latestTask && d.latestTask.status === "running") {
+          attachToTask(d.latestTask.id);
+        }
       })
       .catch(() => setLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId]);
+
+  const attachToTask = (taskId: string) => {
+    setInstalling(true);
+    setCurrentTaskId(taskId);
+    setLogLines([]);
+    setLogStatus("running");
+    setLogDialog(true);
+    const poll = setInterval(async () => {
+      try {
+        const taskRes = await fetch(`/api/tasks/${taskId}`);
+        if (!taskRes.ok) return;
+        const task = await taskRes.json();
+        setLogLines(task.logs ? task.logs.split("\n") : []);
+        if (task.status === "success") {
+          setLogStatus("success");
+          clearInterval(poll);
+          setInstalling(false);
+          setCurrentTaskId(null);
+          setCancelling(false);
+          fetchStatuses();
+        } else if (task.status === "failed") {
+          setLogStatus("failed");
+          clearInterval(poll);
+          setInstalling(false);
+          setCurrentTaskId(null);
+          setCancelling(false);
+          fetchStatuses();
+        }
+      } catch {}
+    }, 2000);
+  };
+
+  const handleCancel = async () => {
+    if (!currentTaskId) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: "POST" });
+    } catch {
+      setCancelling(false);
+    }
+  };
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -112,11 +159,12 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
   };
 
   const handleInstallAll = async () => {
+    // Re-open the log dialog if an install is already in flight.
+    if (installing && currentTaskId) {
+      setLogDialog(true);
+      return;
+    }
     if (packages.length === 0) return;
-    setInstalling(true);
-    setLogLines([]);
-    setLogStatus("running");
-    setLogDialog(true);
 
     try {
       const res = await fetch(`/api/clusters/${clusterId}/packages`, {
@@ -129,30 +177,20 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
         const err = await res.json().catch(() => ({ error: "Failed" }));
         setLogStatus("failed");
         setLogLines([`[error] ${err.error ?? "Failed to start installation"}`]);
+        setLogDialog(true);
         return;
       }
 
       const data = await res.json();
 
       if (data.taskId) {
-        // Poll the background task
-        const poll = setInterval(async () => {
-          try {
-            const taskRes = await fetch(`/api/tasks/${data.taskId}`);
-            if (!taskRes.ok) return;
-            const task = await taskRes.json();
-            setLogLines(task.logs ? task.logs.split("\n") : []);
-            if (task.status === "success") {
-              setLogStatus("success");
-              clearInterval(poll);
-            } else if (task.status === "failed") {
-              setLogStatus("failed");
-              clearInterval(poll);
-            }
-          } catch {}
-        }, 2000);
+        attachToTask(data.taskId);
       } else if (data.request_id) {
-        // NATS mode: open SSE
+        // NATS mode: open SSE (no cancel wiring yet)
+        setInstalling(true);
+        setLogLines([]);
+        setLogStatus("running");
+        setLogDialog(true);
         const evt = new EventSource(`/api/clusters/${clusterId}/stream/${data.request_id}`);
         evt.onmessage = (e) => {
           try {
@@ -162,19 +200,20 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
             } else if (ev.type === "complete") {
               setLogStatus(ev.success ? "success" : "failed");
               evt.close();
+              setInstalling(false);
             }
           } catch {}
         };
         evt.onerror = () => {
           setLogStatus("failed");
           evt.close();
+          setInstalling(false);
         };
       }
     } catch {
       setLogStatus("failed");
       setLogLines(["[error] Request failed"]);
-    } finally {
-      setInstalling(false);
+      setLogDialog(true);
     }
   };
 
@@ -192,10 +231,10 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
         <Button
           variant="outline"
           onClick={handleInstallAll}
-          disabled={packages.length === 0 || installing}
+          disabled={!installing && packages.length === 0}
         >
           {installing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-          Install All
+          {installing ? "Show Progress" : "Install All"}
         </Button>
         <Button onClick={() => setAddOpen(true)}>
           <Plus className="mr-2 h-4 w-4" />
@@ -310,7 +349,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
       </Dialog>
 
       {/* Install Log Dialog */}
-      <Dialog open={logDialog} onOpenChange={logStatus !== "running" ? setLogDialog : undefined}>
+      <Dialog open={logDialog} onOpenChange={setLogDialog}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
@@ -347,9 +386,16 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
               </div>
             )}
           </div>
-          {logStatus !== "running" && (
-            <Button variant="outline" onClick={() => setLogDialog(false)}>Close</Button>
-          )}
+          <DialogFooter>
+            {logStatus === "running" ? (
+              <Button variant="destructive" onClick={handleCancel} disabled={cancelling || !currentTaskId}>
+                {cancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {cancelling ? "Cancelling..." : "Cancel Installation"}
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => setLogDialog(false)}>Close</Button>
+            )}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

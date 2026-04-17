@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { publishCommand } from "@/lib/nats";
+import { unredactConfig } from "@/lib/redact-config";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -22,19 +23,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { config } = body;
+  const { config: incoming } = body;
 
-  if (!config) {
+  if (!incoming) {
     return NextResponse.json(
       { error: "Missing required field: config" },
       { status: 400 }
     );
   }
 
-  // Save config to database
+  // The editor ships masked secrets. Merge the real values back in from the
+  // stored config so the user doesn't accidentally zero them out.
+  const config = unredactConfig(incoming, cluster.config);
+
   const updatedCluster = await prisma.cluster.update({
     where: { id },
-    data: { config },
+    data: { config: config as any },
   });
 
   // Propagate to agent (non-blocking — long-running Ansible operation)

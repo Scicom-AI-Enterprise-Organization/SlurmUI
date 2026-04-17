@@ -47,7 +47,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   const marker = `__PYPKG_STATUS_${Date.now()}__`;
   const uvBinDir = isShared
     ? `${venvLocation.replace(/\/+$/, "")}/uv-bin`
-    : `${venvPath}/uv-bin`;
+    : `${venvPath}-uv-bin`;
 
   // Check a single venv (used inline for shared, or embedded per-host for per-node).
   const checkOne = `

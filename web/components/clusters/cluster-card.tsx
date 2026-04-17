@@ -22,7 +22,7 @@ export function ClusterCard({
 }: ClusterCardProps) {
   return (
     <Link href={`/admin/clusters/${id}`}>
-      <Card className="transition-shadow hover:shadow-md">
+      <Card className="cursor-pointer transition-colors hover:border-primary/60 hover:shadow-md">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <CardTitle className="text-lg font-semibold">{name}</CardTitle>
           <ClusterStatusBadge status={status} />

@@ -264,24 +264,31 @@ export function UsersTab({ clusterId }: UsersTabProps) {
               </DialogTitle>
             </DialogHeader>
             <div className="space-y-4">
-              <Select
-                value={selectedUserId}
-                onValueChange={(v) => setSelectedUserId(v ?? "")}
-                disabled={availableUsers.length === 0}
-              >
-                <SelectTrigger>
-                  <SelectValue
-                    placeholder={availableUsers.length === 0 ? "No users available" : "Select a user..."}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableUsers.map((u) => (
-                    <SelectItem key={u.id} value={u.id}>
-                      {u.name ?? u.email} ({u.email})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Select
+                    value={selectedUserId}
+                    onValueChange={(v) => setSelectedUserId(v ?? "")}
+                    disabled={availableUsers.length === 0}
+                  >
+                    <SelectTrigger>
+                      <SelectValue
+                        placeholder={availableUsers.length === 0 ? "No users available" : "Select a user..."}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableUsers.map((u) => (
+                        <SelectItem key={u.id} value={u.id}>
+                          {u.name ?? u.email} ({u.email})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button onClick={handleProvision} disabled={!selectedUserId || running}>
+                  {running ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Provisioning...</> : "Provision"}
+                </Button>
+              </div>
 
               {logs.length > 0 && (
                 <div
@@ -309,9 +316,6 @@ export function UsersTab({ clusterId }: UsersTabProps) {
                 </div>
               )}
 
-              <Button onClick={handleProvision} disabled={!selectedUserId || running} className="w-full">
-                {running ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Provisioning...</> : "Provision"}
-              </Button>
             </div>
           </DialogContent>
         </Dialog>
@@ -431,9 +435,11 @@ export function UsersTab({ clusterId }: UsersTabProps) {
               </div>
             )}
           </div>
-          {removeLogStatus !== "running" && (
-            <Button variant="outline" onClick={() => setRemoveLogOpen(false)}>Close</Button>
-          )}
+          <DialogFooter>
+            {removeLogStatus !== "running" && (
+              <Button variant="outline" onClick={() => setRemoveLogOpen(false)}>Close</Button>
+            )}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

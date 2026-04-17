@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { registerRunningTask } from "@/lib/running-tasks";
 import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
@@ -191,7 +192,7 @@ function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
   appendLog(taskId, `[aura] Connecting to ${target.user}@${target.host}...`);
   appendLog(taskId, "");
 
-  sshExecScript(target, script, {
+  const handle = sshExecScript(target, script, {
     onStream: (line) => {
       const trimmed = line.replace(/\r/g, "").trim();
       if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
@@ -204,11 +205,12 @@ function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "bastion" } });
       } else {
-        await appendLog(taskId, "\n[aura] Bootstrap failed.");
+        await appendLog(taskId, "\n[aura] Bootstrap failed or was cancelled.");
       }
       await finishTask(taskId, success);
     },
   });
+  registerRunningTask(taskId, handle);
 }
 
 // Run Ansible bootstrap in background

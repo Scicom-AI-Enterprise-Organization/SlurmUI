@@ -12,6 +12,7 @@ const tabs = [
   { slug: "storage", label: "Storages", requiresActive: true },
   { slug: "packages", label: "Packages", requiresActive: true },
   { slug: "python", label: "Python", requiresActive: true },
+  { slug: "environment", label: "Environment", requiresActive: true },
   { slug: "users", label: "Users", requiresActive: true },
 ];
 

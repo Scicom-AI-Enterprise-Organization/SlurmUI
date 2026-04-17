@@ -3,34 +3,26 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
-import { JobTable } from "@/components/jobs/job-table";
+import { PagedJobs } from "@/components/jobs/paged-jobs";
 import { Separator } from "@/components/ui/separator";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { Server, Send } from "lucide-react";
+import { Server } from "lucide-react";
 
 export default async function JobsPage() {
   const session = await auth();
   if (!session?.user) redirect("/api/auth/signin");
 
-  const [jobs, clusters] = await Promise.all([
-    prisma.job.findMany({
-      where: { userId: session.user.id },
-      orderBy: { createdAt: "desc" },
-      include: { cluster: { select: { name: true } } },
-    }),
-    prisma.cluster.findMany({
-      where: { status: { in: ["ACTIVE", "DEGRADED"] } },
-      select: {
-        id: true,
-        name: true,
-        controllerHost: true,
-        status: true,
-        config: true,
-      },
-      orderBy: { name: "asc" },
-    }),
-  ]);
+  const clusters = await prisma.cluster.findMany({
+    where: { status: { in: ["ACTIVE", "DEGRADED"] } },
+    select: {
+      id: true,
+      name: true,
+      controllerHost: true,
+      status: true,
+      config: true,
+    },
+    orderBy: { name: "asc" },
+  });
 
   return (
     <div className="space-y-6">
@@ -54,30 +46,30 @@ export default async function JobsPage() {
               const nodeGroups = (config.slurm_hosts_entries ?? []) as Array<{ hostname: string }>;
 
               return (
-                <Card key={cluster.id}>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-base">{cluster.name}</CardTitle>
-                    <ClusterStatusBadge status={cluster.status} />
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="space-y-1 text-sm text-muted-foreground">
-                      <div className="flex items-center gap-2">
-                        <Server className="h-3.5 w-3.5" />
-                        <span>{cluster.controllerHost}</span>
+                <Link
+                  key={cluster.id}
+                  href={`/clusters/${cluster.id}/jobs`}
+                  className="block rounded-lg transition-colors"
+                >
+                  <Card className="h-full cursor-pointer hover:border-primary/60 transition-colors">
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="text-base">{cluster.name}</CardTitle>
+                      <ClusterStatusBadge status={cluster.status} />
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-1 text-sm text-muted-foreground">
+                        <div className="flex items-center gap-2">
+                          <Server className="h-3.5 w-3.5" />
+                          <span>{cluster.controllerHost}</span>
+                        </div>
+                        <p>
+                          {nodeGroups.length} node{nodeGroups.length !== 1 ? "s" : ""} |{" "}
+                          {partitions.length} partition{partitions.length !== 1 ? "s" : ""}
+                        </p>
                       </div>
-                      <p>
-                        {nodeGroups.length} node{nodeGroups.length !== 1 ? "s" : ""} |{" "}
-                        {partitions.length} partition{partitions.length !== 1 ? "s" : ""}
-                      </p>
-                    </div>
-                    <Link href={`/clusters/${cluster.id}/jobs/new`}>
-                      <Button className="w-full" size="sm">
-                        <Send className="mr-2 h-4 w-4" />
-                        Submit Job
-                      </Button>
-                    </Link>
-                  </CardContent>
-                </Card>
+                    </CardContent>
+                  </Card>
+                </Link>
               );
             })}
           </div>
@@ -86,16 +78,13 @@ export default async function JobsPage() {
 
       <Separator />
 
-      {/* Jobs */}
+      {/* All Jobs — paginated */}
       <Card>
         <CardHeader>
-          <CardTitle>All Jobs ({jobs.length})</CardTitle>
+          <CardTitle>All Jobs</CardTitle>
         </CardHeader>
         <CardContent>
-          <JobTable
-            jobs={jobs.map((j) => ({ ...j, createdAt: j.createdAt.toISOString() }))}
-            showCluster
-          />
+          <PagedJobs />
         </CardContent>
       </Card>
     </div>

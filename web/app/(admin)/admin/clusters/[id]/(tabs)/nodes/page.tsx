@@ -34,7 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope } from "lucide-react";
 
 interface NodeInfo {
   name: string;
@@ -83,6 +83,8 @@ export default function NodesPage() {
 
   // Per-node action state
   const [fixingNode, setFixingNode] = useState<string | null>(null);
+  const [diagnosingNode, setDiagnosingNode] = useState<string | null>(null);
+  const [syncingHosts, setSyncingHosts] = useState(false);
   const [deletingNode, setDeletingNode] = useState<string | null>(null);
   const [confirmDeleteNode, setConfirmDeleteNode] = useState<string | null>(null);
   const [terminalNode, setTerminalNode] = useState<string | null>(null);
@@ -100,6 +102,8 @@ export default function NodesPage() {
   const [sseLogLines, setSseLogLines] = useState<string[]>([]);
   const [sseLogOpen, setSseLogOpen] = useState(false);
   const [sseLogStatus, setSseLogStatus] = useState<"streaming" | "complete" | "error">("streaming");
+  const [sseTaskId, setSseTaskId] = useState<string | null>(null);
+  const [sseCancelling, setSseCancelling] = useState(false);
   const [sseLogTitle, setSseLogTitle] = useState("Adding new node");
 
   const resetNodeTest = () => {
@@ -206,6 +210,16 @@ export default function NodesPage() {
     }
   };
 
+  const handleCancelAddNode = async () => {
+    if (!sseTaskId) return;
+    setSseCancelling(true);
+    try {
+      await fetch(`/api/tasks/${sseTaskId}/cancel`, { method: "POST" });
+    } catch {
+      setSseCancelling(false);
+    }
+  };
+
   const handleAddNode = async () => {
     setAddingNode(true);
     try {
@@ -236,10 +250,12 @@ export default function NodesPage() {
       setAddDialogOpen(false);
 
       if (data.taskId) {
-        // Background task mode: poll for logs
+        // Background task mode: poll for logs (survives X close)
         setSseLogTitle("Adding new node");
         setSseLogLines([]);
         setSseLogStatus("streaming");
+        setSseTaskId(data.taskId);
+        setSseCancelling(false);
         setSseLogOpen(true);
 
         const poll = setInterval(async () => {
@@ -250,10 +266,14 @@ export default function NodesPage() {
             setSseLogLines(task.logs ? task.logs.split("\n") : []);
             if (task.status === "success") {
               setSseLogStatus("complete");
+              setSseTaskId(null);
+              setSseCancelling(false);
               clearInterval(poll);
               fetchNodes();
             } else if (task.status === "failed") {
               setSseLogStatus("error");
+              setSseTaskId(null);
+              setSseCancelling(false);
               clearInterval(poll);
             }
           } catch {}
@@ -280,78 +300,133 @@ export default function NodesPage() {
   const handleFixNode = async (nodeName: string) => {
     setFixingNode(nodeName);
     setSseLogTitle(`Fixing node: ${nodeName}`);
-    setSseLogLines([
-      `[aura] Fixing node: ${nodeName}`,
-      "",
-    ]);
+    setSseLogLines([]);
     setSseLogStatus("streaming");
     setSseLogOpen(true);
 
     try {
-      // Step 1: show current state
-      setSseLogLines((prev) => [...prev, "[1/3] Current node state..."]);
-      const stateRes = await fetch(`/api/clusters/${clusterId}/exec`, {
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/fix`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: `sudo scontrol show node ${nodeName} 2>&1 | grep -E "State=|Reason=" || echo "(node not found)"` }),
+        body: JSON.stringify({ nodeName }),
       });
-      const stateData = await stateRes.json();
-      if (stateData.stdout) {
-        for (const line of stateData.stdout.split("\n")) {
-          if (line.trim()) setSseLogLines((prev) => [...prev, `  ${line.trim()}`]);
-        }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSseLogLines((prev) => [...prev, `[error] ${err.error ?? `Server returned ${res.status}`}`]);
+        setSseLogStatus("error");
+        setFixingNode(null);
+        return;
       }
-      setSseLogLines((prev) => [...prev, ""]);
-
-      // Step 2a: Restart slurmd on the node so it re-registers with slurmctld
-      setSseLogLines((prev) => [...prev, `[2/3] Restarting slurmd on ${nodeName} and setting state to DOWN...`]);
-      const downRes = await fetch(`/api/clusters/${clusterId}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          command: `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${nodeName} "sudo systemctl restart slurmd 2>&1 || true" && sleep 2 && sudo scontrol update NodeName=${nodeName} State=DOWN Reason='aura fix' 2>&1 && echo "  OK"`,
-        }),
-      });
-      const downData = await downRes.json();
-      if (downData.stdout) {
-        for (const line of downData.stdout.split("\n")) {
-          if (line.trim()) setSseLogLines((prev) => [...prev, line.trimStart().startsWith("OK") ? `  ${line.trim()}` : `  ${line.trim()}`]);
-        }
-      }
-      if (downData.stderr) {
-        for (const line of downData.stderr.split("\n")) {
-          if (line.trim()) setSseLogLines((prev) => [...prev, `  [stderr] ${line.trim()}`]);
-        }
-      }
-      setSseLogLines((prev) => [...prev, ""]);
-
-      // Step 3: RESUME the node
-      setSseLogLines((prev) => [...prev, "[3/3] Setting node state to RESUME..."]);
-      const resumeRes = await fetch(`/api/clusters/${clusterId}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: `sudo scontrol update NodeName=${nodeName} State=RESUME 2>&1 && echo "  OK" && echo "" && echo "--- New state ---" && sudo scontrol show node ${nodeName} | grep -E "State=|Reason="` }),
-      });
-      const resumeData = await resumeRes.json();
-      if (resumeData.stdout) {
-        for (const line of resumeData.stdout.split("\n")) {
-          if (line) setSseLogLines((prev) => [...prev, `  ${line.trim()}`]);
-        }
-      }
-      if (resumeData.stderr) {
-        for (const line of resumeData.stderr.split("\n")) {
-          if (line.trim()) setSseLogLines((prev) => [...prev, `  [stderr] ${line.trim()}`]);
-        }
-      }
-
-      setSseLogLines((prev) => [...prev, "", "[aura] Fix complete."]);
-      setSseLogStatus("complete");
-      setTimeout(fetchNodes, 1500);
+      const { taskId } = await res.json();
+      const poll = setInterval(async () => {
+        try {
+          const taskRes = await fetch(`/api/tasks/${taskId}`);
+          if (!taskRes.ok) return;
+          const task = await taskRes.json();
+          setSseLogLines(task.logs ? task.logs.split("\n") : []);
+          if (task.status === "success") {
+            setSseLogStatus("complete");
+            clearInterval(poll);
+            setFixingNode(null);
+            fetchNodes();
+          } else if (task.status === "failed") {
+            setSseLogStatus("error");
+            clearInterval(poll);
+            setFixingNode(null);
+            fetchNodes();
+          }
+        } catch {}
+      }, 2000);
+      return;
     } catch (err) {
       setSseLogLines((prev) => [...prev, `[error] ${err instanceof Error ? err.message : "Request failed"}`]);
       setSseLogStatus("error");
-    } finally {
       setFixingNode(null);
+    }
+  };
+
+  const handleSyncHosts = async () => {
+    setSyncingHosts(true);
+    setSseLogTitle("Syncing /etc/hosts");
+    setSseLogLines([]);
+    setSseLogStatus("streaming");
+    setSseLogOpen(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/sync-hosts`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSseLogLines((prev) => [...prev, `[error] ${err.error ?? `Server returned ${res.status}`}`]);
+        setSseLogStatus("error");
+        setSyncingHosts(false);
+        return;
+      }
+      const { taskId } = await res.json();
+      const poll = setInterval(async () => {
+        try {
+          const taskRes = await fetch(`/api/tasks/${taskId}`);
+          if (!taskRes.ok) return;
+          const task = await taskRes.json();
+          setSseLogLines(task.logs ? task.logs.split("\n") : []);
+          if (task.status === "success") {
+            setSseLogStatus("complete");
+            clearInterval(poll);
+            setSyncingHosts(false);
+          } else if (task.status === "failed") {
+            setSseLogStatus("error");
+            clearInterval(poll);
+            setSyncingHosts(false);
+          }
+        } catch {}
+      }, 2000);
+    } catch (err) {
+      setSseLogLines((prev) => [...prev, `[error] ${err instanceof Error ? err.message : "Request failed"}`]);
+      setSseLogStatus("error");
+      setSyncingHosts(false);
+    }
+  };
+
+  const handleDiagnoseNode = async (nodeName: string) => {
+    setDiagnosingNode(nodeName);
+    setSseLogTitle(`Diagnosing node: ${nodeName}`);
+    setSseLogLines([]);
+    setSseLogStatus("streaming");
+    setSseLogOpen(true);
+
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/diagnose`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nodeName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSseLogLines((prev) => [...prev, `[error] ${err.error ?? `Server returned ${res.status}`}`]);
+        setSseLogStatus("error");
+        setDiagnosingNode(null);
+        return;
+      }
+      const { taskId } = await res.json();
+      const poll = setInterval(async () => {
+        try {
+          const taskRes = await fetch(`/api/tasks/${taskId}`);
+          if (!taskRes.ok) return;
+          const task = await taskRes.json();
+          setSseLogLines(task.logs ? task.logs.split("\n") : []);
+          if (task.status === "success") {
+            setSseLogStatus("complete");
+            clearInterval(poll);
+            setDiagnosingNode(null);
+          } else if (task.status === "failed") {
+            setSseLogStatus("error");
+            clearInterval(poll);
+            setDiagnosingNode(null);
+          }
+        } catch {}
+      }, 2000);
+    } catch (err) {
+      setSseLogLines((prev) => [...prev, `[error] ${err instanceof Error ? err.message : "Request failed"}`]);
+      setSseLogStatus("error");
+      setDiagnosingNode(null);
     }
   };
 
@@ -506,6 +581,10 @@ export default function NodesPage() {
           <Button variant="outline" onClick={fetchNodes} disabled={loading}>
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
+          </Button>
+          <Button variant="outline" onClick={handleSyncHosts} disabled={syncingHosts}>
+            {syncingHosts ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Server className="mr-2 h-4 w-4" />}
+            Sync /etc/hosts
           </Button>
           <Button
             disabled={clusterStatus !== "ACTIVE"}
@@ -685,17 +764,33 @@ export default function NodesPage() {
                             {activatingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
                           </Button>
                         )}
-                        {(node.state.toLowerCase().includes("drain") || node.state.toLowerCase().includes("invalid") || node.state.toLowerCase().includes("down")) && (
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            title="Fix node state"
-                            onClick={() => handleFixNode(node.name)}
-                            disabled={fixingNode === node.name}
-                          >
-                            {fixingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}
-                          </Button>
-                        )}
+                        {(() => {
+                          const s = node.state.toLowerCase();
+                          // Show Fix for anything that isn't a clean idle/alloc/future state —
+                          // covers drain, down, invalid, completing (CG), mixed stuck, etc.
+                          const canFix = !s.includes("future") && !(s === "idle" || s === "allocated" || s === "alloc");
+                          if (!canFix) return null;
+                          return (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              title="Fix node state (restarts slurmd, DOWN → RESUME)"
+                              onClick={() => handleFixNode(node.name)}
+                              disabled={fixingNode === node.name}
+                            >
+                              {fixingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wrench className="h-4 w-4" />}
+                            </Button>
+                          );
+                        })()}
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          title="Diagnose (ping, slurmd status, chrony, recent logs — read-only)"
+                          onClick={() => handleDiagnoseNode(node.name)}
+                          disabled={diagnosingNode === node.name}
+                        >
+                          {diagnosingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Stethoscope className="h-4 w-4" />}
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon-sm"
@@ -752,7 +847,7 @@ export default function NodesPage() {
       />
 
       {/* SSH mode log dialog */}
-      <Dialog open={sseLogOpen} onOpenChange={sseLogStatus !== "streaming" ? setSseLogOpen : undefined}>
+      <Dialog open={sseLogOpen} onOpenChange={setSseLogOpen}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
@@ -776,9 +871,16 @@ export default function NodesPage() {
               <div className="mt-1 text-muted-foreground animate-pulse">Running...</div>
             )}
           </div>
-          {sseLogStatus !== "streaming" && (
-            <Button variant="outline" onClick={() => setSseLogOpen(false)}>Close</Button>
-          )}
+          <div className="flex justify-end">
+            {sseLogStatus === "streaming" && sseTaskId ? (
+              <Button variant="destructive" onClick={handleCancelAddNode} disabled={sseCancelling}>
+                {sseCancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {sseCancelling ? "Cancelling..." : "Cancel"}
+              </Button>
+            ) : sseLogStatus !== "streaming" ? (
+              <Button variant="outline" onClick={() => setSseLogOpen(false)}>Close</Button>
+            ) : null}
+          </div>
         </DialogContent>
       </Dialog>
 

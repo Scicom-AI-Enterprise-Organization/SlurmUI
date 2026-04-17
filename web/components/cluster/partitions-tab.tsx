@@ -70,6 +70,8 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
   const [form, setForm] = useState<Partition>({ name: "", nodes: "", max_time: "INFINITE", state: "UP", default: false });
 
   const [applying, setApplying] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [logDialog, setLogDialog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
@@ -81,8 +83,51 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
       const d = await r.json();
       setPartitions(d.partitions ?? []);
       setAllNodes(d.nodes ?? []);
+      if (d.latestTask && d.latestTask.status === "running") {
+        attachToTask(d.latestTask.id);
+      }
     }
     setLoaded(true);
+  };
+
+  const attachToTask = (taskId: string) => {
+    setApplying(true);
+    setCurrentTaskId(taskId);
+    setLogLines([]);
+    setLogStatus("running");
+    setLogDialog(true);
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tasks/${taskId}`);
+        if (!r.ok) return;
+        const t = await r.json();
+        setLogLines(t.logs ? t.logs.split("\n") : []);
+        if (t.status === "success") {
+          setLogStatus("success");
+          clearInterval(poll);
+          setApplying(false);
+          setCurrentTaskId(null);
+          setCancelling(false);
+          fetchData();
+        } else if (t.status === "failed") {
+          setLogStatus("failed");
+          clearInterval(poll);
+          setApplying(false);
+          setCurrentTaskId(null);
+          setCancelling(false);
+        }
+      } catch {}
+    }, 2000);
+  };
+
+  const handleCancel = async () => {
+    if (!currentTaskId) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: "POST" });
+    } catch {
+      setCancelling(false);
+    }
   };
 
   useEffect(() => {
@@ -175,38 +220,20 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
   };
 
   const applyPartitions = async () => {
-    setApplying(true);
-    setLogLines([]);
-    setLogStatus("running");
-    setLogDialog(true);
-
+    if (applying && currentTaskId) {
+      setLogDialog(true);
+      return;
+    }
     const res = await fetch(`/api/clusters/${clusterId}/partitions/apply`, { method: "POST" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Failed" }));
       setLogLines([`[error] ${err.error ?? "Failed to start"}`]);
       setLogStatus("failed");
-      setApplying(false);
+      setLogDialog(true);
       return;
     }
     const { taskId } = await res.json();
-    const poll = setInterval(async () => {
-      try {
-        const r = await fetch(`/api/tasks/${taskId}`);
-        if (!r.ok) return;
-        const t = await r.json();
-        setLogLines(t.logs ? t.logs.split("\n") : []);
-        if (t.status === "success") {
-          setLogStatus("success");
-          clearInterval(poll);
-          setApplying(false);
-          fetchData();
-        } else if (t.status === "failed") {
-          setLogStatus("failed");
-          clearInterval(poll);
-          setApplying(false);
-        }
-      } catch {}
-    }, 2000);
+    attachToTask(taskId);
   };
 
   const selectedNodes = expandNodes(form.nodes);
@@ -218,11 +245,11 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
         <Button
           variant="outline"
           onClick={applyPartitions}
-          disabled={partitions.length === 0 || applying}
+          disabled={!applying && partitions.length === 0}
           title="Rewrite PartitionName lines in slurm.conf and restart slurmctld"
         >
           {applying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-          Apply to Cluster
+          {applying ? "Show Progress" : "Apply to Cluster"}
         </Button>
         <Button onClick={openAdd}>
           <Plus className="mr-2 h-4 w-4" />
@@ -410,7 +437,7 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
       </Dialog>
 
       {/* Apply Log Dialog */}
-      <Dialog open={logDialog} onOpenChange={logStatus !== "running" ? setLogDialog : undefined}>
+      <Dialog open={logDialog} onOpenChange={setLogDialog}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
@@ -447,9 +474,16 @@ export function PartitionsTab({ clusterId }: PartitionsTabProps) {
               </div>
             )}
           </div>
-          {logStatus !== "running" && (
-            <Button variant="outline" onClick={() => setLogDialog(false)}>Close</Button>
-          )}
+          <DialogFooter>
+            {logStatus === "running" ? (
+              <Button variant="destructive" onClick={handleCancel} disabled={cancelling || !currentTaskId}>
+                {cancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {cancelling ? "Cancelling..." : "Cancel Apply"}
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => setLogDialog(false)}>Close</Button>
+            )}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

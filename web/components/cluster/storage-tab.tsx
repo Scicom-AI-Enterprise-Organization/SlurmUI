@@ -59,6 +59,8 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
   const [mounts, setMounts] = useState<StorageMount[]>(initialMounts);
   const [addOpen, setAddOpen] = useState(false);
   const [deploying, setDeploying] = useState<string | null>(null);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [mountStatuses, setMountStatuses] = useState<Record<string, Record<string, string>>>({});
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [targetHosts, setTargetHosts] = useState<string[]>([]);
@@ -158,145 +160,92 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
 
   const [confirmRemove, setConfirmRemove] = useState<StorageMount | null>(null);
 
+  const attachToTask = (taskId: string, mountId: string, action: "deploy" | "remove", removedMountId: string | null) => {
+    setDeploying(mountId);
+    setCurrentTaskId(taskId);
+    setCancelling(false);
+    setDeployLines([]);
+    setDeployStatus("running");
+    setDeployLogOpen(true);
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/tasks/${taskId}`);
+        if (!r.ok) return;
+        const t = await r.json();
+        setDeployLines(t.logs ? t.logs.split("\n") : []);
+        if (t.status === "success") {
+          setDeployStatus("success");
+          clearInterval(poll);
+          setDeploying(null);
+          setCurrentTaskId(null);
+          setCancelling(false);
+          if (action === "remove" && removedMountId) {
+            const updated = mounts.filter((m) => m.id !== removedMountId);
+            setMounts(updated);
+            await saveConfig(updated);
+          }
+          setTimeout(fetchStatuses, 1000);
+        } else if (t.status === "failed") {
+          setDeployStatus("failed");
+          clearInterval(poll);
+          setDeploying(null);
+          setCurrentTaskId(null);
+          setCancelling(false);
+        }
+      } catch {}
+    }, 2000);
+  };
+
+  const handleCancelDeploy = async () => {
+    if (!currentTaskId) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/tasks/${currentTaskId}/cancel`, { method: "POST" });
+    } catch {
+      setCancelling(false);
+    }
+  };
+
   const doRemove = async () => {
     const mount = confirmRemove;
     if (!mount) return;
     setConfirmRemove(null);
 
-    setDeploying(mount.id);
-    setDeployLines([]);
-    setDeployStatus("running");
-    setDeployLogOpen(true);
-
-    try {
-      const res = await fetch(`/api/clusters/${clusterId}/storage/deploy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mount, action: "remove" }),
-      });
-
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({ error: "Failed" }));
-        setDeployStatus("failed");
-        setDeployLines([`[error] ${err.error ?? "Failed to remove"}`]);
-        setDeploying(null);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.type === "stream") {
-              setDeployLines((prev) => [...prev, event.line]);
-            } else if (event.type === "complete") {
-              if (event.success) {
-                setDeployStatus("success");
-                const updated = mounts.filter((m) => m.id !== mount.id);
-                setMounts(updated);
-                await saveConfig(updated);
-              } else {
-                setDeployStatus("failed");
-                setDeployLines((prev) => [...prev, `[error] ${event.message ?? "Failed"}`]);
-              }
-              return;
-            }
-          } catch {}
-        }
-      }
-    } catch {
+    const res = await fetch(`/api/clusters/${clusterId}/storage/deploy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mount, action: "remove" }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
       setDeployStatus("failed");
-      setDeployLines((prev) => [...prev, "[error] Request failed"]);
-    } finally {
-      setDeploying(null);
+      setDeployLines([`[error] ${err.error ?? "Failed to remove"}`]);
+      setDeployLogOpen(true);
+      return;
     }
+    const { taskId } = await res.json();
+    attachToTask(taskId, mount.id, "remove", mount.id);
   };
 
   const handleDeploy = async (mount: StorageMount) => {
-    setDeploying(mount.id);
-    setDeployLines([]);
-    setDeployStatus("running");
-    setDeployLogOpen(true);
-
-    try {
-      const res = await fetch(`/api/clusters/${clusterId}/storage/deploy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mount }),
-      });
-
-      if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({ error: "Failed" }));
-        setDeployStatus("failed");
-        setDeployLines((prev) => [...prev, `[error] ${err.error ?? "Failed to start"}`]);
-        setDeploying(null);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.type === "stream") {
-              setDeployLines((prev) => [...prev, event.line]);
-            } else if (event.type === "complete") {
-              if (event.success) {
-                setDeployStatus("success");
-                // Refresh status after deploy completes
-                setTimeout(fetchStatuses, 1000);
-              } else {
-                setDeployStatus("failed");
-                setDeployLines((prev) => [...prev, `[error] ${event.message ?? "Failed"}`]);
-              }
-              return;
-            }
-          } catch {}
-        }
-      }
-
-      // Flush remaining
-      if (buffer.trim()) {
-        buffer += "\n\n";
-        const parts = buffer.split("\n\n");
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.type === "complete") {
-              setDeployStatus(event.success ? "success" : "failed");
-            }
-          } catch {}
-        }
-      }
-    } catch {
-      setDeployStatus("failed");
-      setDeployLines((prev) => [...prev, "[error] Request failed"]);
-    } finally {
-      setDeploying(null);
+    if (deploying === mount.id && currentTaskId) {
+      setDeployLogOpen(true);
+      return;
     }
+    const res = await fetch(`/api/clusters/${clusterId}/storage/deploy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mount }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      setDeployStatus("failed");
+      setDeployLines((prev) => [...prev, `[error] ${err.error ?? "Failed to start"}`]);
+      setDeployLogOpen(true);
+      return;
+    }
+    const { taskId } = await res.json();
+    attachToTask(taskId, mount.id, "deploy", null);
   };
 
   const canTest = (
@@ -671,7 +620,7 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
       </Dialog>
 
       {/* Deploy Log Dialog */}
-      <Dialog open={deployLogOpen} onOpenChange={deployStatus !== "running" ? setDeployLogOpen : undefined}>
+      <Dialog open={deployLogOpen} onOpenChange={setDeployLogOpen}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
@@ -704,9 +653,16 @@ rmdir /tmp/.aura-s3-mount-test 2>/dev/null || true`;
               </div>
             )}
           </div>
-          {deployStatus !== "running" && (
-            <Button variant="outline" onClick={() => setDeployLogOpen(false)}>Close</Button>
-          )}
+          <div className="flex justify-end">
+            {deployStatus === "running" && currentTaskId ? (
+              <Button variant="destructive" onClick={handleCancelDeploy} disabled={cancelling}>
+                {cancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                {cancelling ? "Cancelling..." : "Cancel"}
+              </Button>
+            ) : deployStatus !== "running" ? (
+              <Button variant="outline" onClick={() => setDeployLogOpen(false)}>Close</Button>
+            ) : null}
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { registerRunningTask } from "@/lib/running-tasks";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -113,7 +114,7 @@ echo "[aura] Partitions applied successfully"
 
   (async () => {
     await appendLog(task.id, `[aura] Applying ${partitions.length} partition(s)`);
-    sshExecScript(target, script, {
+    const handle = sshExecScript(target, script, {
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
@@ -125,11 +126,12 @@ echo "[aura] Partitions applied successfully"
           await appendLog(task.id, "\n[aura] Partitions applied successfully.");
           await logAudit({ action: "partitions.apply", entity: "Cluster", entityId: id, metadata: { count: partitions.length } });
         } else {
-          await appendLog(task.id, "\n[aura] Failed to apply partitions.");
+          await appendLog(task.id, "\n[aura] Failed to apply partitions or cancelled.");
         }
         await finishTask(task.id, success);
       },
     });
+    registerRunningTask(task.id, handle);
   })();
 
   return NextResponse.json({ taskId: task.id });

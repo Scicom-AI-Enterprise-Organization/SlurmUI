@@ -95,17 +95,22 @@ echo "[aura] Installing ${g.names.length} package(s)${desc}..."
 
   // uv binary location depends on mode:
   //   - shared:   <venvLocation>/uv-bin/ on shared storage, reused across nodes
-  //   - per-node: <localVenvPath>/uv-bin/ on each node's local disk
+  //   - per-node: sibling of the venv (NOT inside), so rm -rf'ing the venv
+  //               during version changes doesn't also nuke uv.
   const uvBinDir = isShared
     ? `${venvLocation.replace(/\/+$/, "")}/uv-bin`
-    : `${venvPath}/uv-bin`;
+    : `${venvPath}-uv-bin`;
 
   // Inner "install into this venv" snippet, reusable for both modes.
   const installBlock = `
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
+ME=$(id -un)
+MYGID=$(id -gn)
 
-mkdir -p "$(dirname "${venvPath}")" 2>/dev/null || $S mkdir -p "$(dirname "${venvPath}")"
-mkdir -p "${uvBinDir}" 2>/dev/null || $S mkdir -p "${uvBinDir}"
+# Create parent + uv-bin dirs (with sudo if needed). Do NOT pre-create venvPath
+# itself — uv venv refuses to populate an existing directory without --clear.
+$S mkdir -p "$(dirname "${venvPath}")" "${uvBinDir}"
+$S chown -R "$ME:$MYGID" "$(dirname "${venvPath}")" 2>/dev/null || true
 
 UV="${uvBinDir}/uv"
 
@@ -125,6 +130,9 @@ fi
 echo "[aura] uv version: $("$UV" --version 2>&1)"
 
 if [ ! -f "${venvPath}/bin/python" ]; then
+  # If the directory exists (leftover from a failed run) but has no python,
+  # clear it so uv venv can populate it.
+  [ -d "${venvPath}" ] && rm -rf "${venvPath}"
   echo "[aura] Creating venv at ${venvPath} (Python ${pythonVersion})..."
   "$UV" venv "${venvPath}" --python "${pythonVersion}" 2>&1 | tail -20
 else

@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { registerRunningTask } from "@/lib/running-tasks";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -245,45 +246,45 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       ? buildNfsScript(mount, targets)
       : buildS3fsScript(mount, targets);
 
-  const enc = new TextEncoder();
-  let seq = 0;
-
-  const stream = new ReadableStream({
-    start(controller) {
-      const send = (data: object) => {
-        try {
-          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
-        } catch {}
-      };
-
-      sshExecScript(target, script, {
-        onStream: (line, s) => {
-          send({ type: "stream", line, seq: seq++ });
-        },
-        onComplete: (success, payload) => {
-          if (success) {
-            send({ type: "complete", success: true });
-            logAudit({
-              action: "storage.deploy",
-              entity: "Cluster",
-              entityId: id,
-              metadata: { type: mount.type, mountPath: mount.mountPath, targets: targets.length },
-            });
-          } else {
-            send({ type: "complete", success: false, message: `Exit code ${payload?.exitCode}` });
-          }
-          controller.close();
-        },
-      });
-    },
+  const task = await prisma.backgroundTask.create({
+    data: { clusterId: id, type: action === "remove" ? "storage_remove" : "storage_deploy" },
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-      Connection: "keep-alive",
-    },
-  });
+  const appendLog = async (line: string) => {
+    try {
+      await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${task.id}`;
+    } catch {}
+  };
+
+  (async () => {
+    await appendLog(`[aura] ${action === "remove" ? "Removing" : "Deploying"} ${mount.type} mount ${mount.mountPath}`);
+    const handle = sshExecScript(target, script, {
+      onStream: (line) => {
+        const trimmed = line.replace(/\r/g, "").trim();
+        if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
+          appendLog(trimmed);
+        }
+      },
+      onComplete: async (success) => {
+        if (success) {
+          await appendLog(`\n[aura] ${action === "remove" ? "Mount removed" : "Mount deployed"} successfully.`);
+          logAudit({
+            action: action === "remove" ? "storage.remove" : "storage.deploy",
+            entity: "Cluster",
+            entityId: id,
+            metadata: { type: mount.type, mountPath: mount.mountPath, targets: targets.length },
+          });
+        } else {
+          await appendLog(`\n[aura] ${action === "remove" ? "Remove" : "Deploy"} failed or was cancelled.`);
+        }
+        await prisma.backgroundTask.update({
+          where: { id: task.id },
+          data: { status: success ? "success" : "failed", completedAt: new Date() },
+        }).catch(() => {});
+      },
+    });
+    registerRunningTask(task.id, handle);
+  })();
+
+  return NextResponse.json({ taskId: task.id });
 }

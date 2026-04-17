@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { registerRunningTask } from "@/lib/running-tasks";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -225,7 +226,7 @@ echo "============================================"
 `;
 
     // Run in background — don't await
-    sshExecScript(target, script, {
+    const handle = sshExecScript(target, script, {
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
@@ -237,11 +238,12 @@ echo "============================================"
           await appendLog(task.id, "\n[aura] Node added successfully.");
           logAudit({ action: "node.add", entity: "Cluster", entityId: id, metadata: { nodeName, ip, mode: "ssh" } });
         } else {
-          await appendLog(task.id, "\n[aura] Add node failed.");
+          await appendLog(task.id, "\n[aura] Add node failed or was cancelled.");
         }
         await finishTask(task.id, success);
       },
     });
+    registerRunningTask(task.id, handle);
 
     return NextResponse.json({ taskId: task.id });
   }

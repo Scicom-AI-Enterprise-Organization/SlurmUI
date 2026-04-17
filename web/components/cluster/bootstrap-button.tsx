@@ -28,6 +28,7 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
   const [phase, setPhase] = useState<Phase>("idle");
   const [logs, setLogs] = useState("");
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -47,10 +48,12 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
 
       if (task.status === "success") {
         setPhase("success");
+        setCancelling(false);
         if (pollRef.current) clearInterval(pollRef.current);
         router.refresh();
       } else if (task.status === "failed") {
         setPhase("failed");
+        setCancelling(false);
         if (pollRef.current) clearInterval(pollRef.current);
       }
     } catch {}
@@ -94,6 +97,16 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
     }
     setOpen(false);
     setPhase("idle");
+  };
+
+  const handleCancel = async () => {
+    if (!taskId) return;
+    setCancelling(true);
+    try {
+      await fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+    } catch {
+      setCancelling(false);
+    }
   };
 
   const runBootstrap = async () => {
@@ -213,6 +226,12 @@ export function BootstrapButton({ clusterId, clusterName }: BootstrapButtonProps
                   <p className="text-xs text-muted-foreground mr-auto">
                     You can close this dialog — the process continues in the background.
                   </p>
+                )}
+                {phase === "running" && (
+                  <Button variant="destructive" onClick={handleCancel} disabled={cancelling || !taskId}>
+                    {cancelling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    {cancelling ? "Cancelling..." : "Cancel Bootstrap"}
+                  </Button>
                 )}
                 {phase === "failed" && (
                   <Button variant="outline" onClick={runBootstrap}>Retry</Button>
