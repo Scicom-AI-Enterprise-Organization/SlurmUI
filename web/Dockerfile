@@ -14,6 +14,15 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npx prisma generate
 RUN npm run build
+# Compile the custom server to plain JS so production runs with `node` (not tsx).
+# Running tsx in prod registers a require-hook that breaks Next's export-condition
+# resolution for async-local-storage.
+RUN npm install --no-save esbuild && \
+    npx esbuild server.ts \
+      --bundle --platform=node --target=node20 --format=cjs \
+      --outfile=server.js \
+      --external:next --external:next-auth --external:next-auth/* \
+      --external:@auth/prisma-adapter --external:@prisma/client
 
 # ---- Production ----
 FROM base AS runner
@@ -30,15 +39,11 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 
-# Copy custom server
-COPY --from=builder /app/server.ts ./server.ts
-COPY --from=builder /app/lib ./lib
-
-# Install tsx for running TypeScript server in production
-RUN npm install tsx
+# Copy the pre-compiled custom server
+COPY --from=builder /app/server.js ./server.js
 
 USER nextjs
 EXPOSE 3000
 
 # Run with custom server for WebSocket support
-CMD ["npx", "tsx", "server.ts"]
+CMD ["node", "server.js"]
