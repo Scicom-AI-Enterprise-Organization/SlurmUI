@@ -43,7 +43,7 @@ interface Pagination {
 interface AuditLogTableProps {
   logs: AuditLogEntry[];
   pagination: Pagination;
-  filters: { action: string; entity: string; search: string };
+  filters: { action: string; entity: string; search: string; from: string; to: string };
   availableActions: string[];
   availableEntities: string[];
 }
@@ -112,7 +112,7 @@ export function AuditLogTable({
     router.push("/admin/audit-log");
   };
 
-  const hasFilters = filters.action || filters.entity || filters.search;
+  const hasFilters = filters.action || filters.entity || filters.search || filters.from || filters.to;
 
   return (
     <div className="space-y-4">
@@ -158,6 +158,21 @@ export function AuditLogTable({
             ))}
           </SelectContent>
         </Select>
+        <Input
+          type="date"
+          value={filters.from}
+          onChange={(e) => updateFilters({ from: e.target.value })}
+          className="h-9 w-40"
+          aria-label="From date"
+        />
+        <span className="text-sm text-muted-foreground">→</span>
+        <Input
+          type="date"
+          value={filters.to}
+          onChange={(e) => updateFilters({ to: e.target.value })}
+          className="h-9 w-40"
+          aria-label="To date"
+        />
         {hasFilters && (
           <Button variant="ghost" size="sm" onClick={clearFilters}>
             <X className="mr-1 h-4 w-4" />

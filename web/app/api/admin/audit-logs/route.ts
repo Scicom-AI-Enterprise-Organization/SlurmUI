@@ -15,6 +15,8 @@ export async function GET(req: NextRequest) {
   const action = searchParams.get("action") || undefined;
   const entity = searchParams.get("entity") || undefined;
   const search = searchParams.get("search") || undefined;
+  const from = (searchParams.get("from") || "").trim();
+  const to = (searchParams.get("to") || "").trim();
 
   const where: any = {};
   if (action) where.action = action;
@@ -26,6 +28,22 @@ export async function GET(req: NextRequest) {
       { userEmail: { contains: search, mode: "insensitive" } },
       { entityId: { contains: search, mode: "insensitive" } },
     ];
+  }
+  if (from || to) {
+    const range: Record<string, Date> = {};
+    if (from) {
+      const d = new Date(from);
+      if (!isNaN(d.getTime())) range.gte = d;
+    }
+    if (to) {
+      const d = new Date(to);
+      if (!isNaN(d.getTime())) {
+        // "to" is inclusive through end of the chosen day.
+        d.setHours(23, 59, 59, 999);
+        range.lte = d;
+      }
+    }
+    if (Object.keys(range).length > 0) where.createdAt = range;
   }
 
   const [logs, total] = await Promise.all([

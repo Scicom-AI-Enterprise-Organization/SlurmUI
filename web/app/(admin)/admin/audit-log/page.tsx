@@ -2,7 +2,14 @@ import { prisma } from "@/lib/prisma";
 import { AuditLogTable } from "@/components/admin/audit-log-table";
 
 interface PageProps {
-  searchParams: Promise<{ page?: string; action?: string; entity?: string; search?: string }>;
+  searchParams: Promise<{
+    page?: string;
+    action?: string;
+    entity?: string;
+    search?: string;
+    from?: string;
+    to?: string;
+  }>;
 }
 
 export default async function AuditLogPage({ searchParams }: PageProps) {
@@ -12,6 +19,8 @@ export default async function AuditLogPage({ searchParams }: PageProps) {
   const action = params.action || undefined;
   const entity = params.entity || undefined;
   const search = params.search || undefined;
+  const from = params.from || "";
+  const to = params.to || "";
 
   const where: any = {};
   if (action) where.action = action;
@@ -23,6 +32,21 @@ export default async function AuditLogPage({ searchParams }: PageProps) {
       { userEmail: { contains: search, mode: "insensitive" } },
       { entityId: { contains: search, mode: "insensitive" } },
     ];
+  }
+  if (from || to) {
+    const range: Record<string, Date> = {};
+    if (from) {
+      const d = new Date(from);
+      if (!isNaN(d.getTime())) range.gte = d;
+    }
+    if (to) {
+      const d = new Date(to);
+      if (!isNaN(d.getTime())) {
+        d.setHours(23, 59, 59, 999);
+        range.lte = d;
+      }
+    }
+    if (Object.keys(range).length > 0) where.createdAt = range;
   }
 
   const [logs, total, actions, entities] = await Promise.all([
@@ -58,6 +82,8 @@ export default async function AuditLogPage({ searchParams }: PageProps) {
           action: action ?? "",
           entity: entity ?? "",
           search: search ?? "",
+          from,
+          to,
         }}
         availableActions={actions.map((a) => a.action)}
         availableEntities={entities.map((e) => e.entity)}
