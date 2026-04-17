@@ -89,7 +89,7 @@ export function Sidebar({ role }: SidebarProps) {
             className="flex items-center gap-2 font-semibold text-sidebar-foreground"
           >
             <Briefcase className="h-5 w-5 text-sidebar-primary" />
-            <span>Aura</span>
+            <span>SlurmUI</span>
           </Link>
         )}
         <button

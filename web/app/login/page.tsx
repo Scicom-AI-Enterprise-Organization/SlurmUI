@@ -34,7 +34,7 @@ export default function LoginPage() {
           <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-white/20 backdrop-blur">
             <KeyRound className="h-8 w-8 text-primary-foreground" />
           </div>
-          <h1 className="text-3xl font-bold text-primary-foreground">AIES Aura</h1>
+          <h1 className="text-3xl font-bold text-primary-foreground">SlurmUI</h1>
           <p className="mt-2 text-sm text-primary-foreground/70">
             HPC cluster management for researchers
           </p>
@@ -59,12 +59,12 @@ export default function LoginPage() {
           {/* Mobile logo */}
           <div className="mb-8 flex items-center gap-2 lg:hidden">
             <KeyRound className="h-5 w-5 text-primary" />
-            <span className="text-lg font-bold">AIES Aura</span>
+            <span className="text-lg font-bold">SlurmUI</span>
           </div>
 
           <h2 className="text-xl font-semibold text-foreground">Single Sign-On</h2>
           <p className="mt-1 mb-8 text-sm text-muted-foreground">
-            Sign in with your AIES corporate account
+            Sign in with your corporate account
           </p>
 
           <motion.div whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }}>
@@ -78,15 +78,6 @@ export default function LoginPage() {
             </Button>
           </motion.div>
 
-          <p className="mt-8 text-center text-xs text-muted-foreground">
-            Need access?{" "}
-            <a
-              href="mailto:admin@aies.scicom.dev"
-              className="font-medium text-primary hover:underline"
-            >
-              Contact IT support
-            </a>
-          </p>
         </motion.div>
       </div>
     </div>

@@ -23,7 +23,7 @@ const sections: Section[] = [
   { id: "gres", title: "GRES & GPUs" },
   { id: "accounting", title: "Accounting (slurmdbd)" },
   { id: "munge", title: "munge (auth)" },
-  { id: "aura-map", title: "Aura ↔ Slurm mapping" },
+  { id: "aura-map", title: "SlurmUI ↔ Slurm mapping" },
 ];
 
 export default function ExplainPage() {
@@ -59,7 +59,7 @@ export default function ExplainPage() {
       <div className="mb-6">
         <h1 className="text-3xl font-bold">Learn Slurm</h1>
         <p className="text-muted-foreground">
-          A practical tour of the concepts and commands you&apos;ll see in Aura.
+          A practical tour of the concepts and commands you&apos;ll see in SlurmUI.
         </p>
       </div>
 
@@ -128,7 +128,7 @@ export default function ExplainPage() {
               back its real state; if the self-report disagrees with the config,
               Slurm may drain it.
             </p>
-            <p>Node states you&apos;ll see in Aura:</p>
+            <p>Node states you&apos;ll see in SlurmUI:</p>
             <table className="w-full text-sm border-collapse">
               <tbody>
                 <Row k="idle" v="Healthy, no jobs running — ready." />
@@ -339,7 +339,7 @@ sacctmgr -s list user             # show associations
 sacctmgr show runaway             # job records that lost sync`}</Pre>
             <p>
               Without this, <Code>--account=</Code> is ignored and you get
-              no history/quotas. Aura starts clusters with accounting{" "}
+              no history/quotas. SlurmUI starts clusters with accounting{" "}
               <i>off</i> by default; turn it on from the cluster&apos;s
               Configuration tab.
             </p>
@@ -350,14 +350,14 @@ sacctmgr show runaway             # job records that lost sync`}</Pre>
               Slurm daemons authenticate to each other using{" "}
               <Code>munge</Code>. Every node in the cluster must have an
               identical <Code>/etc/munge/munge.key</Code> owned by the{" "}
-              <Code>munge</Code> user (mode <Code>0400</Code>). Aura copies the
+              <Code>munge</Code> user (mode <Code>0400</Code>). SlurmUI copies the
               key from the controller to new nodes automatically during Add
               Node; if you see <i>&ldquo;auth_g_verify&rdquo;</i> errors, the
               key got out of sync.
             </p>
           </Section>
 
-          <Section id="aura-map" title="Aura ↔ Slurm mapping">
+          <Section id="aura-map" title="SlurmUI ↔ Slurm mapping">
             <table className="w-full text-sm border-collapse">
               <tbody>
                 <Row k="Settings → Nodes" v="Edits NodeName lines in slurm.conf, installs slurmd on workers, copies munge key." />
