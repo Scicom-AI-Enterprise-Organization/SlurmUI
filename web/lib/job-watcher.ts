@@ -11,6 +11,7 @@
 
 import { prisma } from "./prisma";
 import { sshExecScript } from "./ssh-exec";
+import { dispatch as dispatchAlert } from "./alerts";
 
 interface Cluster {
   id: string;
@@ -193,6 +194,20 @@ echo "__AURA_JOB_FINAL__=$FINAL"
       if (captured.length > 0) data.output = captured.join("\n");
       if (Object.keys(data).length > 0) {
         await prisma.job.update({ where: { id: job.id }, data }).catch(() => {});
+      }
+
+      // Fire an alert channel message on terminal states so operators can be
+      // paged in Slack/Teams. Action names match the audit-log convention.
+      if (status) {
+        const action =
+          status === "COMPLETED" ? "job.completed" :
+          status === "CANCELLED" ? "job.cancelled" : "job.failed";
+        dispatchAlert(action, {
+          jobId: job.id,
+          slurmJobId: job.slurmJobId,
+          exitCode,
+          state: state || status,
+        }).catch(() => {});
       }
     },
   });

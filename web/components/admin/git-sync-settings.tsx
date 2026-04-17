@@ -199,6 +199,62 @@ export function GitSyncSettings() {
           </div>
         </div>
 
+        {/* How-to for private repos */}
+        <details className="rounded-md border bg-muted/30 p-3 text-xs">
+          <summary className="cursor-pointer font-medium text-foreground">
+            How do I push to a private repo?
+          </summary>
+          <div className="mt-3 space-y-3 text-muted-foreground">
+            <p>Pick any one of the three methods below — each just needs write access to the repo.</p>
+
+            <div>
+              <div className="font-medium text-foreground">Option 1 — HTTPS + Personal Access Token (easiest)</div>
+              <p className="mt-1">
+                Paste the plain HTTPS URL in the <b>Repository URL</b> field and put your PAT in
+                the <b>HTTPS Personal Access Token</b> field below. The PAT is masked after save.
+              </p>
+              <pre className="mt-1 overflow-x-auto rounded bg-background/60 p-2 font-mono">{`URL:   https://github.com/your-org/slurmui-state.git
+Token: ghp_abcdef1234567890    (GitHub classic PAT with 'repo' scope
+                                — or fine-grained PAT with Contents: Read & Write)`}</pre>
+              <p className="mt-1">
+                GitLab: use <code>glpat-…</code>. Bitbucket: use an App Password.
+              </p>
+            </div>
+
+            <div>
+              <div className="font-medium text-foreground">Option 2 — Inline credentials in the URL</div>
+              <p className="mt-1">
+                Embed the username and PAT/password directly; leave the HTTPS token field empty.
+                URL-encode special chars (<code>@ → %40</code>, <code># → %23</code>, <code>/ → %2F</code>).
+              </p>
+              <pre className="mt-1 overflow-x-auto rounded bg-background/60 p-2 font-mono">{`https://<user>:<PAT>@github.com/your-org/slurmui-state.git
+https://oauth2:glpat-XXXX@gitlab.com/your-org/state.git
+https://x-token-auth:<app-password>@bitbucket.org/your-org/state.git`}</pre>
+              <p className="mt-1">
+                The password part must be a token since GitHub removed git
+                password auth in 2021. On save the URL is shown back credential-stripped so
+                the secret doesn&apos;t leak back to the browser.
+              </p>
+            </div>
+
+            <div>
+              <div className="font-medium text-foreground">Option 3 — SSH Deploy Key</div>
+              <p className="mt-1">
+                Paste the SSH URL in the <b>Repository URL</b> field. Generate a keypair (e.g.
+                <code className="ml-1">ssh-keygen -t ed25519 -N &apos;&apos; -f /tmp/key</code>),
+                add the public key to your repo as a <b>deploy key with write access</b>, and
+                paste the private key below. Great for org-wide policies that forbid user PATs.
+              </p>
+              <pre className="mt-1 overflow-x-auto rounded bg-background/60 p-2 font-mono">{`git@github.com:your-org/slurmui-state.git`}</pre>
+            </div>
+
+            <p>
+              First-time setup: create an empty repo on your git host, then hit <b>Sync now</b> —
+              SlurmUI will commit the initial YAML tree for you.
+            </p>
+          </div>
+        </details>
+
         {isSsh && (
           <div className="space-y-2">
             <Label htmlFor="git-deploy-key">SSH Deploy Key (private)</Label>

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getAllHealth } from "@/lib/health-monitor";
 
 /**
  * Prometheus metrics endpoint.
@@ -508,6 +509,94 @@ export async function GET(req: NextRequest) {
         }
       } catch {}
     }
+
+    // ──────────────── Health monitor ────────────────
+    const healthSnapshots = getAllHealth();
+    const BAD_NODE_STATES = ["down", "drain", "fail", "err", "boot_fail", "not_responding"];
+    const isBadNodeState = (s: string) => BAD_NODE_STATES.some((b) => s.includes(b));
+
+    const healthCtlUp: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthCheckedAt: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthCheckAge: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthJobsTracked: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthErrors: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthNodesTotal: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthNodesUnhealthy: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthNodesByState: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthNodeInfo: Array<{ labels: Record<string, string>; value: number }> = [];
+    const healthStorageMounted: Array<{ labels: Record<string, string>; value: number }> = [];
+
+    for (const h of healthSnapshots) {
+      const baseLabels = { cluster_id: h.clusterId, cluster: h.clusterName };
+      const checkedMs = new Date(h.checkedAt).getTime();
+
+      healthCtlUp.push({ labels: baseLabels, value: h.slurmctldUp ? 1 : 0 });
+      healthCheckedAt.push({ labels: baseLabels, value: Math.floor(checkedMs / 1000) });
+      healthCheckAge.push({ labels: baseLabels, value: Math.max(0, Math.floor((now - checkedMs) / 1000)) });
+      healthJobsTracked.push({ labels: baseLabels, value: h.jobsTracked });
+      healthErrors.push({ labels: baseLabels, value: h.errors.length });
+
+      healthNodesTotal.push({ labels: baseLabels, value: h.nodes.length });
+      healthNodesUnhealthy.push({
+        labels: baseLabels,
+        value: h.nodes.filter((n) => isBadNodeState(n.state)).length,
+      });
+
+      const byState = new Map<string, number>();
+      for (const n of h.nodes) {
+        byState.set(n.state, (byState.get(n.state) ?? 0) + 1);
+        healthNodeInfo.push({
+          labels: { ...baseLabels, node: n.name, state: n.state },
+          value: isBadNodeState(n.state) ? 0 : 1,
+        });
+      }
+      for (const [state, count] of byState) {
+        healthNodesByState.push({ labels: { ...baseLabels, state }, value: count });
+      }
+
+      for (const s of h.storage) {
+        healthStorageMounted.push({
+          labels: { ...baseLabels, host: s.hostname, mount_id: s.mountId, mount_path: s.mountPath },
+          value: s.mounted ? 1 : 0,
+        });
+      }
+    }
+
+    addMetric("slurmui_health_slurmctld_up", "gauge", "1 if slurmctld responded to scontrol ping at last health poll", healthCtlUp);
+    addMetric("slurmui_health_last_check_timestamp_seconds", "gauge", "Unix timestamp of the last health poll per cluster", healthCheckedAt);
+    addMetric("slurmui_health_last_check_age_seconds", "gauge", "Seconds since the last completed health poll per cluster", healthCheckAge);
+    addMetric("slurmui_health_jobs_tracked", "gauge", "Number of jobs squeue reported at last health poll", healthJobsTracked);
+    addMetric("slurmui_health_poll_errors", "gauge", "Number of errors in the last health poll per cluster", healthErrors);
+    addMetric("slurmui_health_nodes_total", "gauge", "Total nodes reported by sinfo at last health poll", healthNodesTotal);
+    addMetric("slurmui_health_nodes_unhealthy", "gauge", "Nodes in down/drain/fail/err/boot_fail/not_responding at last health poll", healthNodesUnhealthy);
+    addMetric("slurmui_health_nodes_by_state", "gauge", "Node count per sinfo state at last health poll", healthNodesByState);
+    addMetric("slurmui_health_node_up", "gauge", "1 if node is in a healthy state, 0 otherwise (one series per node)", healthNodeInfo);
+    addMetric("slurmui_health_storage_mounted", "gauge", "1 if storage mount is present on the worker, 0 otherwise", healthStorageMounted);
+
+    // ──────────────── Queue state (from health monitor) ────────────────
+    const queuePending: Array<{ labels: Record<string, string>; value: number }> = [];
+    const queueRunning: Array<{ labels: Record<string, string>; value: number }> = [];
+    const queueHeld: Array<{ labels: Record<string, string>; value: number }> = [];
+    const queueOldest: Array<{ labels: Record<string, string>; value: number }> = [];
+    const queueByReason: Array<{ labels: Record<string, string>; value: number }> = [];
+    const queueStuck: Array<{ labels: Record<string, string>; value: number }> = [];
+    for (const h of healthSnapshots) {
+      const base = { cluster_id: h.clusterId, cluster: h.clusterName };
+      queuePending.push({ labels: base, value: h.pendingCount });
+      queueRunning.push({ labels: base, value: h.runningCount });
+      queueHeld.push({ labels: base, value: h.heldCount });
+      queueOldest.push({ labels: base, value: h.oldestPendingSeconds });
+      queueStuck.push({ labels: base, value: h.stuckJobs.length });
+      for (const r of h.pendingByReason) {
+        queueByReason.push({ labels: { ...base, reason: r.reason }, value: r.count });
+      }
+    }
+    addMetric("slurmui_queue_pending_jobs", "gauge", "Pending jobs in squeue per cluster at last health poll", queuePending);
+    addMetric("slurmui_queue_running_jobs", "gauge", "Running jobs in squeue per cluster at last health poll", queueRunning);
+    addMetric("slurmui_queue_held_jobs", "gauge", "Held jobs (JobHeldUser/JobHeldAdmin) per cluster at last health poll", queueHeld);
+    addMetric("slurmui_queue_oldest_pending_seconds", "gauge", "Age (submit to now) of the oldest pending job per cluster", queueOldest);
+    addMetric("slurmui_queue_pending_by_reason", "gauge", "Pending jobs per cluster bucketed by sinfo reason code", queueByReason);
+    addMetric("slurmui_queue_stuck_jobs", "gauge", "Jobs classified stuck by health-monitor (held, dependency-never-satisfied, or long-pending)", queueStuck);
 
     // ──────────────── Scrape info ────────────────
     addMetric("slurmui_scrape_timestamp_seconds", "gauge", "Unix timestamp of this scrape",

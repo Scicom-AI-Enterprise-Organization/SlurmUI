@@ -45,13 +45,16 @@ set +e
 echo "__AURA_INFO_START__"
 
 echo "__SECTION__=scontrol"
-scontrol show job ${job.slurmJobId} 2>&1
+scontrol show job -dd ${job.slurmJobId} 2>&1
 
 echo "__SECTION__=sacct"
-sacct -j ${job.slurmJobId} -o JobID%-15,JobName%-20,Partition%-10,State,ExitCode,Elapsed,Start,End 2>&1
+sacct -j ${job.slurmJobId} -P --format=JobID,JobName,State,ExitCode,DerivedExitCode,Reason,Submit,Start,End,Elapsed,Timelimit,AllocCPUS,AllocTRES,ReqMem,MaxRSS,MaxVMSize,AveCPU,NodeList,Partition,QOS,User 2>&1
+
+echo "__SECTION__=sprio"
+sprio -j ${job.slurmJobId} -l 2>&1
 
 echo "__SECTION__=squeue"
-squeue -j ${job.slurmJobId} -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R" 2>&1
+squeue -j ${job.slurmJobId} -o "%.18i %.9P %.8j %.8u %.2t %.10M %.6D %r %R" 2>&1
 
 echo "__SECTION__=sinfo"
 ${part ? `sinfo -N -p ${part} -o "%n %P %t %c %m %G %E"` : `sinfo -N -o "%n %P %t %c %m %G %E"`} 2>&1

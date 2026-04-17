@@ -3,6 +3,18 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -13,6 +25,7 @@ import {
 import { toast } from "sonner";
 import {
   Folder, File, Download, ArrowLeft, RefreshCw, ChevronRight, Home,
+  FilePlus, Upload, Loader2, Save, Pencil,
 } from "lucide-react";
 
 interface FileEntry {
@@ -40,6 +53,17 @@ export default function FilesPage() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState<string | null>(null);
+
+  // New-file / edit dialog
+  const [editOpen, setEditOpen] = useState(false);
+  const [editPath, setEditPath] = useState(""); // relative under root
+  const [editIsNew, setEditIsNew] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [editLoading, setEditLoading] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Upload
+  const [uploading, setUploading] = useState(false);
 
   const load = useCallback(async (p: string, r: string) => {
     setLoading(true);
@@ -102,6 +126,93 @@ export default function FilesPage() {
     }
   };
 
+  const openNewFile = () => {
+    const suggested = path ? `${path}/new-file.txt` : "new-file.txt";
+    setEditPath(suggested);
+    setEditIsNew(true);
+    setEditContent("");
+    setEditOpen(true);
+  };
+
+  const openEditFile = async (entry: FileEntry) => {
+    const filePath = path ? `${path}/${entry.name}` : entry.name;
+    setEditPath(filePath);
+    setEditIsNew(false);
+    setEditContent("");
+    setEditLoading(true);
+    setEditOpen(true);
+    try {
+      const qs = new URLSearchParams({ path: filePath, root: rootId }).toString();
+      const res = await fetch(`/api/clusters/${clusterId}/files/download?${qs}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Failed to open file");
+        setEditOpen(false);
+        return;
+      }
+      const blob = await res.blob();
+      const text = await blob.text();
+      setEditContent(text);
+    } catch {
+      toast.error("Failed to open file");
+      setEditOpen(false);
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const saveFile = async () => {
+    if (!editPath.trim()) {
+      toast.error("Path is required");
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/files/write`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: editPath, root: rootId, content: editContent }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Save failed");
+        return;
+      }
+      setEditOpen(false);
+      // Refresh the list so the new / updated file shows.
+      load(path, rootId);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const uploadFiles = async (files: FileList) => {
+    setUploading(true);
+    try {
+      for (const f of Array.from(files)) {
+        const buf = await f.arrayBuffer();
+        // Browser-safe base64 (Buffer isn't available in the client bundle).
+        let bin = "";
+        const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
+        const b64 = btoa(bin);
+        const relPath = path ? `${path}/${f.name}` : f.name;
+        const res = await fetch(`/api/clusters/${clusterId}/files/write`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: relPath, root: rootId, base64: b64 }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          toast.error(`Upload ${f.name} failed: ${err.error ?? ""}`);
+        }
+      }
+      load(path, rootId);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   // Breadcrumb parts
   const breadcrumbs = path ? path.split("/").filter(Boolean) : [];
 
@@ -116,7 +227,7 @@ export default function FilesPage() {
         <div>
           <h1 className="text-3xl font-bold">Files</h1>
           <p className="text-muted-foreground">
-            Browse {activeRoot ? activeRoot.label : "your storage"} (read-only)
+            Browse {activeRoot ? activeRoot.label : "your storage"}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -137,6 +248,24 @@ export default function FilesPage() {
               </SelectContent>
             </Select>
           )}
+          <Button variant="outline" size="sm" onClick={openNewFile}>
+            <FilePlus className="mr-2 h-4 w-4" /> New file
+          </Button>
+          <Button variant="outline" size="sm" asChild disabled={uploading}>
+            <label className="cursor-pointer">
+              {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+              {uploading ? "Uploading..." : "Upload"}
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) uploadFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          </Button>
           <Button variant="outline" size="sm" onClick={() => load(path, rootId)}>
             <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
@@ -216,14 +345,26 @@ export default function FilesPage() {
                     </td>
                     <td className="px-4 py-2 text-right">
                       {!entry.is_dir && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => download(entry)}
-                          disabled={downloading === filePath}
-                        >
-                          <Download className="h-4 w-4" />
-                        </Button>
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            title="Edit"
+                            onClick={() => openEditFile(entry)}
+                            disabled={entry.size > 5 * 1024 * 1024}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            title="Download"
+                            onClick={() => download(entry)}
+                            disabled={downloading === filePath}
+                          >
+                            <Download className="h-4 w-4" />
+                          </Button>
+                        </>
                       )}
                     </td>
                   </tr>
@@ -233,6 +374,56 @@ export default function FilesPage() {
           </table>
         </div>
       )}
+
+      {/* New / edit file dialog */}
+      <Dialog open={editOpen} onOpenChange={(o) => { if (!editSaving) setEditOpen(o); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{editIsNew ? "New file" : `Edit ${editPath.split("/").pop()}`}</DialogTitle>
+            <DialogDescription>
+              {editIsNew
+                ? "Path is relative to the selected root."
+                : `Saving to ${editPath}`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {editIsNew && (
+              <div className="space-y-1">
+                <Label htmlFor="file-path">Path</Label>
+                <Input
+                  id="file-path"
+                  value={editPath}
+                  onChange={(e) => setEditPath(e.target.value)}
+                  placeholder="scripts/train.sh"
+                  autoFocus
+                />
+              </div>
+            )}
+            {editLoading ? (
+              <div className="flex items-center justify-center py-12 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading file...
+              </div>
+            ) : (
+              <Textarea
+                rows={20}
+                className="font-mono text-xs"
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                placeholder={editIsNew ? "#!/bin/bash\n# your script" : ""}
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={editSaving}>Cancel</Button>
+            </DialogClose>
+            <Button onClick={saveFile} disabled={editSaving || editLoading}>
+              {editSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              {editSaving ? "Saving..." : (editIsNew ? "Create" : "Save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

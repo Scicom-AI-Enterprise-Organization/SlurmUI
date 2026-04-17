@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { XCircle, RefreshCw } from "lucide-react";
+import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 
 interface JobDetail {
   id: string;
@@ -51,6 +52,27 @@ export default function JobDetailPage() {
   const [infoSections, setInfoSections] = useState<Record<string, string> | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
+  const [stderrBody, setStderrBody] = useState<string | null>(null);
+  const [stderrMerged, setStderrMerged] = useState<string | null>(null);
+  const [stderrLoading, setStderrLoading] = useState(false);
+
+  const fetchStderr = async () => {
+    setStderrLoading(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/jobs/${jobId}/stderr`);
+      if (res.ok) {
+        const d = await res.json();
+        setStderrBody(d.stderr ?? "");
+        setStderrMerged(d.merged ?? "unknown");
+      } else {
+        setStderrBody("");
+      }
+    } catch {
+      setStderrBody("");
+    } finally {
+      setStderrLoading(false);
+    }
+  };
 
   const fetchInfo = async () => {
     setInfoLoading(true);
@@ -89,11 +111,12 @@ export default function JobDetailPage() {
     fetchJob();
   }, [clusterId, jobId]);
 
-  // Poll for status updates when job is running
+  // Auto-refresh while the job is in flight. 5s is tight enough that the UI
+  // updates "right after" termination without hammering the API.
   useEffect(() => {
     if (!job || (job.status !== "RUNNING" && job.status !== "PENDING")) return;
 
-    const interval = setInterval(fetchJob, 10000);
+    const interval = setInterval(fetchJob, 5000);
     return () => clearInterval(interval);
   }, [job?.status]);
 
@@ -210,9 +233,14 @@ export default function JobDetailPage() {
 
       <Separator />
 
-      <Tabs defaultValue="output" onValueChange={(v) => { if (v === "info" && !infoSections && !infoLoading) fetchInfo(); }}>
+      <Tabs defaultValue="output" onValueChange={(v) => {
+        if (v === "info" && !infoSections && !infoLoading) fetchInfo();
+        if (v === "stderr" && stderrBody === null && !stderrLoading) fetchStderr();
+      }}>
         <TabsList>
           <TabsTrigger value="output">Output</TabsTrigger>
+          <TabsTrigger value="stderr">Stderr</TabsTrigger>
+          {job.status === "RUNNING" && <TabsTrigger value="usage">Usage</TabsTrigger>}
           <TabsTrigger value="info">Slurm Info</TabsTrigger>
         </TabsList>
 
@@ -236,6 +264,39 @@ export default function JobDetailPage() {
             </div>
           )}
         </TabsContent>
+
+        <TabsContent value="stderr" className="mt-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              Contents of Slurm's <code>StdErr</code> file (last 2 MB).
+            </p>
+            <Button variant="outline" size="sm" onClick={fetchStderr} disabled={stderrLoading}>
+              <RefreshCw className={`mr-2 h-3 w-3 ${stderrLoading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
+          {stderrMerged === "yes" && (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
+              stderr is merged into stdout for this job (default Slurm behaviour).
+              Check the Output tab instead.
+            </p>
+          )}
+          <ScrollArea className="h-96 rounded-md border bg-black p-4">
+            {stderrLoading && stderrBody === null ? (
+              <p className="font-mono text-xs text-gray-500">Loading...</p>
+            ) : stderrBody ? (
+              <pre className="font-mono text-xs text-red-400 whitespace-pre-wrap">{stderrBody}</pre>
+            ) : (
+              <p className="font-mono text-xs text-gray-500">No stderr content.</p>
+            )}
+          </ScrollArea>
+        </TabsContent>
+
+        {job.status === "RUNNING" && (
+          <TabsContent value="usage" className="mt-4">
+            <JobUsagePanel clusterId={clusterId} jobId={jobId} />
+          </TabsContent>
+        )}
 
         <TabsContent value="info" className="mt-4 space-y-4">
           <div className="flex items-center justify-between">

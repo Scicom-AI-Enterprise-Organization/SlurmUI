@@ -29,8 +29,10 @@ wraps the day-to-day operations in a single web UI:
   output live, and read an in-app "Learn Slurm" guide.
 - **For on-call** — one-click node diagnostics (ping, port probes, chrony,
   slurmd status, recent logs), a **Fix** button that resumes stuck CG/DRAIN
-  nodes, a **Reset Queue** button that scancels zombie pending jobs, and a
-  Prometheus `/api/metrics` endpoint for alerts.
+  nodes, a **Reset Queue** button that scancels zombie pending jobs, a
+  periodic **health monitor** that tracks slurmctld, node state, storage
+  mounts, and stuck/held jobs (firing webhooks to Slack / Teams on every
+  transition), and a Prometheus `/api/metrics` endpoint for alerts.
 - **For disaster recovery & migration** — one-way **Git Sync** exports every
   cluster's config, SSH keys (optional), and job history as YAML into a git
   repo; a **Restore from git** button rebuilds a fresh SlurmUI from that repo.
@@ -110,6 +112,7 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
 | **Python** | Shared or per-node venv managed by [`uv`](https://docs.astral.sh/uv/). Pick Python version and storage location. Per-package `--index-url` / `--extra-index-url`, plus a "paste a `pip install` command" parser. Version shown per installed package. |
 | **Environment** | Cluster-wide env vars (optionally Secret) rendered into `/etc/profile.d/aura.sh` on every node. Status column confirms each key is present. |
 | **Users** | Provision / deprovision Linux accounts + NFS home + Slurm accounting per cluster. |
+| **Queue** | Sortable `squeue` with pending-reason grouping, `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
 
 ### User-facing pages
 
@@ -117,7 +120,7 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
 - **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs.
 - **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
 - **Templates** — save reusable scripts per cluster, re-run with one click.
-- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Slurm Info** tab runs `scontrol show job`, `sacct`, `squeue`, `sinfo`, and `scontrol show partition` on demand. Cancel with confirmation dialog.
+- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
@@ -128,6 +131,7 @@ Under **/admin/settings** (sub-sidebar):
 | Page | What it does |
 |---|---|
 | **SSH Keys** | Generate or import SSH key pairs, see which clusters use each, delete unused. |
+| **Alerts** | Webhook channels for Slack, Teams, or generic JSON. Per-channel event filter (glob like `cluster.*` or specific actions), optional cluster scoping, and a **pre-create test** that has to succeed before the channel can be saved. Fed by `logAudit` and by the health monitor for transitions (`cluster.unreachable/recovered`, `node.unhealthy/recovered`, `storage.disconnected/reconnected`, `job.stuck`, `job.held`). |
 | **Git Sync** | Configure a backing git repo; one-way export of state, and **Restore from git** for migrating to a new SlurmUI. |
 
 ### Git sync & migration
@@ -150,8 +154,16 @@ to push state back to nodes after restore.
 
 - Prometheus scrape endpoint at `GET /api/metrics` (optional `METRICS_TOKEN`
   gate). See [Metrics](#metrics).
+- **Periodic health monitor** (`SLURMUI_HEALTH_INTERVAL_SEC`, default 60 s)
+  SSHes to every ACTIVE / DEGRADED cluster, collects `scontrol ping`,
+  `sinfo -h -N`, `squeue` with reason & submit time, and per-worker `mountpoint`
+  checks. Transitions are written to the audit log and fan out to alert
+  webhooks. Stuck pending jobs (dependency never satisfied, held, or long-pending)
+  fire `job.stuck` / `job.held`. Auto-downgrades cluster status
+  ACTIVE ↔ DEGRADED based on controller reachability.
 - Audit log page shows cluster lifecycle events, job submissions, user
-  provisioning, config changes, and accounting mode switches.
+  provisioning, config changes, and accounting mode switches — with from/to
+  date filters.
 - Every long-running task is a row in the `BackgroundTask` table with
   timestamps and accumulated logs.
 
@@ -209,6 +221,8 @@ to push state back to nodes after restore.
 | `NATS_URL` | NATS server used for NATS-mode clusters | `nats://localhost:4222` |
 | `ANSIBLE_PLAYBOOKS_DIR` | Host path of `ansible/` inside the web container | `/opt/aura/ansible` |
 | `METRICS_TOKEN` | Bearer token for `/api/metrics` (empty = public) | empty |
+| `SLURMUI_HEALTH_INTERVAL_SEC` | Health-monitor poll interval (clamped to ≥ 15) | `60` |
+| `SLURMUI_STUCK_JOB_THRESHOLD_SEC` | Pending-job age before `job.stuck` fires for non-progress reasons | `600` |
 
 See `docker-compose.dev.yml` for the full working example.
 
@@ -235,6 +249,21 @@ See `docker-compose.dev.yml` for the full working example.
 - `slurmui_jobs_running_count{cluster}`, `slurmui_running_job_age_seconds{stat=min|p50|p90|p99|max|count}`
 - `slurmui_job_duration_seconds_{bucket,count,sum}{cluster,status,le}` — Prometheus histogram over the 24h finished-job window
 - `slurmui_cluster_last_submit_timestamp_seconds{cluster}`, `slurmui_cluster_last_finished_timestamp_seconds{cluster}`
+
+**Queue state (from health monitor)**
+
+- `slurmui_queue_pending_jobs{cluster}`, `slurmui_queue_running_jobs{cluster}`, `slurmui_queue_held_jobs{cluster}`
+- `slurmui_queue_oldest_pending_seconds{cluster}`
+- `slurmui_queue_pending_by_reason{cluster,reason}` — time-series per Slurm reason code (`Resources`, `Priority`, `Dependency`, `QOSMaxJobsPerUserLimit`, …)
+- `slurmui_queue_stuck_jobs{cluster}` — classified stuck by the health monitor
+
+**Cluster health (from health monitor)**
+
+- `slurmui_health_slurmctld_up{cluster}`, `slurmui_health_last_check_age_seconds{cluster}`, `slurmui_health_poll_errors{cluster}`
+- `slurmui_health_nodes_total{cluster}`, `slurmui_health_nodes_unhealthy{cluster}`, `slurmui_health_nodes_by_state{cluster,state}`
+- `slurmui_health_node_up{cluster,node,state}` — one series per node
+- `slurmui_health_storage_mounted{cluster,host,mount_path,mount_id}` — 1/0 per worker × mount
+- `slurmui_health_jobs_tracked{cluster}`
 
 **Users / templates / sessions**
 

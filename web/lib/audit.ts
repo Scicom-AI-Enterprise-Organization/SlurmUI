@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { auth } from "./auth";
+import { dispatch as dispatchAlert } from "./alerts";
 
 interface AuditEntry {
   action: string;
@@ -39,4 +40,12 @@ export async function logAudit(entry: AuditEntry) {
     // Never let audit logging break the main operation
     console.error("[audit] Failed to write audit log:", err);
   }
+
+  // Fan out to configured webhooks — fire-and-forget, never blocks.
+  dispatchAlert(entry.action, {
+    entity: entry.entity,
+    entityId: entry.entityId,
+    user: userEmail,
+    ...(entry.metadata ?? {}),
+  }).catch(() => {});
 }

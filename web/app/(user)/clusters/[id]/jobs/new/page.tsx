@@ -326,6 +326,7 @@ export default function NewJobPage() {
   const [gpus, setGpus] = useState(0);
   const [memoryGb, setMemoryGb] = useState(0);
   const [time, setTime] = useState(""); // e.g. "1-00:00:00" or "" for unlimited
+  const [arraySpec, setArraySpec] = useState(""); // e.g. "1-100", "0-99:2", "1-16%4"
   const [command, setCommand] = useState("");
 
   // Raw mode state
@@ -413,6 +414,7 @@ export default function NewJobPage() {
     if (memoryGb > 0) lines.push(`#SBATCH --mem=${memoryGb}G`);
     lines.push(`#SBATCH --time=${time.trim() || "0"}`);
     if (storage) lines.push(`#SBATCH --chdir=${storage}`);
+    if (arraySpec.trim()) lines.push(`#SBATCH --array=${arraySpec.trim()}`);
     // Omit --output/--error so Slurm writes to the submission dir (NFS home or
     // --chdir), which must live on shared storage so the controller can tail.
     lines.push("");
@@ -618,6 +620,19 @@ export default function NewJobPage() {
                     value={time}
                     onChange={(e) => setTime(e.target.value)}
                   />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="array">Array (optional)</Label>
+                  <Input
+                    id="array"
+                    placeholder="1-100, 0-99:2, 1-16%4"
+                    value={arraySpec}
+                    onChange={(e) => setArraySpec(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Fan out into N tasks. <code>1-100</code> runs 100 copies, <code>%5</code> caps concurrency.
+                    Refer to the array index with <code>$SLURM_ARRAY_TASK_ID</code> in your command.
+                  </p>
                 </div>
               </div>
 
