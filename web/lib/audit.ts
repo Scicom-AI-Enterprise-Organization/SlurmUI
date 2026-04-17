@@ -32,7 +32,7 @@ export async function logAudit(entry: AuditEntry) {
         entityId: entry.entityId,
         userId,
         userEmail,
-        metadata: entry.metadata ?? undefined,
+        metadata: entry.metadata ? (entry.metadata as object) : undefined,
       },
     });
   } catch (err) {

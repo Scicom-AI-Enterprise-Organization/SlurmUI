@@ -539,7 +539,7 @@ export default function NodesPage() {
       const output = (data.stdout || "").replace(/\r/g, "").trim();
       if (output) {
         // Filter bastion welcome banner noise
-        const filtered = output.split("\n").filter((l) => {
+        const filtered = output.split("\n").filter((l: string) => {
           const t = l.trim();
           return t && !t.startsWith("Welcome to") &&
             !t.includes("System load:") && !t.includes("Usage of /:") &&
