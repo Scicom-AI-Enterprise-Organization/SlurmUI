@@ -112,7 +112,9 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
 | **Python** | Shared or per-node venv managed by [`uv`](https://docs.astral.sh/uv/). Pick Python version and storage location. Per-package `--index-url` / `--extra-index-url`, plus a "paste a `pip install` command" parser. Version shown per installed package. |
 | **Environment** | Cluster-wide env vars (optionally Secret) rendered into `/etc/profile.d/aura.sh` on every node. Status column confirms each key is present. |
 | **Users** | Provision / deprovision Linux accounts + NFS home + Slurm accounting per cluster. |
-| **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue** buttons (via sudo `scontrol`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
+| **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue / terminate** buttons (via sudo `scontrol` / `scancel`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
+| **Reservations** | List/create/delete Slurm reservations (`scontrol create reservation`). Dialog has native datetime pickers for start / end, multiselect for nodes (live `sinfo`) and users (cluster-provisioned, submitted as their unix usernames), partition dropdown, plus a read-only **command preview** textarea showing the exact `scontrol` invocation before it runs. |
+| **QoS** | CRUD over `sacctmgr qos` entries — Name, Priority, MaxJobsPU, MaxSubmitPU, MaxWall, MaxTRESPU, MaxTRESPJ, GrpTRES, GrpJobs, Flags. Edit reuses the same dialog as create; empty fields are left unchanged on edit, `-1` clears a limit. Requires `slurmdbd`. Built-in `normal` QoS is protected from deletion. |
 
 ### User-facing pages
 
@@ -316,7 +318,7 @@ Contributions welcome — big or small.
 2. Find a rough edge. Common starting points:
    - A new example in the Submit Job form (add a `FORM_EXAMPLES` / `RAW_EXAMPLES` entry).
    - A new node-level `Fix` / `Diagnose` step.
-   - Wiring an existing Slurm feature into a new settings tab (QoS, Reservations, etc.).
+   - Wiring an existing Slurm feature into a new settings tab (Licenses, Topology, preemption policies, etc.).
 3. Match the existing style: server-side background tasks for anything touching the cluster, `redactConfig` for anything that may hold a secret, prefer dialogs over toasts for non-trivial feedback.
 4. Open a PR. Include screenshots for UI changes.
 

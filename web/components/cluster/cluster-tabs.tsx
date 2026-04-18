@@ -15,6 +15,8 @@ const tabs = [
   { slug: "environment", label: "Environment", requiresActive: true },
   { slug: "users", label: "Users", requiresActive: true },
   { slug: "queue", label: "Queue", requiresActive: true },
+  { slug: "reservations", label: "Reservations", requiresActive: true },
+  { slug: "qos", label: "QoS", requiresActive: true },
 ];
 
 interface ClusterTabsProps {

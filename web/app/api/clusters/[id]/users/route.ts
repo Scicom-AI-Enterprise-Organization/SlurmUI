@@ -38,7 +38,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 
   const clusterUsers = await prisma.clusterUser.findMany({
     where: { clusterId: id },
-    include: { user: { select: { id: true, email: true, name: true, unixUid: true, unixGid: true } } },
+    include: { user: { select: { id: true, email: true, name: true, unixUid: true, unixGid: true, unixUsername: true } } },
     orderBy: { provisionedAt: "desc" },
   });
 
