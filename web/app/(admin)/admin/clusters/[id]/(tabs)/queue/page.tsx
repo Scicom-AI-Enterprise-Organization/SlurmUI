@@ -5,10 +5,25 @@ import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { RefreshCw } from "lucide-react";
-import { toast } from "sonner";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { RefreshCw, Info } from "lucide-react";
 
-type JobAction = "hold" | "release" | "requeue";
+type JobAction = "hold" | "release" | "requeue" | "terminate";
 
 async function controlJob(clusterId: string, slurmJobId: string, action: JobAction) {
   const res = await fetch(`/api/clusters/${clusterId}/slurm-control`, {
@@ -145,107 +160,206 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <input
-          value={filter} onChange={(e) => setFilter(e.target.value)}
-          placeholder="filter by user, reason, partition..."
-          className="h-8 flex-1 rounded-md border px-2 text-sm"
-        />
+      <div className="flex justify-end">
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
           <RefreshCw className={`mr-2 h-3 w-3 ${loading ? "animate-spin" : ""}`} /> Refresh
         </Button>
       </div>
-
-      {byReason.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm">Pending reasons</CardTitle></CardHeader>
-          <CardContent className="flex flex-wrap gap-2">
-            {byReason.map(([reason, count]) => (
-              <span key={reason} className="rounded-full border px-2 py-0.5 text-xs font-mono">
-                {reason} <span className="text-muted-foreground">({count})</span>
-              </span>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
       {err && <p className="text-sm text-destructive">{err}</p>}
-      {fetchedAt && (
-        <p className="text-xs text-muted-foreground">
-          {filtered.length} of {rows.length} jobs · fetched {new Date(fetchedAt).toLocaleTimeString()}
-        </p>
-      )}
 
-      <div className="overflow-auto rounded-md border">
-        <table className="w-full text-xs">
-          <thead className="bg-muted/50">
-            <tr>
-              {["jobid", "partition", "user", "state", "reason", "nodes", "cpus", "mem", "timeLeft", "prio", "nodelist"].map((k) => (
-                <th key={k} className="cursor-pointer px-2 py-1.5 text-left font-medium"
-                  onClick={() => setSortBy(k as keyof QueueRow)}>
-                  {k}{sortBy === k && " ↓"}
-                </th>
+      <Card>
+        <CardHeader className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <CardTitle className="text-sm">Queue</CardTitle>
+              <ActionsInfo />
+            </div>
+            {fetchedAt && (
+              <span className="text-xs text-muted-foreground font-normal">
+                {filtered.length} of {rows.length} jobs · fetched {new Date(fetchedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="filter by user, reason, partition..."
+            className="h-8 w-full rounded-md border px-2 text-sm"
+          />
+          {byReason.length > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Pending reasons</p>
+              <div className="flex flex-wrap gap-2">
+                {byReason.map(([reason, count]) => (
+                  <span key={reason} className="rounded-full border px-2 py-0.5 text-xs font-mono">
+                    {reason} <span className="text-muted-foreground">({count})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {["jobid", "partition", "user", "state", "reason", "nodes", "cpus", "mem", "timeLeft", "prio", "nodelist"].map((k) => (
+                  <TableHead key={k}
+                    className="cursor-pointer select-none"
+                    onClick={() => setSortBy(k as keyof QueueRow)}>
+                    {k}{sortBy === k && " ↓"}
+                  </TableHead>
+                ))}
+                <TableHead className="w-[200px]">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((r) => (
+                <TableRow key={r.jobid}>
+                  <TableCell className="font-mono text-sm">{r.jobid}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.partition}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.user}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.state}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.reason}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.nodes}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.cpus}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.mem}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.timeLeft}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.prio}</TableCell>
+                  <TableCell className="font-mono text-sm text-muted-foreground">{r.nodelist}</TableCell>
+                  <TableCell>
+                    <JobActions clusterId={clusterId} row={r} onDone={load} />
+                  </TableCell>
+                </TableRow>
               ))}
-              <th className="px-2 py-1.5 text-left font-medium">actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((r) => (
-              <tr key={r.jobid} className="border-t font-mono">
-                <td className="px-2 py-1">{r.jobid}</td>
-                <td className="px-2 py-1">{r.partition}</td>
-                <td className="px-2 py-1">{r.user}</td>
-                <td className="px-2 py-1">{r.state}</td>
-                <td className="px-2 py-1">{r.reason}</td>
-                <td className="px-2 py-1">{r.nodes}</td>
-                <td className="px-2 py-1">{r.cpus}</td>
-                <td className="px-2 py-1">{r.mem}</td>
-                <td className="px-2 py-1">{r.timeLeft}</td>
-                <td className="px-2 py-1">{r.prio}</td>
-                <td className="px-2 py-1 text-muted-foreground">{r.nodelist}</td>
-                <td className="px-2 py-1">
-                  <JobActions clusterId={clusterId} row={r} onDone={load} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
     </div>
+  );
+}
+
+function ActionsInfo() {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative inline-flex">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        className="inline-flex items-center text-muted-foreground hover:text-foreground"
+        aria-label="hold / release / requeue explained"
+      >
+        <Info className="h-3.5 w-3.5" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className="absolute left-0 top-full z-50 mt-1 w-72 max-w-[min(18rem,calc(100vw-1rem))] whitespace-normal break-words rounded-md border bg-popover p-3 text-xs leading-relaxed shadow-md font-normal normal-case text-popover-foreground"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="mb-2 font-medium">What these do</p>
+            <ul className="space-y-2 list-none pl-0">
+              <li><code className="font-mono font-semibold">hold</code> — set a <b>PENDING</b> job&apos;s priority to 0 so the scheduler ignores it. Stays queued until released.</li>
+              <li><code className="font-mono font-semibold">release</code> — undo a hold; job goes back to normal priority.</li>
+              <li><code className="font-mono font-semibold">requeue</code> — kill a <b>RUNNING</b> job and put it back in the queue from the start. Needs <code className="font-mono">--requeue</code> or a requeueable partition.</li>
+              <li><code className="font-mono font-semibold">terminate</code> — run <code className="font-mono">scancel</code>. Ends the job immediately; cannot be resumed. Confirms first.</li>
+            </ul>
+          </div>
+        </>
+      )}
+    </span>
   );
 }
 
 function JobActions({ clusterId, row, onDone }: { clusterId: string; row: QueueRow; onDone: () => void }) {
   const [busy, setBusy] = useState<JobAction | null>(null);
+  const [result, setResult] = useState<{
+    action: JobAction;
+    ok: boolean;
+    output: string;
+  } | null>(null);
+  const [confirmTerminate, setConfirmTerminate] = useState(false);
+
   const run = async (action: JobAction) => {
     setBusy(action);
     try {
       const { output } = await controlJob(clusterId, row.jobid, action);
-      toast.success(`${action} ${row.jobid}`, { description: output });
+      setResult({ action, ok: true, output: output || `${action} ${row.jobid}: ok` });
       onDone();
     } catch (e) {
-      toast.error(`${action} ${row.jobid} failed`, { description: e instanceof Error ? e.message : String(e) });
+      setResult({
+        action,
+        ok: false,
+        output: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       setBusy(null);
     }
   };
   const running = row.state === "RUNNING";
   const pending = row.state === "PENDING";
+  const terminable = running || pending;
   return (
-    <div className="flex gap-1">
-      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
-        disabled={!!busy || !pending} onClick={() => run("hold")}>
-        {busy === "hold" ? "..." : "hold"}
-      </Button>
-      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
-        disabled={!!busy || !pending} onClick={() => run("release")}>
-        {busy === "release" ? "..." : "release"}
-      </Button>
-      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
-        disabled={!!busy || !running} onClick={() => run("requeue")}>
-        {busy === "requeue" ? "..." : "requeue"}
-      </Button>
-    </div>
+    <>
+      <div className="flex gap-1">
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+          disabled={!!busy || !pending} onClick={() => run("hold")}>
+          {busy === "hold" ? "..." : "hold"}
+        </Button>
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+          disabled={!!busy || !pending} onClick={() => run("release")}>
+          {busy === "release" ? "..." : "release"}
+        </Button>
+        <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+          disabled={!!busy || !running} onClick={() => run("requeue")}>
+          {busy === "requeue" ? "..." : "requeue"}
+        </Button>
+        <Button size="sm" variant="destructive" className="h-6 px-2 text-[11px]"
+          disabled={!!busy || !terminable} onClick={() => setConfirmTerminate(true)}>
+          {busy === "terminate" ? "..." : "terminate"}
+        </Button>
+      </div>
+      <Dialog open={confirmTerminate} onOpenChange={setConfirmTerminate}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Terminate job {row.jobid}?</DialogTitle>
+            <DialogDescription>
+              Runs <code>scancel {row.jobid}</code> on the controller. The job is killed immediately and cannot be resumed. Any partial output written so far stays on disk.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmTerminate(false)}>Keep running</Button>
+            <Button variant="destructive" onClick={() => { setConfirmTerminate(false); run("terminate"); }}>
+              Terminate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!result} onOpenChange={(o) => { if (!o) setResult(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={result?.ok ? "" : "text-destructive"}>
+              {result?.ok
+                ? `${result.action} job ${row.jobid}`
+                : `${result?.action} failed`}
+            </DialogTitle>
+            <DialogDescription>
+              {result?.ok
+                ? `Slurm accepted the ${result.action} request.`
+                : `Slurm rejected the ${result?.action} request.`}
+            </DialogDescription>
+          </DialogHeader>
+          <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            {result?.output}
+          </pre>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -270,22 +384,22 @@ function PartitionTable({ clusterId, active }: { clusterId: string; active: bool
           <RefreshCw className={`mr-2 h-3 w-3 ${loading ? "animate-spin" : ""}`} /> Refresh
         </Button>
       </div>
-      <div className="overflow-auto rounded-md border">
-        <table className="w-full text-xs">
-          <thead className="bg-muted/50">
-            <tr>{["partition", "avail", "timelimit", "nodes", "state", "nodelist"].map((k) => (
-              <th key={k} className="px-2 py-1.5 text-left font-medium">{k}</th>
-            ))}</tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i} className="border-t font-mono">
-                {r.map((c, j) => <td key={j} className="px-2 py-1">{c}</td>)}
-              </tr>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {["partition", "avail", "timelimit", "nodes", "state", "nodelist"].map((k) => (
+              <TableHead key={k}>{k}</TableHead>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((r, i) => (
+            <TableRow key={i}>
+              {r.map((c, j) => <TableCell key={j} className="font-mono text-sm">{c}</TableCell>)}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   );
 }

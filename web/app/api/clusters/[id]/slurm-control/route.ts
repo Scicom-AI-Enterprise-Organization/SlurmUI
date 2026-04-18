@@ -2,16 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { sshExecSimple } from "@/lib/ssh-exec";
+import { sshExecScript } from "@/lib/ssh-exec";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
-type Action = "hold" | "release" | "requeue";
+type Action = "hold" | "release" | "requeue" | "terminate";
 
 const ACTION_CMD: Record<Action, string> = {
   hold: "scontrol hold",
   release: "scontrol release",
   requeue: "scontrol requeue",
+  terminate: "scancel",
 };
 
 // POST /api/clusters/[id]/slurm-control
@@ -48,29 +49,55 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Only supported in SSH mode" }, { status: 400 });
   }
 
-  const cmd = `S=""; [ "$(id -u)" != "0" ] && S="sudo"; $S ${ACTION_CMD[action]} ${rawId} 2>&1`;
+  // Bastion sessions drop an interactive shell that echoes a welcome banner
+  // and closing lines. Use sshExecScript (which base64-pipes scripts on
+  // bastions) + markers so we can cleanly slice scontrol's output.
+  const marker = `__SCTL_${Date.now()}__`;
+  const script = `#!/bin/bash
+set +e
+S=""; [ "$(id -u)" != "0" ] && S="sudo"
+echo "${marker}_START"
+$S ${ACTION_CMD[action]} ${rawId} 2>&1
+ec=$?
+echo "${marker}_END:$ec"
+`;
 
-  const result = await sshExecSimple(
-    {
-      host: cluster.controllerHost,
-      user: cluster.sshUser,
-      port: cluster.sshPort,
-      privateKey: cluster.sshKey.privateKey,
-      bastion: cluster.sshBastion,
-    },
-    cmd,
-  );
+  const target = {
+    host: cluster.controllerHost,
+    user: cluster.sshUser,
+    port: cluster.sshPort,
+    privateKey: cluster.sshKey.privateKey,
+    bastion: cluster.sshBastion,
+  };
+  const chunks: string[] = [];
+  await new Promise<void>((resolve) => {
+    sshExecScript(target, script, {
+      onStream: (line) => { if (!line.startsWith("[stderr]")) chunks.push(line); },
+      onComplete: () => resolve(),
+    });
+  });
+
+  const blob = chunks.join("\n");
+  const start = blob.indexOf(`${marker}_START`);
+  const endMatch = blob.match(new RegExp(`${marker}_END:(\\d+)`));
+  const cmdExit = endMatch ? parseInt(endMatch[1], 10) : null;
+  const end = endMatch ? blob.indexOf(endMatch[0]) : -1;
+  const cleanOutput = start !== -1 && end !== -1
+    ? blob.slice(start + `${marker}_START`.length, end).trim()
+    : "";
+
+  const success = cmdExit === 0;
 
   await logAudit({
     action: `jobs.${action}`,
     entity: "Cluster",
     entityId: id,
-    metadata: { slurmJobId: rawId, success: result.success },
+    metadata: { slurmJobId: rawId, success },
   });
 
   return NextResponse.json({
-    success: result.success,
-    output: (result.stdout + result.stderr).trim() || `${action} ${rawId}: ok`,
-    exitCode: result.exitCode,
+    success,
+    output: cleanOutput || `${action} ${rawId}: ok`,
+    exitCode: cmdExit,
   });
 }

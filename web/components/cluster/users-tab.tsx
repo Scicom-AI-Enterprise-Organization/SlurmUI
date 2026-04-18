@@ -3,7 +3,15 @@
 import { useRef, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -241,8 +249,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{clusterUsers.filter(c => c.status !== "REMOVED").length} user(s) provisioned</p>
+      <div className="flex items-center justify-end gap-2">
         <Button onClick={() => setDialogOpen(true)}>
           <UserPlus className="mr-2 h-4 w-4" />
           Add User
@@ -321,58 +328,63 @@ export function UsersTab({ clusterId }: UsersTabProps) {
         </Dialog>
       </div>
 
-      {clusterUsers.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-            <Plus className="mb-2 h-8 w-8" />
-            <p>No users provisioned yet.</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="rounded-md border">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b bg-muted/40">
-                <th className="px-4 py-2 text-left font-medium">User</th>
-                <th className="px-4 py-2 text-left font-medium">UID</th>
-                <th className="px-4 py-2 text-left font-medium">Status</th>
-                <th className="px-4 py-2 text-left font-medium">Provisioned</th>
-                <th className="px-4 py-2 text-left font-medium"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {clusterUsers.map((cu) => (
-                <tr key={cu.id} className="border-b last:border-0">
-                  <td className="px-4 py-2">
-                    <div>{cu.user.name ?? cu.user.email}</div>
-                    <div className="text-xs text-muted-foreground">{cu.user.email}</div>
-                  </td>
-                  <td className="px-4 py-2 font-mono">{cu.user.unixUid ?? "—"}</td>
-                  <td className="px-4 py-2"><StatusBadge status={cu.status} /></td>
-                  <td className="px-4 py-2 text-muted-foreground">
-                    {cu.provisionedAt ? new Date(cu.provisionedAt).toLocaleDateString() : "—"}
-                  </td>
-                  <td className="px-4 py-2">
-                    {cu.status !== "REMOVED" && (
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="Remove user"
-                        onClick={() => setConfirmRemove(cu)}
-                        disabled={removing === cu.user.id}
-                      >
-                        {removing === cu.user.id
-                          ? <Loader2 className="h-4 w-4 animate-spin" />
-                          : <Trash2 className="h-4 w-4 text-destructive" />}
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            Users ({clusterUsers.filter((c) => c.status !== "REMOVED").length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {clusterUsers.length === 0 ? (
+            <p className="text-center text-muted-foreground py-6">
+              No users provisioned yet. Add cluster users to give them Linux
+              accounts, NFS homes, and Slurm accounting entries.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>User</TableHead>
+                  <TableHead className="w-[100px]">UID</TableHead>
+                  <TableHead className="w-[120px]">Status</TableHead>
+                  <TableHead className="w-[140px]">Provisioned</TableHead>
+                  <TableHead className="w-[80px]">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {clusterUsers.map((cu) => (
+                  <TableRow key={cu.id}>
+                    <TableCell>
+                      <div className="text-sm">{cu.user.name ?? cu.user.email}</div>
+                      <div className="text-xs text-muted-foreground">{cu.user.email}</div>
+                    </TableCell>
+                    <TableCell className="font-mono text-sm">{cu.user.unixUid ?? "—"}</TableCell>
+                    <TableCell><StatusBadge status={cu.status} /></TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {cu.provisionedAt ? new Date(cu.provisionedAt).toLocaleDateString() : "—"}
+                    </TableCell>
+                    <TableCell>
+                      {cu.status !== "REMOVED" && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          title="Remove user"
+                          onClick={() => setConfirmRemove(cu)}
+                          disabled={removing === cu.user.id}
+                        >
+                          {removing === cu.user.id
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <Trash2 className="h-4 w-4 text-destructive" />}
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Remove user confirmation dialog */}
       <Dialog open={!!confirmRemove} onOpenChange={(o) => { if (!o) setConfirmRemove(null); }}>
