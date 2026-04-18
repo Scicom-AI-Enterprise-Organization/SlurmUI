@@ -24,8 +24,164 @@ import { JobTable } from "@/components/jobs/job-table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TemplatesPanel } from "@/components/jobs/templates-panel";
 import { toast } from "sonner";
-import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2 } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2, Cpu, MemoryStick, Gpu, RefreshCw } from "lucide-react";
 import Link from "next/link";
+
+interface NodeResource {
+  host: string;
+  state: string;
+  cpuAlloc: number;
+  cpuTotal: number;
+  memTotalMb: number;
+  memFreeMb: number;
+  gpuTotal: number;
+  gpuUsed: number;
+}
+
+interface ClusterResources {
+  totals: {
+    cpuTotal: number; cpuFree: number;
+    memTotalMb: number; memFreeMb: number;
+    gpuTotal: number; gpuFree: number;
+  };
+  nodes: NodeResource[];
+  fetchedAt: string;
+}
+
+function isLive(state: string): boolean {
+  const x = state.toLowerCase();
+  return !x.includes("down") && !x.includes("drain") && !x.includes("fail") &&
+    !x.includes("maint") && !x.includes("boot");
+}
+
+function ResourceColumn({
+  icon, label, unit, free, total, nodes, getFree, getTotal,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  unit: string;
+  free: number;
+  total: number;
+  nodes: NodeResource[];
+  getFree: (n: NodeResource) => number;
+  getTotal: (n: NodeResource) => number;
+}) {
+  const pct = total > 0 ? Math.round((free / total) * 100) : 0;
+  const low = pct < 15;
+  const sorted = [...nodes].sort((a, b) => getFree(b) - getFree(a));
+  return (
+    <div className="rounded-md border p-3 space-y-3">
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-xs">
+          <span className="flex items-center gap-1.5 font-medium">{icon}{label}</span>
+          <span className="font-mono">
+            <span className={low ? "text-destructive font-semibold" : ""}>{free.toLocaleString()}</span>
+            <span className="text-muted-foreground"> / {total.toLocaleString()} {unit}</span>
+          </span>
+        </div>
+        <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
+          <div className={`h-full transition-all ${low ? "bg-destructive" : "bg-primary"}`}
+            style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+      {sorted.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">No nodes.</p>
+      ) : (
+        <ul className="space-y-1 text-[11px]">
+          {sorted.map((n) => {
+            const nFree = getFree(n);
+            const nTotal = getTotal(n);
+            const live = isLive(n.state);
+            return (
+              <li key={n.host} className="flex items-center justify-between gap-2">
+                <span className={`truncate font-mono ${live ? "" : "text-muted-foreground line-through"}`}
+                  title={live ? n.state : `${n.state} — not schedulable`}>
+                  {n.host}
+                </span>
+                <span className="font-mono">
+                  <span className={nFree === 0 ? "text-muted-foreground" : ""}>{nFree}</span>
+                  <span className="text-muted-foreground"> / {nTotal}</span>
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ClusterResourcePanel({ clusterId }: { clusterId: string }) {
+  const [data, setData] = useState<ClusterResources | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/resources`);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setData(d);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const i = setInterval(load, 30_000);
+    return () => clearInterval(i);
+  }, [clusterId]);
+
+  return (
+    <div className="rounded-md border p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium">Cluster resources</p>
+          {data && (
+            <p className="text-xs text-muted-foreground">
+              {data.nodes.length} node{data.nodes.length === 1 ? "" : "s"} · updated {new Date(data.fetchedAt).toLocaleTimeString()}
+            </p>
+          )}
+        </div>
+        <Button variant="ghost" size="sm" onClick={load} disabled={loading}>
+          <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+        </Button>
+      </div>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      {data && (
+        <div className="grid gap-4 md:grid-cols-3">
+          <ResourceColumn
+            icon={<Cpu className="h-3 w-3" />} label="CPU" unit="cores"
+            free={data.totals.cpuFree} total={data.totals.cpuTotal}
+            nodes={data.nodes}
+            getFree={(n) => (isLive(n.state) ? Math.max(0, n.cpuTotal - n.cpuAlloc) : 0)}
+            getTotal={(n) => n.cpuTotal}
+          />
+          <ResourceColumn
+            icon={<MemoryStick className="h-3 w-3" />} label="Memory" unit="GiB"
+            free={Math.round(data.totals.memFreeMb / 1024)}
+            total={Math.round(data.totals.memTotalMb / 1024)}
+            nodes={data.nodes}
+            getFree={(n) => (isLive(n.state) ? Math.round(n.memFreeMb / 1024) : 0)}
+            getTotal={(n) => Math.round(n.memTotalMb / 1024)}
+          />
+          <ResourceColumn
+            icon={<Gpu className="h-3 w-3" />} label="GPU" unit="GPUs"
+            free={data.totals.gpuFree} total={data.totals.gpuTotal}
+            nodes={data.nodes.filter((n) => n.gpuTotal > 0)}
+            getFree={(n) => (isLive(n.state) ? Math.max(0, n.gpuTotal - n.gpuUsed) : 0)}
+            getTotal={(n) => n.gpuTotal}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface Job {
   id: string;
@@ -197,6 +353,7 @@ export default function JobListPage() {
         </TabsList>
 
         <TabsContent value="jobs" className="mt-4 space-y-4">
+      <ClusterResourcePanel clusterId={clusterId} />
       {/* Filters — inline toolbar, no box. */}
       <div className="flex flex-wrap items-center gap-2">
         <Input

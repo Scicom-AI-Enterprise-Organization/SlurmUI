@@ -6,6 +6,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { RefreshCw } from "lucide-react";
+import { toast } from "sonner";
+
+type JobAction = "hold" | "release" | "requeue";
+
+async function controlJob(clusterId: string, slurmJobId: string, action: JobAction) {
+  const res = await fetch(`/api/clusters/${clusterId}/slurm-control`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slurmJobId, action }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.success === false) {
+    throw new Error(data.error || data.output || `HTTP ${res.status}`);
+  }
+  return data as { output: string };
+}
 
 type Kind =
   | "queue" | "sprio" | "sinfo-reasons" | "sinfo-partitions"
@@ -170,6 +186,7 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
                   {k}{sortBy === k && " ↓"}
                 </th>
               ))}
+              <th className="px-2 py-1.5 text-left font-medium">actions</th>
             </tr>
           </thead>
           <tbody>
@@ -186,11 +203,48 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
                 <td className="px-2 py-1">{r.timeLeft}</td>
                 <td className="px-2 py-1">{r.prio}</td>
                 <td className="px-2 py-1 text-muted-foreground">{r.nodelist}</td>
+                <td className="px-2 py-1">
+                  <JobActions clusterId={clusterId} row={r} onDone={load} />
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function JobActions({ clusterId, row, onDone }: { clusterId: string; row: QueueRow; onDone: () => void }) {
+  const [busy, setBusy] = useState<JobAction | null>(null);
+  const run = async (action: JobAction) => {
+    setBusy(action);
+    try {
+      const { output } = await controlJob(clusterId, row.jobid, action);
+      toast.success(`${action} ${row.jobid}`, { description: output });
+      onDone();
+    } catch (e) {
+      toast.error(`${action} ${row.jobid} failed`, { description: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const running = row.state === "RUNNING";
+  const pending = row.state === "PENDING";
+  return (
+    <div className="flex gap-1">
+      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+        disabled={!!busy || !pending} onClick={() => run("hold")}>
+        {busy === "hold" ? "..." : "hold"}
+      </Button>
+      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+        disabled={!!busy || !pending} onClick={() => run("release")}>
+        {busy === "release" ? "..." : "release"}
+      </Button>
+      <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
+        disabled={!!busy || !running} onClick={() => run("requeue")}>
+        {busy === "requeue" ? "..." : "requeue"}
+      </Button>
     </div>
   );
 }

@@ -64,7 +64,7 @@ minute, click the same button and reattach to the live log. Every task has a
 ```bash
 git clone https://github.com/your-org/aura.git
 cd aura
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 Open [http://localhost:3000](http://localhost:3000) and log in with **`admin@aura.local`** / **`admin`**.
@@ -112,15 +112,15 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
 | **Python** | Shared or per-node venv managed by [`uv`](https://docs.astral.sh/uv/). Pick Python version and storage location. Per-package `--index-url` / `--extra-index-url`, plus a "paste a `pip install` command" parser. Version shown per installed package. |
 | **Environment** | Cluster-wide env vars (optionally Secret) rendered into `/etc/profile.d/aura.sh` on every node. Status column confirms each key is present. |
 | **Users** | Provision / deprovision Linux accounts + NFS home + Slurm accounting per cluster. |
-| **Queue** | Sortable `squeue` with pending-reason grouping, `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
+| **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue** buttons (via sudo `scontrol`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
 
 ### User-facing pages
 
 - **Dashboard** — last-24h running / completed / failed area chart + status donut; themed via CSS tokens so light/dark/brand switches are automatic.
-- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs.
-- **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
-- **Templates** — save reusable scripts per cluster, re-run with one click.
-- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
+- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
+- **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
+- **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
+- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
@@ -291,7 +291,9 @@ See `docker-compose.dev.yml` for the full working example.
 
 **Dev** — `docker compose -f docker-compose.dev.yml up -d` (see above).
 
-**Prod** — build `web/Dockerfile` and `agent/Dockerfile`; front the web
+**Prod-like local stack** — `docker compose -f docker-compose.prod.yml up -d --build` builds the real prod image (root `Dockerfile`, `npm run build`, `server.ts` compiled to an ESM bundle, no `tsx` at runtime) and wires it up against postgres / nats / keycloak / the Go agent. Same default CMD (`node -r ./preload.cjs server.mjs`) as K8s/ArgoCD.
+
+**Prod** — build the root `Dockerfile` (builds agent binaries for amd64+arm64, the web image, and bundles the Ansible playbooks) and `agent/Dockerfile`; front the web
 service with your own reverse proxy (TLS, auth proxy if you don't use
 Keycloak), point `DATABASE_URL` at managed Postgres, and either:
 

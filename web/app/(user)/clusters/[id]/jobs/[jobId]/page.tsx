@@ -19,7 +19,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { XCircle, RefreshCw } from "lucide-react";
+import { XCircle, RefreshCw, RotateCw } from "lucide-react";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 
 interface JobDetail {
@@ -55,6 +55,31 @@ export default function JobDetailPage() {
   const [stderrBody, setStderrBody] = useState<string | null>(null);
   const [stderrMerged, setStderrMerged] = useState<string | null>(null);
   const [stderrLoading, setStderrLoading] = useState(false);
+  const [resyncing, setResyncing] = useState(false);
+
+  const resync = async () => {
+    setResyncing(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/jobs/${jobId}/resync`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) {
+        toast.error("Resync failed", { description: d.error ?? `HTTP ${res.status}` });
+        return;
+      }
+      if (!d.next) {
+        toast.warning("No Slurm state returned", { description: d.error ?? "Row unchanged." });
+      } else if (d.updated) {
+        toast.success(`Status: ${d.previous} → ${d.next}`, { description: `Source: ${d.source}` });
+      } else {
+        toast.info(`Status unchanged (${d.next})`, { description: `Source: ${d.source}` });
+      }
+      fetchJob();
+    } catch (e) {
+      toast.error("Resync failed", { description: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setResyncing(false);
+    }
+  };
 
   const fetchStderr = async () => {
     setStderrLoading(true);
@@ -190,6 +215,13 @@ export default function JobDetailPage() {
             <RefreshCw className="mr-2 h-3 w-3" />
             Refresh
           </Button>
+          {job.slurmJobId && (
+            <Button variant="outline" size="sm" onClick={resync} disabled={resyncing}
+              title="Re-query Slurm and overwrite the stored status">
+              <RotateCw className={`mr-2 h-3 w-3 ${resyncing ? "animate-spin" : ""}`} />
+              {resyncing ? "Resyncing..." : "Resync state"}
+            </Button>
+          )}
           {isRunning && (
             <Button
               variant="destructive"

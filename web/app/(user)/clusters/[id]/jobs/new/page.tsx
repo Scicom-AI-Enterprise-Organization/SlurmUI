@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/select";
 import { ScriptEditor } from "@/components/jobs/script-editor";
 import { toast } from "sonner";
-import { Send, Sparkles } from "lucide-react";
+import { Send, Sparkles, ChevronDown, X, Check } from "lucide-react";
 
 const FORM_EXAMPLES = {
   nccl: {
@@ -313,6 +313,85 @@ vllm serve your-27b-model \\
 };
 
 
+interface ParsedSbatch {
+  jobName?: string;
+  nodes?: number;
+  ntasks?: number;
+  cpusPerTask?: number;
+  gpus?: number;
+  memoryGb?: number;
+  time?: string;
+  arraySpec?: string;
+  partition?: string;
+  chdir?: string;
+  nodelist?: string[];
+  command?: string;
+}
+
+function parseSbatchScript(script: string): ParsedSbatch {
+  const out: ParsedSbatch = {};
+  const lines = script.split("\n");
+  let commandStart = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (i === 0 && trimmed.startsWith("#!")) continue;
+    if (trimmed === "") continue;
+    const sbatch = trimmed.match(/^#SBATCH\s+(.+)$/);
+    if (!sbatch) {
+      if (trimmed.startsWith("#")) continue; // other comments before the body
+      commandStart = i;
+      break;
+    }
+    // Split "--key=val", "--key val", "-X val", "-Xval"
+    const body = sbatch[1].trim();
+    let key: string, val: string;
+    const eq = body.match(/^(--[a-zA-Z-]+|-[a-zA-Z])=(.+)$/);
+    if (eq) {
+      key = eq[1]; val = eq[2];
+    } else {
+      const sp = body.match(/^(--[a-zA-Z-]+|-[a-zA-Z])\s+(.+)$/);
+      if (sp) { key = sp[1]; val = sp[2]; }
+      else continue;
+    }
+    val = val.trim();
+    switch (key) {
+      case "--job-name": case "-J": out.jobName = val; break;
+      case "--nodes": case "-N": out.nodes = parseInt(val, 10) || 1; break;
+      case "--ntasks": case "-n": out.ntasks = parseInt(val, 10) || 1; break;
+      case "--cpus-per-task": case "-c": out.cpusPerTask = parseInt(val, 10) || 1; break;
+      case "--gres": {
+        const m = val.match(/gpu(?::[^:]+)?:(\d+)/);
+        if (m) out.gpus = parseInt(m[1], 10) || 0;
+        break;
+      }
+      case "--mem": {
+        const m = val.match(/^(\d+)\s*([GgMm])?/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          const unit = (m[2] ?? "M").toUpperCase();
+          out.memoryGb = unit === "G" ? n : Math.round(n / 1024);
+        }
+        break;
+      }
+      case "--time": case "-t": out.time = val; break;
+      case "--array": case "-a": out.arraySpec = val; break;
+      case "--partition": case "-p": out.partition = val; break;
+      case "--chdir": case "-D": out.chdir = val; break;
+      case "--nodelist": case "-w": {
+        // Slurm expands "gpu[1-3]" ranges but users also paste plain comma
+        // lists — we only handle the latter; ranges pass through unchanged.
+        out.nodelist = val.split(",").map((s) => s.trim()).filter(Boolean);
+        break;
+      }
+    }
+  }
+
+  out.command = lines.slice(commandStart).join("\n").replace(/^\s+/, "");
+  return out;
+}
+
 export default function NewJobPage() {
   const params = useParams();
   const router = useRouter();
@@ -337,6 +416,11 @@ export default function NewJobPage() {
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [partition, setPartition] = useState("");
   const [partitions, setPartitions] = useState<string[]>([]);
+  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
+  const [availableNodes, setAvailableNodes] = useState<string[]>([]);
+  const [nodesOpen, setNodesOpen] = useState(false);
+  const nodelist = selectedNodes.join(",");
+  const [templates, setTemplates] = useState<Array<{ id: string; name: string; script: string; partition: string }>>([]);
   const [storage, setStorage] = useState("");
   const [storageMounts, setStorageMounts] = useState<Array<{ id: string; mountPath: string; type: string }>>([]);
   const [pythonVenvPath, setPythonVenvPath] = useState<string>("");
@@ -385,7 +469,48 @@ export default function NewJobPage() {
       .catch(() => {
         toast.error("Failed to load cluster config");
       });
+
+    fetch(`/api/clusters/${clusterId}/resources`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => {
+        const names = (d.nodes ?? []).map((n: { host: string }) => n.host).filter(Boolean);
+        setAvailableNodes(names);
+      })
+      .catch(() => { /* endpoint only available on SSH clusters — silently skip */ });
+
+    fetch(`/api/clusters/${clusterId}/templates`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setTemplates(d.templates ?? []))
+      .catch(() => { /* no templates endpoint — skip */ });
   }, [clusterId]);
+
+  const loadTemplate = (id: string) => {
+    const t = templates.find((x) => x.id === id);
+    if (!t) return;
+    if (mode === "raw") {
+      setRawScript(t.script);
+      if (t.partition) setPartition(t.partition);
+      return;
+    }
+    // Form mode — parse SBATCH directives into the form fields, drop the
+    // remainder into the Command textarea.
+    const parsed = parseSbatchScript(t.script);
+    if (parsed.jobName !== undefined) setJobName(parsed.jobName);
+    if (parsed.nodes !== undefined) setNodes(parsed.nodes);
+    if (parsed.ntasks !== undefined) setNtasks(parsed.ntasks);
+    if (parsed.cpusPerTask !== undefined) setCpusPerTask(parsed.cpusPerTask);
+    if (parsed.gpus !== undefined) setGpus(parsed.gpus);
+    if (parsed.memoryGb !== undefined) setMemoryGb(parsed.memoryGb);
+    if (parsed.time !== undefined) setTime(parsed.time);
+    if (parsed.arraySpec !== undefined) setArraySpec(parsed.arraySpec);
+    if (parsed.partition) setPartition(parsed.partition);
+    else if (t.partition) setPartition(t.partition);
+    if (parsed.chdir) setStorage(parsed.chdir);
+    if (parsed.nodelist && parsed.nodelist.length > 0) {
+      setSelectedNodes(parsed.nodelist);
+    }
+    if (parsed.command !== undefined) setCommand(parsed.command);
+  };
 
   const loadFormExample = (key: keyof typeof FORM_EXAMPLES) => {
     const ex = FORM_EXAMPLES[key];
@@ -414,6 +539,7 @@ export default function NewJobPage() {
     if (memoryGb > 0) lines.push(`#SBATCH --mem=${memoryGb}G`);
     lines.push(`#SBATCH --time=${time.trim() || "0"}`);
     if (storage) lines.push(`#SBATCH --chdir=${storage}`);
+    if (nodelist.trim()) lines.push(`#SBATCH --nodelist=${nodelist.trim()}`);
     if (arraySpec.trim()) lines.push(`#SBATCH --array=${arraySpec.trim()}`);
     // Omit --output/--error so Slurm writes to the submission dir (NFS home or
     // --chdir), which must live on shared storage so the controller can tail.
@@ -498,6 +624,75 @@ export default function NewJobPage() {
             </div>
 
             <div className="space-y-2">
+              <Label>Nodes (optional)</Label>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setNodesOpen((o) => !o)}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border bg-background px-3 py-1.5 min-h-10 text-sm shadow-xs hover:bg-accent"
+                >
+                  <span className="flex flex-wrap items-center gap-1 text-left min-w-0">
+                    {selectedNodes.length === 0 ? (
+                      <span className="text-muted-foreground">Any node in partition</span>
+                    ) : (
+                      selectedNodes.map((n) => (
+                        <span
+                          key={n}
+                          role="button"
+                          tabIndex={-1}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedNodes((s) => s.filter((x) => x !== n));
+                          }}
+                          className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs font-mono hover:bg-destructive/20"
+                        >
+                          {n}<X className="h-3 w-3" />
+                        </span>
+                      ))
+                    )}
+                  </span>
+                  <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+                </button>
+                {nodesOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setNodesOpen(false)} />
+                    <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+                      {availableNodes.length === 0 ? (
+                        <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                          No nodes returned — cluster may be non-SSH, offline, or still loading.
+                        </div>
+                      ) : (
+                        availableNodes.map((n) => {
+                          const checked = selectedNodes.includes(n);
+                          return (
+                            <button
+                              type="button"
+                              key={n}
+                              onClick={() =>
+                                setSelectedNodes((s) =>
+                                  checked ? s.filter((x) => x !== n) : [...s, n]
+                                )
+                              }
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                            >
+                              <span className="flex h-4 w-4 items-center justify-center rounded border">
+                                {checked && <Check className="h-3 w-3" />}
+                              </span>
+                              <span className="font-mono">{n}</span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Pin the job to specific nodes (<code>--nodelist</code>). Leave empty to let Slurm pick.
+              </p>
+            </div>
+
+            <div className="space-y-2">
               <Label>Working Directory</Label>
               <Select
                 value={storage}
@@ -549,6 +744,22 @@ export default function NewJobPage() {
                   Serve with vLLM
                 </Button>
               </div>
+
+              {templates.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">Load from template:</span>
+                  <Select value="" onValueChange={loadTemplate}>
+                    <SelectTrigger size="sm" className="h-8 w-64">
+                      <SelectValue placeholder="Pick a saved template..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {templates.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label htmlFor="job-name">Job Name</Label>
@@ -705,6 +916,21 @@ export default function NewJobPage() {
                   Serve with vLLM
                 </Button>
               </div>
+              {templates.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">Load from template:</span>
+                  <Select value="" onValueChange={loadTemplate}>
+                    <SelectTrigger size="sm" className="h-8 w-64">
+                      <SelectValue placeholder="Pick a saved template..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {templates.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
               <ScriptEditor value={rawScript} onChange={setRawScript} />
             </TabsContent>
           </Tabs>
