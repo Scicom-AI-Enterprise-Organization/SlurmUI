@@ -1,0 +1,114 @@
+# Production-like local stack: builds the real prod image and runs it.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# The web service runs the Dockerfile's default CMD (npx tsx server.ts).
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: aura
+      POSTGRES_PASSWORD: aura
+      POSTGRES_DB: aura
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aura"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    volumes:
+      - natsdata:/data
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: 8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./web/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  migrate:
+    image: scicom-aura-web:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["npx", "prisma", "db", "push"]
+    environment:
+      DATABASE_URL: postgresql://aura:aura@postgres:5432/aura?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: scicom-aura-web:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: any-random-string-for-local-prod
+      KEYCLOAK_ID: aura-web
+      KEYCLOAK_SECRET: aura-web-secret
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom
+      NATS_URL: nats://localhost:4222
+      FREEIPA_URL: ""
+      FREEIPA_USER: ""
+      FREEIPA_PASSWORD: ""
+      METRICS_TOKEN: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      CLUSTER_ID: local-cluster
+      SLURM_USER: root
+    depends_on:
+      nats:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  natsdata:

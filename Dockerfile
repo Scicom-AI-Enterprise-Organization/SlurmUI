@@ -32,6 +32,26 @@ RUN apk add --no-cache openssl
 RUN npx prisma generate
 RUN npm run build
 
+# Compile the custom server to an ESM bundle so prod runs it with plain `node`
+# (no tsx at runtime — tsx's require-hook breaks Next's own require-hook that
+# resolves AsyncLocalStorage across react-server/default export conditions).
+# Externals stay as runtime deps so their own module resolution (and Next's
+# hook) aren't bypassed by the bundler.
+RUN npm install --no-save esbuild && \
+    npx esbuild server.ts \
+      --bundle --platform=node --target=node20 --format=esm \
+      --outfile=server.mjs \
+      --external:next --external:next/* \
+      --external:next-auth --external:next-auth/* \
+      --external:@auth/prisma-adapter --external:@prisma/client \
+      --external:ws --external:nats
+
+# next has no `exports` field, so `import "next/server"` from next-auth's ESM
+# files fails under Node's strict ESM resolver. Rewrite those imports in-place
+# to include the `.js` extension so plain filesystem resolution works.
+RUN find node_modules/next-auth -name '*.js' -type f -exec \
+    sed -i -E 's#from "next/(server|headers|navigation|cache)"#from "next/\1.js"#g' {} +
+
 # ---- Production runner ----
 FROM node:20-alpine AS runner
 WORKDIR /app
@@ -46,20 +66,18 @@ RUN apk add --no-cache openssl python3 py3-pip openssh-client git && \
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Production Node.js dependencies (includes nats, ws, prisma runtime)
-COPY web/package.json web/package-lock.json ./
-COPY web/prisma ./prisma/
-RUN npm ci --omit=dev && npx prisma generate && \
-    chown -R nextjs:nodejs node_modules/.prisma node_modules/@prisma/engines
-
-# Next.js standalone output + static assets
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+# Copy full install from builder (includes the patched next/package.json).
+# We avoid Next.js standalone output because it trims node_modules and strips
+# next-auth's dependency on `next/server`.
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-
-# Custom TypeScript server (needs tsx + runtime deps above)
-COPY web/server.ts ./server.ts
-COPY web/lib ./lib
+COPY --from=builder /app/package.json /app/package-lock.json ./
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/server.mjs ./server.mjs
+COPY --from=builder /app/preload.cjs ./preload.cjs
+COPY --from=builder /app/next.config.* ./
+RUN chown -R nextjs:nodejs node_modules/.prisma node_modules/@prisma/engines
 
 # Ansible playbooks bundled into the image
 COPY ansible/ /opt/aura/ansible/
@@ -77,4 +95,4 @@ EXPOSE 3000
 ENV ANSIBLE_PLAYBOOKS_DIR=/opt/aura/ansible
 ENV AURA_AGENT_BINARY_DIR=/opt/aura
 
-CMD ["npx", "tsx", "server.ts"]
+CMD ["node", "-r", "./preload.cjs", "server.mjs"]

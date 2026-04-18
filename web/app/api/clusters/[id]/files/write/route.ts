@@ -82,7 +82,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   const marker = `__WRITE_${Date.now()}__`;
   const b64Lines = payload.match(/.{1,76}/g) ?? [payload];
-  const catBlock = b64Lines.map((l) => `echo "${l}"`).join("\n");
+  const catBlock = b64Lines.map((l: string) => `echo "${l}"`).join("\n");
   const script = `#!/bin/bash
 set +e
 echo "${marker}_START"
