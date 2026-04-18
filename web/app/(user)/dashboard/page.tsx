@@ -59,7 +59,7 @@ export default async function DashboardPage() {
       },
     }),
     prisma.job.findMany({
-      where: { userId, status: { in: ["PENDING", "RUNNING"] } },
+      where: { status: { in: ["PENDING", "RUNNING"] } },
       select: {
         id: true, status: true, createdAt: true, slurmJobId: true,
         cluster: { select: { id: true, name: true } },
@@ -76,16 +76,32 @@ export default async function DashboardPage() {
   const jobs24h = jobs7d.filter((j) => j.createdAt >= since24h);
   const buckets = Array.from({ length: 24 }, (_, i) => {
     const start = new Date(now.getTime() - (24 - i) * 60 * 60 * 1000);
-    return { hour: `${String(start.getHours()).padStart(2, "0")}:00`, running: 0, completed: 0, failed: 0 };
+    return {
+      hour: `${String(start.getHours()).padStart(2, "0")}:00`,
+      startMs: start.getTime(),
+      endMs: start.getTime() + 60 * 60 * 1000,
+      running: 0, completed: 0, failed: 0,
+    };
   });
+  // Terminal jobs are billed to the bucket of their createdAt.
   for (const j of jobs24h) {
+    if (j.status !== "COMPLETED" && j.status !== "FAILED" && j.status !== "CANCELLED") continue;
     const diffHours = Math.floor((now.getTime() - j.createdAt.getTime()) / 3600_000);
     const idx = 23 - diffHours;
     if (idx < 0 || idx > 23) continue;
     const b = buckets[idx];
-    if (j.status === "RUNNING" || j.status === "PENDING") b.running += 1;
-    else if (j.status === "COMPLETED") b.completed += 1;
-    else if (j.status === "FAILED" || j.status === "CANCELLED") b.failed += 1;
+    if (j.status === "COMPLETED") b.completed += 1;
+    else b.failed += 1;
+  }
+  // Live jobs (cluster-wide) are counted in every bucket where they were
+  // actually running — so a long-lived vLLM submitted yesterday shows as a
+  // flat "1" across all 24 hours, not as 0.
+  for (const j of liveJobs) {
+    const startedMs = j.createdAt.getTime();
+    for (const b of buckets) {
+      if (b.endMs <= startedMs) continue; // job hadn't started yet
+      b.running += 1;
+    }
   }
   const last24Totals = buckets.reduce(
     (acc, b) => ({ running: acc.running + b.running, completed: acc.completed + b.completed, failed: acc.failed + b.failed }),
@@ -328,7 +344,7 @@ export default async function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">My live queue</CardTitle>
+            <CardTitle className="text-sm font-medium">Live queue</CardTitle>
           </CardHeader>
           <CardContent>
             {liveQueue.length === 0 ? (
