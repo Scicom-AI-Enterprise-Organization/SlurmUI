@@ -279,7 +279,11 @@ async function pollCluster(clusterId: string): Promise<void> {
   }
 
   // ── Reconcile job state with DB (catches transitions when no watcher is attached) ──
-  // Jobs that DB thinks are RUNNING/PENDING but squeue doesn't know → mark finished.
+  // Two passes:
+  //  (1) DB says PENDING/RUNNING + squeue says nothing → terminal.
+  //  (2) DB says terminal but squeue still has the job RUNNING/PENDING → revive
+  //      it. Catches false-COMPLETEs from the watcher's empty-squeue heuristic
+  //      after web restarts / SSH blips.
   try {
     const inflight = await prisma.job.findMany({
       where: { clusterId, status: { in: ["PENDING", "RUNNING"] }, slurmJobId: { not: null } },
@@ -307,6 +311,38 @@ async function pollCluster(clusterId: string): Promise<void> {
         if (mapped && mapped !== j.status) {
           await prisma.job.update({ where: { id: j.id }, data: { status: mapped } }).catch(() => {});
         }
+      }
+    }
+
+    // Pass 2: drive from the live squeue snapshot — anything Slurm currently
+    // sees as RUNNING/PENDING but the DB has marked terminal gets revived.
+    // O(squeue size), no time-window, catches stale rows of any age.
+    const liveIds = [...jobStateById.entries()]
+      .filter(([, st]) => st === "RUNNING" || st === "PENDING")
+      .map(([sid]) => parseInt(sid, 10))
+      .filter((n) => Number.isFinite(n));
+    if (liveIds.length > 0) {
+      const stale = await prisma.job.findMany({
+        where: {
+          clusterId,
+          slurmJobId: { in: liveIds },
+          status: { in: ["COMPLETED", "FAILED", "CANCELLED"] },
+        },
+        select: { id: true, slurmJobId: true, status: true },
+      });
+      for (const j of stale) {
+        const sState = jobStateById.get(String(j.slurmJobId));
+        const mapped = sState === "RUNNING" ? "RUNNING" : "PENDING";
+        await prisma.job.update({
+          where: { id: j.id },
+          data: { status: mapped, exitCode: null },
+        }).catch(() => {});
+        logAudit({
+          action: "job.revived",
+          entity: "Job",
+          entityId: j.id,
+          metadata: { ...meta, slurmJobId: j.slurmJobId, from: j.status, to: mapped, via: "health-monitor" },
+        });
       }
     }
   } catch (err) {
