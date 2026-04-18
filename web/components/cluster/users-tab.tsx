@@ -28,29 +28,37 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Plus, UserPlus, Trash2 } from "lucide-react";
+import { Loader2, Plus, UserPlus, Trash2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 interface ClusterUserRow {
   id: string;
   status: "PENDING" | "ACTIVE" | "FAILED" | "REMOVED";
   provisionedAt: string | null;
-  user: { id: string; email: string; name: string | null; unixUid: number | null };
+  user: { id: string; email: string; name: string | null; unixUid: number | null; unixUsername: string | null };
+}
+
+interface SlurmUserRow {
+  user: string;
+  uid: number | null;
+  home: string | null;
+  shell: string | null;
+  linuxPresent: boolean;
+  slurmPresent: boolean;
+  defaultAccount: string;
+  defaultQos: string;
+  admin: string;
 }
 
 interface AllUser { id: string; email: string; name: string | null }
 
 interface UsersTabProps { clusterId: string }
 
-function StatusBadge({ status }: { status: string }) {
-  if (status === "ACTIVE") return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Active</Badge>;
-  if (status === "FAILED") return <Badge variant="destructive">Failed</Badge>;
-  if (status === "REMOVED") return <Badge variant="secondary">Removed</Badge>;
-  return <Badge variant="outline">Pending</Badge>;
-}
-
 export function UsersTab({ clusterId }: UsersTabProps) {
   const [clusterUsers, setClusterUsers] = useState<ClusterUserRow[]>([]);
+  const [slurmUsers, setSlurmUsers] = useState<SlurmUserRow[]>([]);
+  const [slurmLoading, setSlurmLoading] = useState(false);
+  const [slurmErr, setSlurmErr] = useState<string | null>(null);
   const [allUsers, setAllUsers] = useState<AllUser[]>([]);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [running, setRunning] = useState(false);
@@ -72,8 +80,27 @@ export function UsersTab({ clusterId }: UsersTabProps) {
       .then(setClusterUsers)
       .catch(() => {});
 
+  const fetchSlurmUsers = async () => {
+    setSlurmLoading(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/slurm-users`);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setSlurmUsers(d.users ?? []);
+      setSlurmErr(null);
+    } catch (e) {
+      setSlurmErr(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setSlurmLoading(false);
+    }
+  };
+
+  const refresh = async () => {
+    await Promise.all([fetchClusterUsers(), fetchSlurmUsers()]);
+  };
+
   useEffect(() => {
-    fetchClusterUsers();
+    refresh();
     fetch("/api/users")
       .then((r) => r.json())
       .then(setAllUsers)
@@ -99,13 +126,13 @@ export function UsersTab({ clusterId }: UsersTabProps) {
           setLogStatus("success");
           clearInterval(poll);
           setRunning(false);
-          fetchClusterUsers();
+          refresh();
           onDone?.();
         } else if (task.status === "failed") {
           setLogStatus("failed");
           clearInterval(poll);
           setRunning(false);
-          fetchClusterUsers();
+          refresh();
           onDone?.();
         }
       } catch {}
@@ -136,7 +163,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
               body: JSON.stringify({ status: "FAILED" }),
             });
           }
-          fetchClusterUsers();
+          refresh();
         }
       } catch {}
     };
@@ -206,12 +233,12 @@ export function UsersTab({ clusterId }: UsersTabProps) {
             setRemoveLogStatus("success");
             clearInterval(poll);
             setRemoving(null);
-            fetchClusterUsers();
+            refresh();
           } else if (t.status === "failed") {
             setRemoveLogStatus("failed");
             clearInterval(poll);
             setRemoving(null);
-            fetchClusterUsers();
+            refresh();
           }
         } catch {}
       }, 2000);
@@ -226,7 +253,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
             setRemoveLogStatus(ev.success ? "success" : "failed");
             evt.close();
             setRemoving(null);
-            fetchClusterUsers();
+            refresh();
           }
         } catch {}
       };
@@ -238,7 +265,7 @@ export function UsersTab({ clusterId }: UsersTabProps) {
     } else {
       setRemoveLogStatus("success");
       setRemoving(null);
-      fetchClusterUsers();
+      refresh();
     }
   };
 
@@ -250,6 +277,10 @@ export function UsersTab({ clusterId }: UsersTabProps) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-end gap-2">
+        <Button variant="outline" onClick={refresh} disabled={slurmLoading}>
+          <RefreshCw className={`mr-2 h-4 w-4 ${slurmLoading ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
         <Button onClick={() => setDialogOpen(true)}>
           <UserPlus className="mr-2 h-4 w-4" />
           Add User
@@ -330,56 +361,85 @@ export function UsersTab({ clusterId }: UsersTabProps) {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">
-            Users ({clusterUsers.filter((c) => c.status !== "REMOVED").length})
-          </CardTitle>
+          <CardTitle className="text-base">Users on cluster ({slurmUsers.length})</CardTitle>
         </CardHeader>
         <CardContent>
-          {clusterUsers.length === 0 ? (
+          {slurmErr && <p className="text-sm text-destructive mb-3">{slurmErr}</p>}
+          {slurmUsers.length === 0 && !slurmLoading ? (
             <p className="text-center text-muted-foreground py-6">
-              No users provisioned yet. Add cluster users to give them Linux
-              accounts, NFS homes, and Slurm accounting entries.
+              No Linux users (uid ≥ 1000) and no Slurm accounting entries on the controller.
+              Add a user here to provision one into both.
             </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>User</TableHead>
-                  <TableHead className="w-[100px]">UID</TableHead>
-                  <TableHead className="w-[120px]">Status</TableHead>
-                  <TableHead className="w-[140px]">Provisioned</TableHead>
+                  <TableHead>Username</TableHead>
+                  <TableHead className="w-[80px]">UID</TableHead>
+                  <TableHead>Home</TableHead>
+                  <TableHead className="w-[120px]">Presence</TableHead>
+                  <TableHead>Default account</TableHead>
+                  <TableHead className="w-[100px]">Admin</TableHead>
                   <TableHead className="w-[80px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {clusterUsers.map((cu) => (
-                  <TableRow key={cu.id}>
-                    <TableCell>
-                      <div className="text-sm">{cu.user.name ?? cu.user.email}</div>
-                      <div className="text-xs text-muted-foreground">{cu.user.email}</div>
-                    </TableCell>
-                    <TableCell className="font-mono text-sm">{cu.user.unixUid ?? "—"}</TableCell>
-                    <TableCell><StatusBadge status={cu.status} /></TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {cu.provisionedAt ? new Date(cu.provisionedAt).toLocaleDateString() : "—"}
-                    </TableCell>
-                    <TableCell>
-                      {cu.status !== "REMOVED" && (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          title="Remove user"
-                          onClick={() => setConfirmRemove(cu)}
-                          disabled={removing === cu.user.id}
-                        >
-                          {removing === cu.user.id
-                            ? <Loader2 className="h-4 w-4 animate-spin" />
-                            : <Trash2 className="h-4 w-4 text-destructive" />}
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {slurmUsers.map((s) => {
+                  // Match Slurm/Linux rows back to a DB ClusterUser so the
+                  // existing DELETE flow (which expects a Prisma User id) keeps
+                  // working. Drifted rows (Slurm-only / Linux-only) show an
+                  // "unmanaged" tag and no remove button — admin can still
+                  // clean them up on the controller.
+                  const cu = clusterUsers.find(
+                    (c) => c.user.unixUsername === s.user && c.status !== "REMOVED",
+                  );
+                  const presence = [
+                    s.linuxPresent ? "linux" : null,
+                    s.slurmPresent ? "slurm" : null,
+                  ].filter(Boolean).join(" + ") || "none";
+                  const drifted = !cu;
+                  return (
+                    <TableRow key={s.user}>
+                      <TableCell>
+                        <div className="font-mono text-sm">{s.user}</div>
+                        {cu && (
+                          <div className="text-xs text-muted-foreground">{cu.user.email}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">{s.uid ?? "—"}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground truncate max-w-[200px]">
+                        {s.home ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="font-mono text-xs">
+                          {presence}
+                        </Badge>
+                        {drifted && (
+                          <Badge variant="secondary" className="ml-1 text-[10px]">unmanaged</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{s.defaultAccount || "—"}</TableCell>
+                      <TableCell className="font-mono text-xs">{s.admin || "—"}</TableCell>
+                      <TableCell>
+                        {cu ? (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            title="Remove user"
+                            onClick={() => setConfirmRemove(cu)}
+                            disabled={removing === cu.user.id}
+                          >
+                            {removing === cu.user.id
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <Trash2 className="h-4 w-4 text-destructive" />}
+                          </Button>
+                        ) : (
+                          <span className="text-[10px] text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
