@@ -14,9 +14,9 @@ export function PerClusterSplit({ data }: { data: Row[] }) {
   return (
     <div className="h-40 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 8, left: 0, bottom: 0 }} barSize={16}>
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 8, left: -20, bottom: 0 }} barSize={16}>
           <XAxis type="number" tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} axisLine={false} tickLine={false} allowDecimals={false} />
-          <YAxis type="category" dataKey="cluster" tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} axisLine={false} tickLine={false} width={90} />
+          <YAxis type="category" dataKey="cluster" tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} axisLine={false} tickLine={false} width={60} />
           <Tooltip
             cursor={{ fill: "var(--muted)" }}
             contentStyle={{
