@@ -99,6 +99,42 @@ echo "__VERSIONS_END__"
         exitCode: extracted ? 0 : null,
       };
 
+      // Merge undeployed config entries into the final node list. Nodes
+      // registered via /nodes/register but not yet installed won't appear in
+      // sinfo; this surfaces them so the UI can show a Deploy button. Also
+      // flips the `deployed` flag on sinfo-present rows.
+      const mergeUndeployed = (liveNodes: any[]) => {
+        const cfgNodes = ((cluster.config as Record<string, unknown>).slurm_nodes ?? []) as Array<Record<string, any>>;
+        const byName = new Map<string, Record<string, any>>();
+        for (const n of cfgNodes) {
+          const key = (n.expression ?? n.name) as string;
+          if (key) byName.set(key, n);
+        }
+        const live = liveNodes.map((n) => {
+          const cfg = byName.get(n.name);
+          const deployed = cfg?.deployed !== false;
+          byName.delete(n.name);
+          return { ...n, deployed };
+        });
+        for (const [name, cfg] of byName.entries()) {
+          if (cfg.deployed === false) {
+            live.push({
+              name,
+              state: "undeployed",
+              cpus: cfg.cpus ?? 0,
+              memory: cfg.memory_mb ?? 0,
+              gres: cfg.gpus ? `gpu:${cfg.gpus}` : "",
+              gpus: cfg.gpus ?? 0,
+              version: "",
+              ip: cfg.ip ?? "",
+              partitions: [],
+              deployed: false,
+            });
+          }
+        }
+        return live;
+      };
+
       // Fall back to DB if sinfo is unhappy (slurmctld down, package missing,
       // permission issue). Without this the UI shows "no nodes" and admins
       // can't even use Edit/Delete to recover. Detect both:
@@ -118,7 +154,7 @@ echo "__VERSIONS_END__"
           partitions: [],
         }));
         return NextResponse.json({
-          nodes,
+          nodes: mergeUndeployed(nodes),
           warning: "slurmctld unreachable — showing nodes from cluster config. State / CPUs / memory will be 0 until the controller is back.",
         });
       }
@@ -171,9 +207,9 @@ echo "__VERSIONS_END__"
                 });
               }
             }
-            return NextResponse.json({ nodes });
+            return NextResponse.json({ nodes: mergeUndeployed(nodes) });
           }
-          return NextResponse.json({ nodes: sinfo.nodes ?? [] });
+          return NextResponse.json({ nodes: mergeUndeployed(sinfo.nodes ?? []) });
         } catch (parseErr) {
           // JSON-looking but unparseable — surface the error instead of
           // falling through to the pipe parser (which would treat every
@@ -227,7 +263,7 @@ echo "__VERSIONS_END__"
         }
       }
 
-      return NextResponse.json({ nodes });
+      return NextResponse.json({ nodes: mergeUndeployed(nodes) });
     } catch (err) {
       return NextResponse.json({ error: `SSH failed: ${err instanceof Error ? err.message : "Unknown"}` }, { status: 504 });
     }

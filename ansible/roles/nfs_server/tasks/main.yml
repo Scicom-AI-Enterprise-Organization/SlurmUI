@@ -28,10 +28,24 @@
     owner: root
     group: root
     mode: '0644'
-  notify: reload nfs exports
+  register: _aura_exports
 
 - name: Enable and start NFS server
   ansible.builtin.service:
     name: nfs-kernel-server
     state: started
     enabled: true
+
+# Re-export immediately (not via handler). Handlers flush at end-of-play, but
+# the worker play starts the NFS-client mount before then — so we'd race and
+# clients would hit "access denied by server" against the in-memory table
+# nfsd still had from the last run.
+- name: Re-export NFS shares now
+  ansible.builtin.command: exportfs -ra
+  changed_when: true
+
+- name: Restart NFS server to pick up new exports
+  ansible.builtin.service:
+    name: nfs-kernel-server
+    state: restarted
+  when: _aura_exports.changed

@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
+import { buildEnableSlurmdbdScript } from "@/lib/accounting-script";
+import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
@@ -210,6 +212,36 @@ function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
         await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "bastion" } });
+        try {
+          await seedControllerAsNode({
+            clusterId,
+            taskId,
+            sshTarget: {
+              host: cluster.controllerHost,
+              user: cluster.sshUser,
+              port: cluster.sshPort,
+              privateKey: cluster.sshKey?.privateKey ?? "",
+              bastion: cluster.sshBastion,
+            },
+          });
+        } catch (e) {
+          await appendLog(taskId, `[aura] Controller auto-seed skipped: ${e instanceof Error ? e.message : "unknown"}`);
+        }
+        try {
+          await autoEnableAccounting({
+            clusterId,
+            taskId,
+            sshTarget: {
+              host: cluster.controllerHost,
+              user: cluster.sshUser,
+              port: cluster.sshPort,
+              privateKey: cluster.sshKey?.privateKey ?? "",
+              bastion: cluster.sshBastion,
+            },
+          });
+        } catch (e) {
+          await appendLog(taskId, `[aura] Accounting auto-enable skipped: ${e instanceof Error ? e.message : "unknown"}`);
+        }
       } else {
         await appendLog(taskId, "\n[aura] Bootstrap failed or was cancelled.");
       }
@@ -285,6 +317,43 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
         await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "ansible" } });
+
+        // The bootstrap playbook writes a self-registering NodeName placeholder
+        // into slurm.conf (so slurmctld can start with an empty cluster config).
+        // Mirror that placeholder into cluster.config so the UI "owns" the
+        // controller node the same way it owns Add-Node workers — without this
+        // the user has to Delete + Re-Add the controller after every bootstrap
+        // to get Edit / Delete / stats to work properly on it.
+        try {
+          await seedControllerAsNode({
+            clusterId,
+            taskId,
+            sshTarget: {
+              host: cluster.controllerHost,
+              user: cluster.sshUser,
+              port: cluster.sshPort,
+              privateKey: cluster.sshKey?.privateKey ?? "",
+              bastion: cluster.sshBastion,
+            },
+          });
+        } catch (e) {
+          await appendLog(taskId, `[aura] Controller auto-seed skipped: ${e instanceof Error ? e.message : "unknown"}`);
+        }
+        try {
+          await autoEnableAccounting({
+            clusterId,
+            taskId,
+            sshTarget: {
+              host: cluster.controllerHost,
+              user: cluster.sshUser,
+              port: cluster.sshPort,
+              privateKey: cluster.sshKey?.privateKey ?? "",
+              bastion: cluster.sshBastion,
+            },
+          });
+        } catch (e) {
+          await appendLog(taskId, `[aura] Accounting auto-enable skipped: ${e instanceof Error ? e.message : "unknown"}`);
+        }
       } else {
         await appendLog(taskId, `\n[aura] ansible-playbook exited with code ${code}`);
       }
@@ -345,4 +414,164 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 
   return NextResponse.json({ taskId: task.id });
+}
+
+// After bootstrap succeeds, probe the controller's hardware and seed a proper
+// entry in cluster.config.slurm_nodes + slurm_hosts_entries for it. This mirrors
+// what Add-Node does for workers — so after bootstrap the controller is already
+// a fully-tracked node, and the user doesn't need to Delete + Re-Add it to get
+// Edit / Memory / CPU stats right.
+async function seedControllerAsNode(args: {
+  clusterId: string;
+  taskId: string;
+  sshTarget: { host: string; user: string; port: number; privateKey: string; bastion: boolean };
+}) {
+  const { clusterId, taskId, sshTarget } = args;
+  if (!sshTarget.privateKey) return;
+
+  // Re-read the cluster so we don't clobber concurrent config edits.
+  const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
+  if (!fresh) return;
+  const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+  const hosts = (cfg.slurm_hosts_entries ?? []) as Array<Record<string, unknown>>;
+  const nodes = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown>>;
+  // If the user (or a previous bootstrap) already seeded something, don't overwrite.
+  if (nodes.length > 0) {
+    await appendLog(taskId, `[aura] Controller auto-seed skipped — cluster already has ${nodes.length} node(s) configured.`);
+    return;
+  }
+
+  // Probe the controller for its real hw: hostname, cpus, sockets, cores,
+  // threads, memory, and an Nvidia GPU count (best-effort).
+  const MARKER = `__SEED_${Date.now()}__`;
+  const probe = `
+echo "${MARKER}_START"
+echo "hostname=$(hostname)"
+echo "cpus=$(nproc --all)"
+LSCPU=$(lscpu 2>/dev/null)
+echo "sockets=$(echo "$LSCPU" | awk -F: '/^Socket\\(s\\):/ {gsub(/ /,"",$2); print $2}')"
+echo "cores_per_socket=$(echo "$LSCPU" | awk -F: '/^Core\\(s\\) per socket:/ {gsub(/ /,"",$2); print $2}')"
+echo "threads_per_core=$(echo "$LSCPU" | awk -F: '/^Thread\\(s\\) per core:/ {gsub(/ /,"",$2); print $2}')"
+echo "memory_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+echo "gpus=$(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
+echo "${MARKER}_END"
+`;
+  const chunks: string[] = [];
+  await new Promise<void>((resolve) => {
+    sshExecScript(sshTarget, probe, {
+      onStream: (line) => { if (!line.startsWith("[stderr]")) chunks.push(line); },
+      onComplete: () => resolve(),
+    });
+  });
+  const blob = chunks.join("\n");
+  const s = blob.indexOf(`${MARKER}_START`);
+  const e = blob.indexOf(`${MARKER}_END`);
+  if (s === -1 || e === -1) {
+    await appendLog(taskId, "[aura] Controller auto-seed skipped — could not probe hardware.");
+    return;
+  }
+  const body = blob.slice(s + MARKER.length + 6, e);
+  const kv: Record<string, string> = {};
+  for (const line of body.split("\n")) {
+    const m = line.match(/^([a-z_]+)=(.*)$/);
+    if (m) kv[m[1]] = m[2].trim();
+  }
+
+  const hostname = kv.hostname || sshTarget.host;
+  const cpus = parseInt(kv.cpus, 10) || 1;
+  const sockets = parseInt(kv.sockets, 10) || 1;
+  const cores = parseInt(kv.cores_per_socket, 10) || cpus;
+  const threads = parseInt(kv.threads_per_core, 10) || 1;
+  const memMb = parseInt(kv.memory_mb, 10) || 1024;
+  const gpus = parseInt(kv.gpus, 10) || 0;
+
+  hosts.push({
+    hostname,
+    ip: sshTarget.host,
+    user: sshTarget.user,
+    port: sshTarget.port,
+  });
+  nodes.push({
+    expression: hostname,
+    ip: sshTarget.host,
+    ssh_user: sshTarget.user,
+    ssh_port: sshTarget.port,
+    cpus,
+    gpus,
+    memory_mb: memMb,
+    sockets,
+    cores_per_socket: cores,
+    threads_per_core: threads,
+    role: "controller",
+  });
+
+  await prisma.cluster.update({
+    where: { id: clusterId },
+    data: {
+      config: {
+        ...cfg,
+        slurm_hosts_entries: hosts,
+        slurm_nodes: nodes,
+      } as never,
+    },
+  });
+
+  await appendLog(
+    taskId,
+    `[aura] Controller auto-seeded as node "${hostname}": ${cpus} CPU / ${sockets}S${cores}C${threads}T / ${memMb} MB / ${gpus} GPU`,
+  );
+}
+
+// Enable slurmdbd accounting as the final step of bootstrap. Installs MariaDB
+// and slurmdbd, switches slurm.conf to accounting_storage/slurmdbd, and
+// persists the generated DB password to cluster.config so the next bootstrap
+// doesn't undo it. Reuses an existing password if one was persisted earlier.
+async function autoEnableAccounting(args: {
+  clusterId: string;
+  taskId: string;
+  sshTarget: { host: string; user: string; port: number; privateKey: string; bastion?: any };
+}): Promise<void> {
+  const { clusterId, taskId, sshTarget } = args;
+
+  const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
+  if (!fresh) return;
+  const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+
+  const existingPass = (cfg.vault_slurmdbd_storage_pass as string) ?? "";
+  const dbPass = existingPass && existingPass.length > 0
+    ? existingPass
+    : randomUUID().replace(/-/g, "");
+  const clusterSlurmName = (cfg.slurm_cluster_name as string) ?? "aura-cluster";
+
+  const clusterUsers = await prisma.clusterUser.findMany({
+    where: { clusterId, status: "ACTIVE" },
+    include: { user: { select: { unixUsername: true, email: true } } },
+  });
+  const usernames = clusterUsers
+    .map((cu) => cu.user.unixUsername ?? cu.user.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_").toLowerCase())
+    .filter(Boolean);
+
+  const script = buildEnableSlurmdbdScript({ dbPass, clusterSlurmName, usernames });
+
+  await appendLog(taskId, "\n[aura] Auto-enabling Slurm accounting (slurmdbd)…");
+
+  const success: boolean = await new Promise((resolve) => {
+    sshExecScript(sshTarget, script, {
+      onStream: (line) => {
+        const trimmed = line.replace(/\r/g, "").trim();
+        if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
+          appendLog(taskId, trimmed);
+        }
+      },
+      onComplete: (ok) => resolve(ok),
+    });
+  });
+
+  if (success) {
+    cfg.vault_slurmdbd_storage_pass = dbPass;
+    await prisma.cluster.update({ where: { id: clusterId }, data: { config: cfg as never } });
+    await appendLog(taskId, "[aura] Slurm accounting enabled and persisted.");
+  } else {
+    await appendLog(taskId, "[aura] Slurm accounting auto-enable failed — you can retry via the Accounting tab.");
+  }
 }

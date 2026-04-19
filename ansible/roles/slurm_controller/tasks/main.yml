@@ -106,6 +106,15 @@
     mode: '0644'
   notify: restart slurmctld
 
+- name: Copy cgroup.conf to mgmt FS
+  ansible.builtin.copy:
+    src: "{{ slurm_config_dir }}/cgroup.conf"
+    dest: "{{ mgmt_nfs_path }}/cgroup.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+    remote_src: true
+
 - name: Write gres.conf (GPU nodes only)
   ansible.builtin.template:
     src: gres.conf.j2
@@ -117,6 +126,16 @@
   # so selectattr doesn't blow up before the gt comparison.
   when: (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0
   notify: restart slurmctld
+
+- name: Copy gres.conf to mgmt FS (GPU nodes only)
+  ansible.builtin.copy:
+    src: "{{ slurm_config_dir }}/gres.conf"
+    dest: "{{ mgmt_nfs_path }}/gres.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+    remote_src: true
+  when: (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0
 
 - name: Set permissions on slurm config directory
   ansible.builtin.file:

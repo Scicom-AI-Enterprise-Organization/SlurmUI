@@ -1,2 +1,7 @@
-{{ mgmt_nfs_path }} {{ nfs_allowed_network }}(rw,sync,no_subtree_check,no_root_squash)
-{{ data_nfs_path }} {{ nfs_allowed_network }}(rw,sync,no_subtree_check,no_root_squash)
+{# nfs-utils' interpretation of "0.0.0.0/0" varies by kernel/version — some
+   reject clients with "access denied by server" even though the CIDR matches.
+   Translate the wide-open default to "*" which every version handles. Any
+   other value (real subnet, hostname) passes through verbatim. #}
+{% set _nfs_mask = '*' if nfs_allowed_network in ['0.0.0.0/0', '0/0'] else nfs_allowed_network %}
+{{ mgmt_nfs_path }} {{ _nfs_mask }}(rw,sync,no_subtree_check,no_root_squash)
+{{ data_nfs_path }} {{ _nfs_mask }}(rw,sync,no_subtree_check,no_root_squash)

@@ -148,9 +148,7 @@ echo "Done at $(date)"`,
     gpus: 2,
     memoryGb: 64,
     time: "1-00:00:00",
-    command: `source /path/to/venv/bin/activate
-
-torchrun \\
+    command: `torchrun \\
   --nproc_per_node=\${SLURM_GPUS_ON_NODE:-2} \\
   --nnodes=\${SLURM_NNODES:-1} \\
   --node_rank=\${SLURM_NODEID:-0} \\
@@ -168,9 +166,7 @@ torchrun \\
     gpus: 2,
     memoryGb: 64,
     time: "0",
-    command: `source /path/to/venv/bin/activate
-
-vllm serve your-27b-model \\
+    command: `vllm serve your-27b-model \\
   --tensor-parallel-size 2 \\
   --dtype float16 \\
   --host 0.0.0.0 \\
@@ -290,8 +286,6 @@ echo "Done at $(date)"
 #SBATCH --mem=64G
 #SBATCH --time=1-00:00:00
 
-source /path/to/venv/bin/activate
-
 torchrun \\
   --nproc_per_node=\${SLURM_GPUS_ON_NODE:-2} \\
   --nnodes=\${SLURM_NNODES:-1} \\
@@ -310,8 +304,6 @@ torchrun \\
 #SBATCH --gres=gpu:2
 #SBATCH --mem=64G
 #SBATCH --time=0
-
-source /path/to/venv/bin/activate
 
 vllm serve your-27b-model \\
   --tensor-parallel-size 2 \\
@@ -914,7 +906,7 @@ export default function NewJobPage() {
                 <Label htmlFor="command">Command</Label>
                 <Textarea
                   id="command"
-                  placeholder={`source /path/to/venv/bin/activate\n\nvllm serve your-model \\\n  --tensor-parallel-size 2`}
+                  placeholder={`vllm serve your-model \\\n  --tensor-parallel-size 2`}
                   rows={10}
                   className="font-mono text-sm"
                   value={command}

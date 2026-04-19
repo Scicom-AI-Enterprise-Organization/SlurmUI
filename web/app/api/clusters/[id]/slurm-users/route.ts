@@ -76,20 +76,37 @@ echo "__SACCTMGR_END__"
       linuxByUser.set(name, rest);
     }
 
+    // Detect slurmdbd-not-configured so we can tell the UI to hide the column
+    // entirely instead of letting error text become fake user rows.
+    const slurmAccountingDown =
+      /Only 'accounting_storage\/slurmdbd' is supported|not running a supported accounting_storage plugin|Unable to contact slurm controller|slurm_persist_conn_open/i
+        .test(sacctBlock);
+
     const slurmByUser = new Map<string, { defaultAccount: string; defaultQos: string; admin: string }>();
-    for (const rawLine of sacctBlock.split("\n")) {
-      const line = rawLine.replace(/\r/g, "").trim();
-      if (!line) continue;
-      const [user, defaultAccount, defaultQos, admin] = line.split("|").map(clean);
-      if (!user) continue;
-      // Skip the occasional header row some sacctmgr builds emit even with -n.
-      if (user.toLowerCase() === "user") continue;
-      if (slurmByUser.has(user)) continue;
-      slurmByUser.set(user, {
-        defaultAccount: defaultAccount ?? "",
-        defaultQos: defaultQos ?? "",
-        admin: admin ?? "",
-      });
+    if (!slurmAccountingDown) {
+      for (const rawLine of sacctBlock.split("\n")) {
+        const line = rawLine.replace(/\r/g, "").trim();
+        if (!line) continue;
+        // sacctmgr -P outputs exactly 4 pipe-delimited fields. Error/warning
+        // lines printed to stdout (via 2>&1) have 0 pipes — reject anything
+        // that doesn't match the expected shape so messages like
+        // "Only 'accounting_storage/slurmdbd' is supported." don't get
+        // mistaken for a username.
+        if ((line.match(/\|/g) ?? []).length < 3) continue;
+        const [user, defaultAccount, defaultQos, admin] = line.split("|").map(clean);
+        if (!user) continue;
+        // Reject lines whose "user" field contains whitespace, quotes, or
+        // sentence punctuation — sacctmgr usernames never do.
+        if (/[\s'"().]/.test(user)) continue;
+        // Skip the occasional header row some sacctmgr builds emit even with -n.
+        if (user.toLowerCase() === "user") continue;
+        if (slurmByUser.has(user)) continue;
+        slurmByUser.set(user, {
+          defaultAccount: defaultAccount ?? "",
+          defaultQos: defaultQos ?? "",
+          admin: admin ?? "",
+        });
+      }
     }
 
     const users = new Set<string>();
@@ -113,7 +130,13 @@ echo "__SACCTMGR_END__"
       };
     });
 
-    return NextResponse.json({ users: rows });
+    return NextResponse.json({
+      users: rows,
+      accountingDown: slurmAccountingDown,
+      warning: slurmAccountingDown
+        ? "slurmdbd accounting is not configured on this cluster — Slurm presence columns are unavailable."
+        : undefined,
+    });
   } catch (err) {
     const e = err as { status?: number; message?: string };
     return NextResponse.json({ error: e.message ?? "Failed" }, { status: e.status ?? 500 });

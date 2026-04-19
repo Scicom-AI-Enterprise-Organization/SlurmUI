@@ -33,8 +33,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope, Pencil } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope, Pencil, ChevronDown, Layers } from "lucide-react";
 
 interface NodeInfo {
   name: string;
@@ -46,6 +53,7 @@ interface NodeInfo {
   version?: string;
   ip?: string;
   partitions: string[];
+  deployed?: boolean;
 }
 
 export default function NodesPage() {
@@ -97,7 +105,40 @@ export default function NodesPage() {
   const [nodeTestMsg, setNodeTestMsg] = useState("");
   const [detecting, setDetecting] = useState(false);
 
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+
+  // Bulk add state
+  type BulkRow = {
+    hostname: string;
+    ip: string;
+    user: string;
+    port: number;
+    status: "pending" | "testing" | "detecting" | "ok" | "adding" | "added" | "failed";
+    msg: string;
+    // Hardware detected during preview — reused at Start time so we don't
+    // re-probe.
+    cpus?: number;
+    gpus?: number;
+    memoryMb?: number;
+    sockets?: number;
+    coresPerSocket?: number;
+    threadsPerCore?: number;
+    taskId?: string;
+  };
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkDefaultUser, setBulkDefaultUser] = useState("root");
+  const [bulkDefaultPort, setBulkDefaultPort] = useState(22);
+  const [bulkConcurrency, setBulkConcurrency] = useState(4);
+  const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [previewRunning, setPreviewRunning] = useState(false);
+
   // Per-node action state
+  const [deployingNode, setDeployingNode] = useState<string | null>(null);
+  // nodeName → taskId map so clicking the spinning Deploy icon while a deploy
+  // is in flight re-opens the live log dialog pointing at the same task.
+  const [deployTasks, setDeployTasks] = useState<Record<string, string>>({});
   const [fixingNode, setFixingNode] = useState<string | null>(null);
   const [diagnosingNode, setDiagnosingNode] = useState<string | null>(null);
   const [syncingHosts, setSyncingHosts] = useState(false);
@@ -239,7 +280,9 @@ export default function NodesPage() {
   const handleAddNode = async () => {
     setAddingNode(true);
     try {
-      const res = await fetch(`/api/clusters/${clusterId}/nodes/add`, {
+      // Register only — no install. The row appears in the Nodes table with
+      // state=undeployed, and a Deploy button runs the actual install.
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -258,54 +301,12 @@ export default function NodesPage() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: "Failed" }));
-        toast.error(err.error ?? "Failed to start add-node");
+        toast.error(err.error ?? "Failed to register node");
         return;
       }
 
-      const data = await res.json();
       setAddDialogOpen(false);
-
-      if (data.taskId) {
-        // Background task mode: poll for logs (survives X close)
-        setSseLogTitle("Adding new node");
-        setSseLogLines([]);
-        setSseLogStatus("streaming");
-        setSseTaskId(data.taskId);
-        setSseCancelling(false);
-        setSseLogOpen(true);
-
-        const poll = setInterval(async () => {
-          try {
-            const taskRes = await fetch(`/api/tasks/${data.taskId}`);
-            if (!taskRes.ok) return;
-            const task = await taskRes.json();
-            setSseLogLines(task.logs ? task.logs.split("\n") : []);
-            if (task.status === "success" || task.status === "failed") {
-              clearInterval(poll);
-              // Give any still-in-flight appendLog UPDATEs a beat to settle,
-              // then do one final refetch so the dialog always shows the
-              // *complete* step log — not just whatever the race left us.
-              setTimeout(async () => {
-                try {
-                  const finalRes = await fetch(`/api/tasks/${data.taskId}`);
-                  if (finalRes.ok) {
-                    const finalTask = await finalRes.json();
-                    setSseLogLines(finalTask.logs ? finalTask.logs.split("\n") : []);
-                  }
-                } catch {}
-                setSseLogStatus(task.status === "success" ? "complete" : "error");
-                setSseTaskId(null);
-                setSseCancelling(false);
-                if (task.status === "success") fetchNodes();
-              }, 800);
-            }
-          } catch {}
-        }, 2000);
-      } else if (data.request_id) {
-        // NATS mode: open LiveLogDialog
-        setAddRequestId(data.request_id);
-        setAddLogOpen(true);
-      }
+      fetchNodes();
 
       setNewNodeName("");
       setNewNodeIp("");
@@ -375,6 +376,118 @@ export default function NodesPage() {
     } finally {
       setSavingEdit(false);
     }
+  };
+
+  // Deploy a registered-but-undeployed node by firing the full /nodes/add
+  // install flow. Specs come from cluster.config.slurm_nodes (populated by
+  // /register). Shows the same live-log dialog the single-node add used.
+  const handleDeployNode = async (nodeName: string) => {
+    setDeployingNode(nodeName);
+    try {
+      const cRes = await fetch(`/api/clusters/${clusterId}`);
+      const c = await cRes.json();
+      const cfg = (c.config ?? {}) as Record<string, unknown>;
+      const slurmNodes = ((cfg.slurm_nodes ?? []) as Array<Record<string, any>>);
+      const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName);
+      if (!n) {
+        toast.error(`No config entry for ${nodeName}`);
+        setDeployingNode(null);
+        return;
+      }
+
+      setSseLogTitle(`Deploying node: ${nodeName}`);
+      setSseLogLines([]);
+      setSseLogStatus("streaming");
+      setSseLogOpen(true);
+
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeName,
+          ip: n.ip,
+          sshUser: n.ssh_user || "root",
+          sshPort: n.ssh_port || 22,
+          cpus: n.cpus || 1,
+          gpus: n.gpus || 0,
+          memoryMb: n.memory_mb || 1024,
+          sockets: n.sockets || 1,
+          coresPerSocket: n.cores_per_socket || n.cpus || 1,
+          threadsPerCore: n.threads_per_core || 1,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSseLogLines((p) => [...p, `[error] ${err.error ?? `HTTP ${res.status}`}`]);
+        setSseLogStatus("error");
+        setDeployingNode(null);
+        return;
+      }
+      const data = await res.json();
+      if (!data.taskId) {
+        setSseLogStatus("complete");
+        setDeployingNode(null);
+        fetchNodes();
+        return;
+      }
+      setSseTaskId(data.taskId);
+      setDeployTasks((prev) => ({ ...prev, [nodeName]: data.taskId }));
+      const poll = setInterval(async () => {
+        try {
+          const tRes = await fetch(`/api/tasks/${data.taskId}`);
+          if (!tRes.ok) return;
+          const t = await tRes.json();
+          setSseLogLines(t.logs ? t.logs.split("\n") : []);
+          if (t.status === "success" || t.status === "failed") {
+            clearInterval(poll);
+            setTimeout(async () => {
+              try {
+                const finalRes = await fetch(`/api/tasks/${data.taskId}`);
+                if (finalRes.ok) {
+                  const ft = await finalRes.json();
+                  setSseLogLines(ft.logs ? ft.logs.split("\n") : []);
+                }
+              } catch {}
+              setSseLogStatus(t.status === "success" ? "complete" : "error");
+              setSseTaskId(null);
+              setDeployingNode(null);
+              setDeployTasks((prev) => {
+                const next = { ...prev };
+                delete next[nodeName];
+                return next;
+              });
+              fetchNodes();
+            }, 800);
+          }
+        } catch {}
+      }, 2000);
+    } catch (e) {
+      setSseLogLines((p) => [...p, `[error] ${e instanceof Error ? e.message : "Error"}`]);
+      setSseLogStatus("error");
+      setDeployingNode(null);
+    }
+  };
+
+  // Re-open the streaming log dialog for an in-flight deploy, without
+  // starting a new install. Used when the user closes the dialog and wants
+  // to check progress again by clicking the spinning Deploy icon.
+  const reopenDeployLog = async (nodeName: string) => {
+    const taskId = deployTasks[nodeName];
+    if (!taskId) return;
+    setSseLogTitle(`Deploying node: ${nodeName}`);
+    setSseLogLines([]);
+    setSseLogStatus("streaming");
+    setSseTaskId(taskId);
+    setSseLogOpen(true);
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`);
+      if (res.ok) {
+        const t = await res.json();
+        setSseLogLines(t.logs ? t.logs.split("\n") : []);
+        if (t.status === "success") setSseLogStatus("complete");
+        else if (t.status === "failed") setSseLogStatus("error");
+      }
+    } catch {}
   };
 
   const handleFixNode = async (nodeName: string) => {
@@ -655,11 +768,252 @@ export default function NodesPage() {
     fetchNodeLogs(nodeName, "slurmd");
   };
 
+  // Parse the bulk textarea into rows. Accepts:
+  //   ip                              (hostname auto-detected)
+  //   hostname  ip
+  //   hostname,ip
+  //   hostname,ip,user,port
+  // Blank lines and lines starting with # are ignored.
+  const isIp = (s: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s) || s.includes(":");
+  const parseBulk = (text: string, defUser: string, defPort: number): BulkRow[] => {
+    const rows: BulkRow[] = [];
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.includes(",") ? line.split(",").map((s) => s.trim()) : line.split(/\s+/);
+      let hostname = "";
+      let ip = "";
+      let user: string | undefined;
+      let port: string | undefined;
+      if (parts.length === 1) {
+        // Single token — must be an IP; hostname gets detected via SSH.
+        ip = parts[0];
+      } else {
+        [hostname, ip, user, port] = parts;
+        // If user put "ip hostname" instead of "hostname ip", swap.
+        if (!isIp(ip) && isIp(hostname)) [hostname, ip] = [ip, hostname];
+      }
+      if (!ip) continue;
+      rows.push({
+        hostname,
+        ip,
+        user: user || defUser,
+        port: port ? parseInt(port, 10) || defPort : defPort,
+        status: "pending",
+        msg: "",
+      });
+    }
+    return rows;
+  };
+
+  // Preview validates each row: SSH-tests, auto-detects hostname when missing,
+  // and probes hardware. A row is "ok" only after both calls succeed. Start is
+  // gated on every row being "ok" so you can't launch a bulk add against nodes
+  // that didn't pass validation.
+  const previewBulk = async () => {
+    const parsed = parseBulk(bulkText, bulkDefaultUser, bulkDefaultPort);
+    if (parsed.length === 0) {
+      toast.error("No valid rows to preview");
+      setBulkRows([]);
+      return;
+    }
+    setBulkRows(parsed);
+    setPreviewRunning(true);
+    try {
+      const queue = parsed.map((_, i) => i);
+      const conc = Math.max(1, Math.min(bulkConcurrency, queue.length));
+      const workers = Array.from({ length: conc }, async () => {
+        while (queue.length > 0) {
+          const idx = queue.shift();
+          if (idx === undefined) return;
+          const r = parsed[idx];
+          try {
+            patchRow(idx, { status: "testing", msg: "Testing SSH…" });
+            const testRes = await fetch(`/api/clusters/${clusterId}/nodes/test-ssh`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ip: r.ip, user: r.user, port: r.port }),
+            });
+            const testData = await testRes.json();
+            if (!testRes.ok || !testData.success) {
+              patchRow(idx, { status: "failed", msg: testData.error || "SSH test failed" });
+              continue;
+            }
+            if (!r.hostname) {
+              const detected = (testData.hostname || "").trim();
+              if (!detected) {
+                patchRow(idx, { status: "failed", msg: "Hostname not detected from SSH" });
+                continue;
+              }
+              r.hostname = detected;
+              patchRow(idx, { hostname: detected });
+            }
+
+            patchRow(idx, { status: "detecting", msg: "Detecting hardware…" });
+            const detRes = await fetch(`/api/clusters/${clusterId}/nodes/test-ssh`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ip: r.ip, user: r.user, port: r.port, detect: true }),
+            });
+            const det = await detRes.json();
+            if (!detRes.ok || !det.success) {
+              patchRow(idx, { status: "failed", msg: det.error || "Hardware detection failed" });
+              continue;
+            }
+
+            const memMb = det.memoryMb || (det.memoryGb ? det.memoryGb * 1024 : 0);
+            const patch: Partial<BulkRow> = {
+              status: "ok",
+              msg: `${det.cpus ?? "?"} CPU · ${det.gpus ?? 0} GPU · ${memMb ? Math.round(memMb / 1024) + " GB" : "?"}`,
+              cpus: det.cpus || 0,
+              gpus: det.gpus || 0,
+              memoryMb: memMb,
+              sockets: det.sockets || 1,
+              coresPerSocket: det.coresPerSocket || det.cpus || 1,
+              threadsPerCore: det.threadsPerCore || 1,
+            };
+            // Mutate the parsed row too so Start can use these values directly.
+            Object.assign(r, patch);
+            patchRow(idx, patch);
+          } catch (e) {
+            patchRow(idx, { status: "failed", msg: e instanceof Error ? e.message : "Error" });
+          }
+        }
+      });
+      await Promise.all(workers);
+    } finally {
+      setPreviewRunning(false);
+    }
+  };
+
+  // Update a single row in place without wiping progress on others. We keep the
+  // row array stable-by-index so the status table doesn't jump around.
+  const patchRow = (idx: number, patch: Partial<BulkRow>) => {
+    setBulkRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  };
+
+  // Bulk "Start" worker now just registers each row — install is triggered
+  // per-row via the Deploy button in the main nodes table.
+  const addOneBulk = async (idx: number, row: BulkRow) => {
+    try {
+      patchRow(idx, { status: "adding", msg: "Registering…" });
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeName: row.hostname,
+          ip: row.ip,
+          sshUser: row.user,
+          sshPort: row.port,
+          cpus: row.cpus || 0,
+          gpus: row.gpus || 0,
+          memoryMb: row.memoryMb || 0,
+          sockets: row.sockets || 1,
+          coresPerSocket: row.coresPerSocket || row.cpus || 1,
+          threadsPerCore: row.threadsPerCore || 1,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        patchRow(idx, { status: "failed", msg: data.error || `HTTP ${res.status}` });
+        return;
+      }
+      patchRow(idx, { status: "added", msg: "Registered — click Deploy on node row" });
+    } catch (e) {
+      patchRow(idx, { status: "failed", msg: e instanceof Error ? e.message : "Error" });
+    }
+  };
+
+  const runBulk = async () => {
+    if (bulkRows.length === 0 || bulkRows.some((r) => r.status !== "ok")) {
+      toast.error("Preview all rows and ensure every row is OK before starting");
+      return;
+    }
+    const rows = bulkRows;
+    setBulkRunning(true);
+    let failures = 0;
+    try {
+      // Register sequentially — parallel writes race on cluster.config, and
+      // even with Serializable Postgres would fail one of the txns. Register
+      // is cheap (no SSH, no install) so serial is fine.
+      for (let i = 0; i < rows.length; i++) {
+        await addOneBulk(i, rows[i]);
+      }
+      // Count post-run failures from state (addOneBulk uses patchRow which is
+      // async via setState, so read from latest rows via a flushSync-ish
+      // peek — simplest is to check after a microtask).
+      await new Promise((r) => setTimeout(r, 0));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Bulk add crashed");
+    } finally {
+      setBulkRunning(false);
+      fetchNodes();
+      // If every row ended up added, close the dialog and clear state so the
+      // next open is a clean slate. Leave it open if anything failed so the
+      // admin can read the error messages.
+      setBulkRows((curr) => {
+        failures = curr.filter((r) => r.status === "failed").length;
+        const allAdded = curr.length > 0 && curr.every((r) => r.status === "added");
+        if (allAdded) {
+          setBulkText("");
+          setBulkOpen(false);
+          return [];
+        }
+        return curr;
+      });
+      if (failures > 0) {
+        toast.error(`${failures} row(s) failed to register — see the dialog`);
+      }
+    }
+  };
+
+  // Open the same live-log dialog used by single add, but point it at a bulk
+  // row's taskId. Polls until terminal status, then freezes the dialog so the
+  // user can still scroll the final log.
+  const openBulkRowLogs = (row: BulkRow) => {
+    if (!row.taskId) {
+      toast.info("No task logs yet — row hasn't started adding");
+      return;
+    }
+    const taskId = row.taskId;
+    setSseLogTitle(`Adding ${row.hostname || row.ip}`);
+    setSseLogLines([]);
+    setSseLogStatus("streaming");
+    setSseTaskId(null); // no cancel button for historical rows
+    setSseLogOpen(true);
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`);
+        if (!res.ok) return;
+        const t = await res.json();
+        setSseLogLines(t.logs ? t.logs.split("\n") : []);
+        if (t.status === "success") {
+          clearInterval(poll);
+          setSseLogStatus("complete");
+        } else if (t.status === "failed") {
+          clearInterval(poll);
+          setSseLogStatus("error");
+        }
+      } catch {}
+    }, 1500);
+  };
+
+  const bulkStatusColor = (s: BulkRow["status"]) => {
+    switch (s) {
+      case "ok": return "bg-emerald-100 text-emerald-800";
+      case "added": return "bg-green-100 text-green-800";
+      case "failed": return "bg-red-100 text-red-800";
+      case "pending": return "bg-gray-100 text-gray-700";
+      default: return "bg-blue-100 text-blue-800";
+    }
+  };
+
   const stateColor = (state: string) => {
     const s = state.toLowerCase();
     if (s.includes("idle")) return "bg-green-100 text-green-800";
     if (s.includes("alloc") || s.includes("mix")) return "bg-blue-100 text-blue-800";
     if (s.includes("down") || s.includes("drain")) return "bg-red-100 text-red-800";
+    if (s === "undeployed") return "bg-amber-100 text-amber-800";
     return "bg-gray-100 text-gray-800";
   };
 
@@ -675,14 +1029,40 @@ export default function NodesPage() {
             {syncingHosts ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Server className="mr-2 h-4 w-4" />}
             Sync /etc/hosts
           </Button>
-          <Button
-            disabled={clusterStatus !== "ACTIVE"}
-            title={clusterStatus !== "ACTIVE" ? "Bootstrap the cluster first" : undefined}
-            onClick={() => setAddDialogOpen(true)}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Add Node
-          </Button>
+          <div className="relative">
+            <Button
+              disabled={clusterStatus !== "ACTIVE"}
+              title={clusterStatus !== "ACTIVE" ? "Bootstrap the cluster first" : undefined}
+              onClick={() => setAddMenuOpen((v) => !v)}
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              Add Node
+              <ChevronDown className="ml-2 h-4 w-4" />
+            </Button>
+            {addMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setAddMenuOpen(false)} />
+                <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-popover p-1 shadow-md">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                    onClick={() => { setAddMenuOpen(false); setAddDialogOpen(true); }}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Add one node
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                    onClick={() => { setAddMenuOpen(false); setBulkOpen(true); }}
+                  >
+                    <Layers className="h-4 w-4" />
+                    Bulk add…
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
             <DialogContent>
               <DialogHeader>
@@ -858,6 +1238,21 @@ export default function NodesPage() {
                     <TableCell>{node.partitions?.join(", ") ?? "-"}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
+                        {node.deployed === false && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-amber-700 dark:text-amber-400"
+                            title={deployingNode === node.name ? "Deploying — click to view log" : "Deploy (install slurmd)"}
+                            onClick={() => deployingNode === node.name
+                              ? reopenDeployLog(node.name)
+                              : handleDeployNode(node.name)}
+                          >
+                            {deployingNode === node.name
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <Zap className="h-4 w-4" />}
+                          </Button>
+                        )}
                         {node.state.toLowerCase().includes("future") && (
                           <Button
                             variant="ghost"
@@ -1113,6 +1508,109 @@ export default function NodesPage() {
               </div>
             ))}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk add dialog */}
+      <Dialog open={bulkOpen} onOpenChange={(o) => { if (!bulkRunning) setBulkOpen(o); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Bulk Add Nodes</DialogTitle>
+            <DialogDescription>
+              One node per line. Accepts <code className="font-mono">hostname ip</code>, <code className="font-mono">hostname,ip</code>, or <code className="font-mono">hostname,ip,user,port</code>.
+              Each row runs through Test-SSH → Detect → Add.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-[1fr_auto_auto] gap-3 items-end">
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Default SSH user</Label>
+                <Input value={bulkDefaultUser} onChange={(e) => setBulkDefaultUser(e.target.value)} disabled={bulkRunning} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Default port</Label>
+                <Input type="number" className="w-24" value={bulkDefaultPort}
+                  onChange={(e) => setBulkDefaultPort(parseInt(e.target.value, 10) || 22)} disabled={bulkRunning} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Parallel</Label>
+                <Input type="number" min={1} max={16} className="w-24" value={bulkConcurrency}
+                  onChange={(e) => setBulkConcurrency(parseInt(e.target.value, 10) || 1)} disabled={bulkRunning} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">Nodes ({bulkRows.length || "preview to count"})</Label>
+              <Textarea
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                placeholder={"10.0.0.11\n10.0.0.12\n# or with explicit hostname:\ngpu-1 10.0.0.13\ngpu-2,10.0.0.14,ubuntu,22"}
+                className="h-48 font-mono text-sm"
+                disabled={bulkRunning}
+              />
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={previewBulk} disabled={bulkRunning || previewRunning || !bulkText.trim()}>
+                  {previewRunning ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Validating…</> : "Preview & validate"}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={bulkRunning || previewRunning || bulkRows.length === 0}
+                  onClick={() => setBulkRows([])}>
+                  Clear preview
+                </Button>
+              </div>
+            </div>
+            {bulkRows.length > 0 && (
+              <div className="max-h-72 overflow-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-36">Hostname</TableHead>
+                      <TableHead className="w-36">IP</TableHead>
+                      <TableHead className="w-28">Status</TableHead>
+                      <TableHead>Message</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {bulkRows.map((r, i) => (
+                      <TableRow key={`${r.hostname}-${i}`}>
+                        <TableCell className="font-mono text-xs">{r.hostname}</TableCell>
+                        <TableCell className="font-mono text-xs">{r.ip}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={bulkStatusColor(r.status)}>
+                            {r.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{r.msg}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkRunning}>
+              Close
+            </Button>
+            {(() => {
+              const allOk = bulkRows.length > 0 && bulkRows.every((r) => r.status === "ok" || r.status === "added");
+              const anyNotAdded = bulkRows.some((r) => r.status === "ok");
+              const hint = bulkRows.length === 0
+                ? "Run Preview first"
+                : !allOk
+                  ? "All rows must pass preview (ok) before starting"
+                  : !anyNotAdded
+                    ? "All rows already added"
+                    : undefined;
+              return (
+                <Button
+                  onClick={runBulk}
+                  disabled={bulkRunning || previewRunning || !allOk || !anyNotAdded}
+                  title={hint}
+                >
+                  {bulkRunning ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Running…</> : "Add"}
+                </Button>
+              );
+            })()}
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

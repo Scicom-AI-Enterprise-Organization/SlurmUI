@@ -350,6 +350,22 @@ echo "============================================"
         if (success) {
           await appendLog(task.id, "\n[aura] Node added successfully.");
           logAudit({ action: "node.add", entity: "Cluster", entityId: id, metadata: { nodeName, ip, mode: "ssh" } });
+          // Flip deployed:true in cluster config so the UI hides the Deploy
+          // button on this row. Fetch fresh to avoid clobbering concurrent
+          // edits made while the install ran.
+          try {
+            const fresh = await prisma.cluster.findUnique({ where: { id } });
+            if (fresh) {
+              const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+              const list = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown>>;
+              const i = list.findIndex((n) => n.expression === nodeName || n.name === nodeName);
+              if (i >= 0) {
+                list[i] = { ...list[i], deployed: true };
+                cfg.slurm_nodes = list;
+                await prisma.cluster.update({ where: { id }, data: { config: cfg as any } });
+              }
+            }
+          } catch {}
         } else {
           await appendLog(task.id, "\n[aura] Add node failed or was cancelled.");
         }
