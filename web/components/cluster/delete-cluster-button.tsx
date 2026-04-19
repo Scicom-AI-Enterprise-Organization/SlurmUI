@@ -18,7 +18,9 @@ interface DeleteClusterButtonProps {
   clusterName: string;
 }
 
-type Phase = "idle" | "confirming" | "running" | "failed";
+type Phase = "idle" | "confirming" | "running" | "failed" | "succeeded";
+
+const ts = () => new Date().toLocaleTimeString(undefined, { hour12: false });
 
 export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterButtonProps) {
   const router = useRouter();
@@ -26,6 +28,10 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
   const [phase, setPhase] = useState<Phase>("idle");
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [exitCode, setExitCode] = useState<number | null>(null);
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [dbDeleteState, setDbDeleteState] = useState<"pending" | "running" | "done" | "failed">("pending");
+  const [dbDeleteErr, setDbDeleteErr] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -33,24 +39,51 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
   }, [logs]);
 
   const appendLog = (line: string) => {
-    setLogs((prev) => [...prev, line]);
+    setLogs((prev) => [...prev, `[${ts()}] ${line}`]);
   };
 
   const openDialog = () => {
     setPhase("confirming");
     setLogs([]);
     setError(null);
+    setExitCode(null);
+    setRequestId(null);
+    setDbDeleteState("pending");
+    setDbDeleteErr(null);
     setOpen(true);
   };
 
   const closeDialog = () => {
-    if (phase === "running") return;
+    if (phase === "running") return; // can't close mid-teardown
     setOpen(false);
     setPhase("idle");
   };
 
   const deleteDbRecord = async () => {
-    await fetch(`/api/clusters/${clusterId}`, { method: "DELETE" });
+    setDbDeleteState("running");
+    appendLog("[aura] DELETE /api/clusters/" + clusterId);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setDbDeleteState("failed");
+        setDbDeleteErr(d.error ?? `HTTP ${res.status}`);
+        appendLog(`[aura] DB delete failed: ${d.error ?? `HTTP ${res.status}`}`);
+        return false;
+      }
+      setDbDeleteState("done");
+      appendLog("[aura] Cluster record removed.");
+      return true;
+    } catch (e) {
+      setDbDeleteState("failed");
+      const msg = e instanceof Error ? e.message : "Network error";
+      setDbDeleteErr(msg);
+      appendLog(`[aura] DB delete failed: ${msg}`);
+      return false;
+    }
+  };
+
+  const goToList = () => {
     router.push("/admin/clusters");
     router.refresh();
   };
@@ -59,11 +92,18 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
     setPhase("running");
     setLogs([]);
     setError(null);
+    setExitCode(null);
+    setRequestId(null);
+    setDbDeleteState("pending");
+    setDbDeleteErr(null);
+
+    appendLog("[aura] POST /api/clusters/" + clusterId + "/teardown");
 
     const res = await fetch(`/api/clusters/${clusterId}/teardown`, { method: "POST" });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: "Teardown request failed" }));
-      setError(data.error ?? "Teardown request failed");
+      appendLog(`[aura] HTTP ${res.status}: ${data.error ?? "Teardown request failed"}`);
+      setError(data.error ?? `Teardown request failed (HTTP ${res.status})`);
       setPhase("failed");
       return;
     }
@@ -72,51 +112,58 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
 
     // SSH mode: teardown returns an SSE stream directly
     if (contentType.includes("text/event-stream") && res.body) {
+      appendLog("[aura] Streaming SSH teardown output...");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
 
-      const readStream = async () => {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? "";
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const event = JSON.parse(line.slice(6));
-              if (event.type === "stream") {
-                appendLog(event.line);
-              } else if (event.type === "complete") {
-                if (event.success) {
-                  appendLog("[aura] Removing cluster record...");
-                  await deleteDbRecord();
-                } else {
-                  setError(event.payload?.error ?? "Teardown failed");
-                  setPhase("failed");
-                }
-                return;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+            if (event.type === "stream") {
+              setLogs((prev) => [...prev, `[${ts()}] ${event.line}`]);
+            } else if (event.type === "complete") {
+              if (typeof event.payload?.exitCode === "number") setExitCode(event.payload.exitCode);
+              if (event.success) {
+                appendLog("[aura] Teardown finished (exit=0). Removing DB record...");
+                const ok = await deleteDbRecord();
+                setPhase(ok ? "succeeded" : "failed");
+                if (!ok) setError("Teardown OK but DB delete failed — see log.");
+              } else {
+                const msg = event.payload?.error ?? `Teardown failed (exit=${event.payload?.exitCode ?? "?"})`;
+                appendLog(`[aura] ${msg}`);
+                setError(msg);
+                setPhase("failed");
               }
-            } catch {}
+              return;
+            }
+          } catch (e) {
+            appendLog(`[aura] Failed to parse SSE: ${e instanceof Error ? e.message : "unknown"}`);
           }
         }
-      };
-
-      await readStream();
+      }
       return;
     }
 
     // NATS mode: teardown returns { request_id }, stream via EventSource
     const data = await res.json();
     const request_id = data.request_id;
+    setRequestId(request_id);
+    appendLog(`[aura] NATS teardown — request_id=${request_id}`);
 
     const evtSource = new EventSource(`/api/clusters/${clusterId}/stream/${request_id}`);
 
     const timeout = setTimeout(() => {
       evtSource.close();
+      appendLog("[aura] Stream timed out after 3 minutes — agent unreachable?");
       setError("Teardown timed out after 3 minutes — agent may be unreachable.");
       setPhase("failed");
     }, 3 * 60 * 1000);
@@ -125,30 +172,41 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
       try {
         const event = JSON.parse(e.data);
         if (event.type === "stream") {
-          appendLog(event.line);
+          setLogs((prev) => [...prev, `[${ts()}] ${event.line}`]);
         } else if (event.type === "complete") {
           clearTimeout(timeout);
           evtSource.close();
+          if (typeof event.payload?.exit_code === "number") setExitCode(event.payload.exit_code);
           if (event.success) {
-            appendLog("[aura] Removing cluster record...");
-            await deleteDbRecord();
+            appendLog("[aura] Agent reported success. Removing DB record...");
+            const ok = await deleteDbRecord();
+            setPhase(ok ? "succeeded" : "failed");
+            if (!ok) setError("Teardown OK but DB delete failed — see log.");
           } else {
-            setError(event.payload?.error ?? "Teardown failed");
+            const msg = event.payload?.error ?? "Teardown failed";
+            appendLog(`[aura] ${msg}`);
+            setError(msg);
             setPhase("failed");
           }
         }
-      } catch {}
+      } catch (parseErr) {
+        appendLog(`[aura] Failed to parse SSE: ${parseErr instanceof Error ? parseErr.message : "unknown"}`);
+      }
     };
     evtSource.onerror = () => {
       clearTimeout(timeout);
       evtSource.close();
+      appendLog("[aura] EventSource error — connection lost.");
       setError("Connection lost during teardown — agent may be offline.");
       setPhase("failed");
     };
   };
 
   const forceDelete = async () => {
-    await deleteDbRecord();
+    appendLog("[aura] Force delete (skipping cleanup)");
+    const ok = await deleteDbRecord();
+    setPhase(ok ? "succeeded" : "failed");
+    if (!ok) setError("Force delete failed — see log.");
   };
 
   return (
@@ -188,14 +246,22 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
             </>
           )}
 
-          {(phase === "running" || phase === "failed") && (
+          {(phase === "running" || phase === "failed" || phase === "succeeded") && (
             <>
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
                   {phase === "running" && <Loader2 className="h-4 w-4 animate-spin" />}
                   {phase === "failed" && <AlertTriangle className="h-4 w-4 text-destructive" />}
-                  {phase === "running" ? "Tearing down cluster…" : "Teardown failed"}
+                  {phase === "succeeded" && <Trash2 className="h-4 w-4 text-chart-2" />}
+                  {phase === "running" ? "Tearing down cluster…" :
+                   phase === "succeeded" ? `Cluster "${clusterName}" deleted` :
+                   "Teardown failed"}
                 </DialogTitle>
+                <DialogDescription>
+                  {requestId && <span className="font-mono text-[11px]">request_id: {requestId}</span>}
+                  {requestId && (exitCode !== null) && " · "}
+                  {exitCode !== null && <span className="font-mono text-[11px]">exit code: {exitCode}</span>}
+                </DialogDescription>
               </DialogHeader>
 
               <div
@@ -213,23 +279,55 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
 
               {phase === "failed" && error && (
                 <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                  {error}
+                  <p className="font-semibold mb-1">Error</p>
+                  <p className="font-mono text-xs whitespace-pre-wrap break-all">{error}</p>
+                  {dbDeleteState === "failed" && dbDeleteErr && (
+                    <p className="mt-2 font-mono text-xs whitespace-pre-wrap break-all">DB: {dbDeleteErr}</p>
+                  )}
                 </div>
               )}
 
-              {phase === "failed" && (
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => { setPhase("confirming"); setLogs([]); setError(null); }}
-                  >
-                    Retry Teardown
-                  </Button>
-                  <Button variant="destructive" onClick={forceDelete}>
-                    Force Delete (skip cleanup)
-                  </Button>
-                </DialogFooter>
+              {phase === "succeeded" && (
+                <div className="rounded-md border border-chart-2/40 bg-chart-2/5 px-3 py-2 text-sm">
+                  Teardown finished cleanly and the cluster record was removed.
+                  Click <strong>Done</strong> to return to the cluster list.
+                </div>
               )}
+
+              <DialogFooter className="flex-row justify-between sm:justify-between">
+                <Button
+                  variant="ghost" size="sm"
+                  onClick={() => navigator.clipboard?.writeText(logs.join("\n"))}
+                  disabled={logs.length === 0}
+                >
+                  Copy log
+                </Button>
+                <div className="flex gap-2">
+                  {phase === "failed" && (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={() => { setPhase("confirming"); setLogs([]); setError(null); setExitCode(null); setRequestId(null); }}
+                      >
+                        Retry Teardown
+                      </Button>
+                      <Button variant="destructive" onClick={forceDelete}>
+                        Force Delete (skip cleanup)
+                      </Button>
+                    </>
+                  )}
+                  {phase === "succeeded" && (
+                    <Button variant="default" onClick={() => { setOpen(false); goToList(); }}>
+                      Done
+                    </Button>
+                  )}
+                  {phase !== "running" && (
+                    <Button variant="outline" onClick={closeDialog}>
+                      {phase === "succeeded" ? "Stay here" : "Close"}
+                    </Button>
+                  )}
+                </div>
+              </DialogFooter>
             </>
           )}
         </DialogContent>

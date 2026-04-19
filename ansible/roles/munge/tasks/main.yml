@@ -15,21 +15,49 @@
     group: "{{ munge_group }}"
     mode: '0711'
 
-# Controller: generate key if not already in /mgmt
-- name: Check if munge key exists in mgmt FS
+# Controller key handling has three cases:
+#   1. /etc/munge/munge.key exists  → leave it alone
+#   2. /mgmt/munge.key exists, local missing → copy from mgmt
+#   3. neither exists → generate locally + copy to mgmt
+# Previously the role only checked the mgmt copy and skipped generation when
+# it existed — leaving a missing local key after teardown's selective wipe.
+- name: Stat existing munge key (controller)
   ansible.builtin.stat:
-    path: "{{ mgmt_nfs_path }}/munge.key"
-  register: mgmt_munge_key
+    path: "{{ item }}"
+  register: munge_key_stat
+  loop:
+    - "{{ mgmt_nfs_path }}/munge.key"
+    - /etc/munge/munge.key
   when: inventory_hostname in groups['slurm_controllers']
 
-- name: Generate munge key on controller
+- name: Set munge key presence facts
+  ansible.builtin.set_fact:
+    munge_in_mgmt: "{{ munge_key_stat.results[0].stat.exists | default(false) }}"
+    munge_in_local: "{{ munge_key_stat.results[1].stat.exists | default(false) }}"
+  when: inventory_hostname in groups['slurm_controllers']
+
+- name: Copy munge key from mgmt FS to /etc/munge (recover local copy)
+  ansible.builtin.copy:
+    src: "{{ mgmt_nfs_path }}/munge.key"
+    dest: /etc/munge/munge.key
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+    remote_src: true
+  when:
+    - inventory_hostname in groups['slurm_controllers']
+    - munge_in_mgmt
+    - not munge_in_local
+
+- name: Generate munge key on controller (no copy anywhere)
   ansible.builtin.command: mungekey --create --keyfile /etc/munge/munge.key
   become_user: "{{ munge_user }}"
   args:
     creates: /etc/munge/munge.key
   when:
     - inventory_hostname in groups['slurm_controllers']
-    - not mgmt_munge_key.stat.exists
+    - not munge_in_mgmt
+    - not munge_in_local
 
 - name: Set munge key permissions
   ansible.builtin.file:
@@ -39,7 +67,7 @@
     mode: '0400'
   when: inventory_hostname in groups['slurm_controllers']
 
-- name: Copy munge key to mgmt FS
+- name: Copy munge key to mgmt FS (only when we generated a fresh one)
   ansible.builtin.copy:
     src: /etc/munge/munge.key
     dest: "{{ mgmt_nfs_path }}/munge.key"
@@ -49,7 +77,7 @@
     remote_src: true
   when:
     - inventory_hostname in groups['slurm_controllers']
-    - not mgmt_munge_key.stat.exists
+    - not munge_in_mgmt
 
 # Workers: copy key from /mgmt
 - name: Copy munge key from mgmt FS on workers

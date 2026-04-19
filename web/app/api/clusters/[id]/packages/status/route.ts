@@ -55,7 +55,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   const checks = targets.map((w) => {
     const u = w.user || "root";
     const p = w.port || 22;
-    return `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} 'for pkg in ${pkgList}; do (dpkg -s "$pkg" >/dev/null 2>&1 || rpm -q "$pkg" >/dev/null 2>&1) && echo "${w.hostname}|$pkg|installed" || echo "${w.hostname}|$pkg|missing"; done' 2>/dev/null`;
+    return `ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} 'for pkg in ${pkgList}; do (dpkg -s "$pkg" >/dev/null 2>&1 || rpm -q "$pkg" >/dev/null 2>&1) && echo "${w.hostname}|$pkg|installed" || echo "${w.hostname}|$pkg|missing"; done' 2>/dev/null`;
   }).join("; ");
 
   const script = `echo "${marker}_START"; ${checks}; echo "${marker}_END"`;

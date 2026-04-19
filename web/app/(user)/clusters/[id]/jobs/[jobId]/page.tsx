@@ -19,7 +19,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { XCircle, RefreshCw, RotateCw } from "lucide-react";
+import { XCircle, RefreshCw, RotateCw, Repeat2 } from "lucide-react";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 
 interface JobDetail {
@@ -56,6 +56,33 @@ export default function JobDetailPage() {
   const [stderrMerged, setStderrMerged] = useState<string | null>(null);
   const [stderrLoading, setStderrLoading] = useState(false);
   const [resyncing, setResyncing] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [restartResult, setRestartResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const handleRestart = async () => {
+    if (!job?.slurmJobId) return;
+    setConfirmRestart(false);
+    setRestarting(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/slurm-control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slurmJobId: String(job.slurmJobId), action: "requeue" }),
+      });
+      const d = await res.json();
+      const ok = res.ok && d.success !== false;
+      setRestartResult({
+        ok,
+        message: d.output || d.error || (ok ? "Job requeued." : `HTTP ${res.status}`),
+      });
+      if (ok) fetchJob();
+    } catch (e) {
+      setRestartResult({ ok: false, message: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   const resync = async () => {
     setResyncing(true);
@@ -220,6 +247,18 @@ export default function JobDetailPage() {
               title="Re-query Slurm and overwrite the stored status">
               <RotateCw className={`mr-2 h-3 w-3 ${resyncing ? "animate-spin" : ""}`} />
               {resyncing ? "Resyncing..." : "Resync state"}
+            </Button>
+          )}
+          {job.slurmJobId && (job.status === "RUNNING" || job.status === "COMPLETED" || job.status === "FAILED" || job.status === "CANCELLED") && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmRestart(true)}
+              disabled={restarting}
+              title="Requeue the job — Slurm kills any running processes and puts it back in the queue"
+            >
+              <Repeat2 className={`mr-2 h-3 w-3 ${restarting ? "animate-spin" : ""}`} />
+              {restarting ? "Restarting..." : "Restart"}
             </Button>
           )}
           {isRunning && (
@@ -406,6 +445,45 @@ export default function JobDetailPage() {
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCancelResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm restart dialog */}
+      <Dialog open={confirmRestart} onOpenChange={setConfirmRestart}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restart this job?</DialogTitle>
+            <DialogDescription>
+              Runs <code>scontrol requeue {job.slurmJobId}</code>. Slurm kills any currently-running
+              processes and puts the job back in the queue with the same ID. Output file gets
+              truncated unless the script uses <code>#SBATCH --open-mode=append</code>. Requires
+              the job to be requeueable (default for most partitions).
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmRestart(false)}>Cancel</Button>
+            <Button onClick={handleRestart} disabled={restarting}>
+              <Repeat2 className="mr-2 h-4 w-4" />
+              Restart
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restart result dialog */}
+      <Dialog open={!!restartResult} onOpenChange={(o) => { if (!o) setRestartResult(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={restartResult?.ok ? "" : "text-destructive"}>
+              {restartResult?.ok ? "Job requeued" : "Restart failed"}
+            </DialogTitle>
+          </DialogHeader>
+          <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            {restartResult?.message}
+          </pre>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRestartResult(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -5,6 +5,11 @@
       - slurmctld
       - slurmdbd
       - slurm-client
+      # slurmd lives here too — single-VM bootstraps register the controller
+      # itself as a node, and on real clusters the controller often runs jobs
+      # as well, so installing slurmd unconditionally makes the placeholder
+      # node usable out of the box.
+      - slurmd
       - munge
       - libmunge-dev
     state: present
@@ -17,27 +22,34 @@
       - python3-mysqldb
     state: present
     update_cache: true
+  # Only needed when slurmdbd accounting is enabled. Skipping saves install
+  # time and avoids the mysql.service failure on systems where the package
+  # ships in a half-broken state (e.g. apparmor + missing libs on 24.04).
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
 
 - name: Enable and start MySQL
   ansible.builtin.service:
     name: mysql
     state: started
     enabled: true
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
 
 - name: Create slurm accounting database
   community.mysql.mysql_db:
     name: "{{ slurmdbd_storage_db }}"
     state: present
     login_unix_socket: /var/run/mysqld/mysqld.sock
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
 
 - name: Create slurm MySQL user
   community.mysql.mysql_user:
     name: "{{ slurmdbd_storage_user }}"
-    password: "{{ slurmdbd_storage_pass }}"
+    password: "{{ slurmdbd_storage_pass | default(vault_slurmdbd_storage_pass) }}"
     priv: "{{ slurmdbd_storage_db }}.*:ALL"
     host: localhost
     state: present
     login_unix_socket: /var/run/mysqld/mysqld.sock
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
 
 - name: Create slurm directories
   ansible.builtin.file:
@@ -76,7 +88,14 @@
     owner: "{{ slurm_user }}"
     group: "{{ slurm_group }}"
     mode: '0600'
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
   notify: restart slurmdbd
+
+- name: Remove stale slurmdbd.conf when accounting disabled
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}/slurmdbd.conf"
+    state: absent
+  when: vault_slurmdbd_storage_pass | default('') | length == 0
 
 - name: Write cgroup.conf
   ansible.builtin.template:
@@ -94,7 +113,9 @@
     owner: "{{ slurm_user }}"
     group: "{{ slurm_group }}"
     mode: '0644'
-  when: slurm_nodes | selectattr('gpus', 'gt', 0) | list | length > 0
+  # Guard against entries that lack `gpus` (e.g. stub rows from Edit-node)
+  # so selectattr doesn't blow up before the gt comparison.
+  when: (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0
   notify: restart slurmctld
 
 - name: Set permissions on slurm config directory
@@ -109,9 +130,27 @@
     name: slurmdbd
     state: started
     enabled: true
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
+
+- name: Stop and disable slurmdbd when accounting disabled
+  ansible.builtin.service:
+    name: slurmdbd
+    state: stopped
+    enabled: false
+  when: vault_slurmdbd_storage_pass | default('') | length == 0
+  failed_when: false
 
 - name: Enable and start slurmctld
   ansible.builtin.service:
     name: slurmctld
+    state: started
+    enabled: true
+
+- name: Enable and start slurmd
+  # The controller doubles as a worker in single-VM bootstraps and is also
+  # used as a compute host on smaller real clusters. Either way, slurmd needs
+  # to be running for jobs to actually execute on this box.
+  ansible.builtin.service:
+    name: slurmd
     state: started
     enabled: true

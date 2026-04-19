@@ -11,11 +11,12 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-async function appendLog(taskId: string, line: string) {
-  try {
-    await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${taskId}`;
-  } catch {}
-}
+// Use the serialized per-task helper so the UI sees all step lines before
+// the status flips to success. Without this, fire-and-forget UPDATEs race
+// with finishTask and the dialog ends up only showing [1/7] when the script
+// completed in <2s.
+import { appendTaskLog } from "@/lib/task-log";
+const appendLog = (taskId: string, line: string) => appendTaskLog(taskId, line);
 
 async function finishTask(taskId: string, success: boolean) {
   await prisma.backgroundTask.update({
@@ -54,14 +55,21 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Update cluster config to include the new node
+  // Update cluster config to include the new node. Upsert by hostname so
+  // re-adding the same node (or recovering from a stale entry) replaces
+  // instead of duplicating — duplicate NodeName= lines crash slurmctld and
+  // the API then falls back to "no nodes" on the Nodes tab.
   const config = cluster.config as Record<string, unknown>;
   const hostsEntries = (config.slurm_hosts_entries ?? []) as Array<Record<string, unknown>>;
-  hostsEntries.push({ hostname: nodeName, ip, user: sshUser || "root", port: sshPort || 22 });
+  const newHost = { hostname: nodeName, ip, user: sshUser || "root", port: sshPort || 22 };
+  const hostIdx = hostsEntries.findIndex((h) => h.hostname === nodeName);
+  if (hostIdx >= 0) hostsEntries[hostIdx] = newHost; else hostsEntries.push(newHost);
   config.slurm_hosts_entries = hostsEntries;
 
   const nodes = (config.slurm_nodes ?? []) as Array<Record<string, unknown>>;
-  nodes.push({ expression: nodeName, cpus, gpus: gpus ?? 0, memory_mb: memoryMb });
+  const newNode = { expression: nodeName, cpus, gpus: gpus ?? 0, memory_mb: memoryMb };
+  const nodeIdx = nodes.findIndex((n) => n.expression === nodeName || n.name === nodeName);
+  if (nodeIdx >= 0) nodes[nodeIdx] = newNode; else nodes.push(newNode);
   config.slurm_nodes = nodes;
 
   // New nodes default to the first partition (or seed a "main" partition if
@@ -104,7 +112,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const nodeUser = sshUser || "root";
     const nodePort = sshPort || 22;
     const script = `#!/bin/bash
-set -euo pipefail
+# Relaxed error handling on purpose — every step has its own "|| true" / "||"
+# guard and an echo that reports the outcome, so \`set -e\` only makes things
+# worse by silently killing the script on the first || that it mis-parses
+# as a failure.
+set +e
+# Surface EVERY stderr line via the outer ssh stream so we can see why bash
+# bails if it does. Also trap EXIT to log the last line number on exit —
+# critical when the script silently stops mid-run.
+exec 2>&1
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 
 S=""
 if [ "$(id -u)" != "0" ]; then S="sudo"; fi
@@ -114,16 +131,21 @@ echo "  Adding node: ${nodeName} (${ip})"
 echo "============================================"
 echo ""
 
-echo "[1/6] Testing connectivity to ${ip}..."
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${nodePort} ${nodeUser}@${ip} 'hostname' && echo "  Connected" || { echo "  ERROR: Cannot reach ${ip}"; exit 1; }
+echo "[1/7] Testing connectivity to ${ip}..."
+if ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${nodePort} ${nodeUser}@${ip} 'hostname' 2>&1; then
+  echo "  Connected"
+else
+  echo "  ERROR: Cannot reach ${ip} — aborting"
+  exit 1
+fi
 echo ""
 
-echo "[2/6] Installing prerequisites on ${nodeName}..."
-ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} 'S=""; if [ "$(id -u)" != "0" ]; then S="sudo"; fi; $S apt-get update -qq && $S apt-get install -y -qq python3 python3-pip curl 2>/dev/null || $S yum install -y -q python3 curl 2>/dev/null || true'
+echo "[2/7] Installing prerequisites on ${nodeName}..."
+ssh -n -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} 'S=""; if [ "$(id -u)" != "0" ]; then S="sudo"; fi; $S apt-get update -qq && $S apt-get install -y -qq python3 python3-pip curl 2>/dev/null || $S yum install -y -q python3 curl 2>/dev/null || true'
 echo "  Done"
 echo ""
 
-echo "[3/6] Copying munge key to ${nodeName}..."
+echo "[3/7] Copying munge key to ${nodeName}..."
 if $S ls /etc/munge/munge.key >/dev/null 2>&1; then
   $S cat /etc/munge/munge.key | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S mkdir -p /etc/munge; $S tee /etc/munge/munge.key > /dev/null; $S chmod 400 /etc/munge/munge.key; $S chown munge:munge /etc/munge/munge.key 2>/dev/null || true'
   echo "  Munge key copied"
@@ -192,6 +214,14 @@ echo "[5/7] Copying slurm.conf and gres.conf to ${nodeName}..."
 if $S ls /etc/slurm/slurm.conf >/dev/null 2>&1; then
   $S cat /etc/slurm/slurm.conf | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S mkdir -p /etc/slurm; $S tee /etc/slurm/slurm.conf > /dev/null'
   echo "  slurm.conf copied"
+  # cgroup.conf is required whenever slurm.conf references TaskPlugin=task/cgroup
+  # or ProctrackType=proctrack/cgroup (which our default slurm.conf does). Without
+  # this file on the worker, slurmstepd can't launch tasks and srun dies with the
+  # misleading "Header lengths are longer than data received".
+  if $S ls /etc/slurm/cgroup.conf >/dev/null 2>&1; then
+    $S cat /etc/slurm/cgroup.conf | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S tee /etc/slurm/cgroup.conf > /dev/null'
+    echo "  cgroup.conf copied"
+  fi
   if $S ls /etc/slurm/gres.conf >/dev/null 2>&1; then
     $S cat /etc/slurm/gres.conf | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S tee /etc/slurm/gres.conf > /dev/null'
     echo "  gres.conf copied"
@@ -202,16 +232,93 @@ fi
 echo ""
 
 echo "[6/7] Installing and starting Slurm worker on ${nodeName}..."
-ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -s <<'WORKER_SETUP'
+# Discover the controller's slurm/munge UIDs so we can pre-create users with
+# matching UIDs on the worker. If we skip this, the apt package creates
+# slurm/munge with default UIDs (64030 / whatever) that differ from the
+# controller's, and every RPC fails with "Security violation, Unexpected uid".
+SLURM_UID=$($S id -u slurm 2>/dev/null || echo "")
+SLURM_GID=$($S id -g slurm 2>/dev/null || echo "")
+MUNGE_UID=$($S id -u munge 2>/dev/null || echo "")
+MUNGE_GID=$($S id -g munge 2>/dev/null || echo "")
+echo "  controller uids: slurm=$SLURM_UID:$SLURM_GID munge=$MUNGE_UID:$MUNGE_GID"
+ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} \
+  env CTRL_SLURM_UID="$SLURM_UID" CTRL_SLURM_GID="$SLURM_GID" CTRL_MUNGE_UID="$MUNGE_UID" CTRL_MUNGE_GID="$MUNGE_GID" \
+  bash -s <<'WORKER_SETUP'
 S=""
 if [ "$(id -u)" != "0" ]; then S="sudo"; fi
+
+# Create slurm + munge groups/users BEFORE apt-install so dpkg's postinst
+# finds them already present and doesn't allocate a random UID. This is
+# the single most common source of "Security violation, Unexpected uid"
+# errors in multi-node clusters.
+if [ -n "$CTRL_SLURM_GID" ]; then
+  $S getent group slurm >/dev/null || $S groupadd --system --gid "$CTRL_SLURM_GID" slurm 2>&1 | head -3 || true
+fi
+if [ -n "$CTRL_SLURM_UID" ]; then
+  $S getent passwd slurm >/dev/null || $S useradd --system --uid "$CTRL_SLURM_UID" --gid slurm \
+    --home /var/lib/slurm --shell /usr/sbin/nologin slurm 2>&1 | head -3 || true
+fi
+if [ -n "$CTRL_MUNGE_GID" ]; then
+  $S getent group munge >/dev/null || $S groupadd --system --gid "$CTRL_MUNGE_GID" munge 2>&1 | head -3 || true
+fi
+if [ -n "$CTRL_MUNGE_UID" ]; then
+  $S getent passwd munge >/dev/null || $S useradd --system --uid "$CTRL_MUNGE_UID" --gid munge \
+    --home /var/lib/munge --shell /usr/sbin/nologin munge 2>&1 | head -3 || true
+fi
+echo "  worker uids before install: slurm=$(id -u slurm 2>/dev/null || echo missing) munge=$(id -u munge 2>/dev/null || echo missing)"
+
 $S apt-get install -y -qq slurmd munge 2>/dev/null || $S yum install -y -q slurm-slurmd munge 2>/dev/null || true
-$S systemctl enable munge 2>/dev/null || true
-$S systemctl restart munge 2>/dev/null || true
-$S systemctl enable slurmd 2>/dev/null || true
-$S systemctl restart slurmd 2>/dev/null || true
-echo "  Services started"
+
+# Post-install UID check — apt might have "repaired" our pre-created user
+# or picked its own UID if ours clashed with something. If the UIDs still
+# differ from the controller after install, Slurm RPCs will fail with
+# "Security violation, Unexpected uid".
+WORKER_SLURM_UID=$(id -u slurm 2>/dev/null || echo missing)
+WORKER_MUNGE_UID=$(id -u munge 2>/dev/null || echo missing)
+echo "  worker uids after install:  slurm=$WORKER_SLURM_UID munge=$WORKER_MUNGE_UID"
+if [ "$WORKER_SLURM_UID" = "$CTRL_SLURM_UID" ] && [ "$WORKER_MUNGE_UID" = "$CTRL_MUNGE_UID" ]; then
+  echo "  UID match: OK (slurm=$CTRL_SLURM_UID, munge=$CTRL_MUNGE_UID)"
+else
+  echo "  UID MISMATCH: controller slurm=$CTRL_SLURM_UID worker=$WORKER_SLURM_UID / controller munge=$CTRL_MUNGE_UID worker=$WORKER_MUNGE_UID"
+  echo "  — forcing usermod to align (fixes 'Security violation, Unexpected uid')"
+  if [ "$WORKER_SLURM_UID" != "$CTRL_SLURM_UID" ] && [ -n "$CTRL_SLURM_UID" ]; then
+    $S systemctl stop slurmd 2>/dev/null || true
+    $S usermod -u "$CTRL_SLURM_UID" slurm 2>&1 | head -3 || true
+    $S groupmod -g "$CTRL_SLURM_GID" slurm 2>&1 | head -3 || true
+    $S find /var/spool/slurm /var/log/slurm /var/run/slurm /var/lib/slurm -xdev 2>/dev/null \
+      | xargs -r $S chown "$CTRL_SLURM_UID:$CTRL_SLURM_GID" 2>/dev/null || true
+  fi
+  if [ "$WORKER_MUNGE_UID" != "$CTRL_MUNGE_UID" ] && [ -n "$CTRL_MUNGE_UID" ]; then
+    $S systemctl stop munge 2>/dev/null || true
+    $S usermod -u "$CTRL_MUNGE_UID" munge 2>&1 | head -3 || true
+    $S groupmod -g "$CTRL_MUNGE_GID" munge 2>&1 | head -3 || true
+    $S find /etc/munge /var/lib/munge /var/log/munge /var/run/munge -xdev 2>/dev/null \
+      | xargs -r $S chown "$CTRL_MUNGE_UID:$CTRL_MUNGE_GID" 2>/dev/null || true
+  fi
+  echo "  worker uids final:          slurm=$(id -u slurm 2>/dev/null || echo missing) munge=$(id -u munge 2>/dev/null || echo missing)"
+fi
+
+# slurmd refuses to start if its spool / log / run dirs don't exist. The
+# package doesn't create them on Ubuntu — must do it ourselves, owned by
+# the slurm user (uid 64030 on Debian/Ubuntu; fall back to root when the
+# slurm user doesn't exist on the worker yet).
+SLURM_OWN="slurm:slurm"
+id slurm >/dev/null 2>&1 || SLURM_OWN="root:root"
+$S mkdir -p /var/spool/slurm/slurmd /var/spool/slurm/slurmctld /var/log/slurm /var/run/slurm
+$S chown -R "$SLURM_OWN" /var/spool/slurm /var/log/slurm /var/run/slurm
+
+# Don't start slurmd/munge yet — the munge package just wrote a fresh random
+# key, which will mismatch the controller's. The outer script re-copies the
+# key in step 6b below, then starts the daemons.
 WORKER_SETUP
+
+# Step 6b: re-copy munge key AFTER apt install (package's postinst may have
+# overwritten it) and only then restart munge+slurmd on the worker, so both
+# daemons come up with a key that matches the controller's.
+if $S ls /etc/munge/munge.key >/dev/null 2>&1; then
+  $S cat /etc/munge/munge.key | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S tee /etc/munge/munge.key > /dev/null; $S chmod 400 /etc/munge/munge.key; $S chown munge:munge /etc/munge/munge.key 2>/dev/null || true; $S systemctl enable munge slurmd 2>/dev/null || true; $S systemctl restart munge 2>&1 | head -3; sleep 1; $S systemctl restart slurmd 2>&1 | head -5; $S systemctl is-active slurmd >/dev/null 2>&1 && echo "  slurmd: active" || echo "  slurmd: FAILED — see journalctl -u slurmd"'
+  echo "  munge key re-synced post-install"
+fi
 echo ""
 
 echo "[7/7] Verifying node from controller..."

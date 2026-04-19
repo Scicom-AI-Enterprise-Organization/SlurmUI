@@ -47,11 +47,11 @@
       - python3-pip
       - python3-venv
       - slurm-client
+      # `acl` lets Ansible hand temp-file ownership to an unprivileged
+      # become_user via setfacl; without it, Ansible falls back to NFSv4
+      # chmod syntax that plain Linux chmod rejects (the "A+user:munge:rx:allow"
+      # error you saw on the Generate munge key task).
+      - acl
     state: present
     update_cache: true
 
-- name: Install Jupyter Notebook
-  ansible.builtin.pip:
-    name: jupyter
-    executable: pip3
-    state: present

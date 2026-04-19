@@ -57,7 +57,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const checkLines = mounts.map((m) =>
       `mountpoint -q "${m.mountPath}" && echo "${w.hostname}|${m.id}|mounted" || echo "${w.hostname}|${m.id}|unmounted"`
     ).join("; ");
-    return `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} '${checkLines}' 2>/dev/null`;
+    return `ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} '${checkLines}' 2>/dev/null`;
   }).join("; ");
 
   const script = `echo "${marker}_START"; ${checks}; echo "${marker}_END"`;

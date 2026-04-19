@@ -24,3 +24,5 @@ ansible/*.retry
 __pycache__/
 *.pyc
 .ansible/
+
+id_rsa*

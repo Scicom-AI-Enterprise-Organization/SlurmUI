@@ -48,8 +48,26 @@ export function sshPublicKeyFromPrivate(privateKeyPem: string): string {
       return `ssh-ed25519 ${wire.toString("base64")} aura-cluster-key`;
     }
 
+    if (keyType === "rsa") {
+      const pubKey = createPublicKey(privKey);
+      const jwk = pubKey.export({ format: "jwk" }) as { n: string; e: string };
+      // SSH ssh-rsa wire: string "ssh-rsa" + mpint e + mpint n
+      const e = b64UrlToBuffer(jwk.e);
+      const n = b64UrlToBuffer(jwk.n);
+      const typeBuf = Buffer.from("ssh-rsa");
+      const eMpi = encodeMpint(e);
+      const nMpi = encodeMpint(n);
+      const wire = Buffer.allocUnsafe(4 + typeBuf.length + eMpi.length + nMpi.length);
+      let off = 0;
+      wire.writeUInt32BE(typeBuf.length, off); off += 4;
+      typeBuf.copy(wire, off); off += typeBuf.length;
+      eMpi.copy(wire, off); off += eMpi.length;
+      nMpi.copy(wire, off);
+      return `ssh-rsa ${wire.toString("base64")} aura-cluster-key`;
+    }
+
     throw new Error(
-      `Key type "${keyType}" is not supported. Please use an ed25519 key:\n` +
+      `Key type "${keyType}" is not supported. Use ed25519 (recommended) or RSA:\n` +
       `  ssh-keygen -t ed25519 -C aura-cluster-key -f ~/.ssh/aura_cluster_key`
     );
   } catch (e: any) {
@@ -141,4 +159,33 @@ function parseOpenSSHFormat(pem: string): string {
   }
 
   return `${keyType} ${pubKeyBlob.toString("base64")} aura-cluster-key`;
+}
+
+// JWK encodes integers as base64url-without-padding. Decode to a raw byte
+// buffer suitable for SSH mpint encoding.
+function b64UrlToBuffer(s: string): Buffer {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "==".slice((s.length + 3) % 4);
+  return Buffer.from(b64, "base64");
+}
+
+// SSH mpint: 4-byte length prefix + the bytes, with a leading 0x00 prepended
+// when the high bit of the first byte is set (so the integer is interpreted
+// as positive in two's complement).
+function encodeMpint(raw: Buffer): Buffer {
+  let bytes = raw;
+  // Strip leading zeros JWK might leave behind.
+  let i = 0;
+  while (i < bytes.length - 1 && bytes[i] === 0) i++;
+  bytes = bytes.slice(i);
+  const needsPad = (bytes[0] & 0x80) !== 0;
+  const len = bytes.length + (needsPad ? 1 : 0);
+  const out = Buffer.allocUnsafe(4 + len);
+  out.writeUInt32BE(len, 0);
+  if (needsPad) {
+    out[4] = 0;
+    bytes.copy(out, 5);
+  } else {
+    bytes.copy(out, 4);
+  }
+  return out;
 }

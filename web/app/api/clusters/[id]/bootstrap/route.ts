@@ -29,7 +29,13 @@ interface ClusterSsh {
 function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>): string {
   const controllerHost = config.slurm_controller_host as string;
   const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
-  const workerEntries = hostsEntries.filter((h) => h.hostname !== controllerHost);
+  // The controllerHost is usually an IP, but hostsEntries' hostname is the
+  // logical Slurm node name (often different). Exclude workers whose IP OR
+  // hostname matches the controller — otherwise a single-VM bootstrap loops
+  // back to itself as a worker, which fails NFS self-mount.
+  const workerEntries = hostsEntries.filter(
+    (h) => h.hostname !== controllerHost && h.ip !== controllerHost,
+  );
 
   const keyArg = clusterSsh.sshKeyFile ? ` ansible_ssh_private_key_file=${clusterSsh.sshKeyFile}` : "";
 

@@ -1,6 +1,9 @@
 # Managed by Aura — do not edit manually
 ClusterName={{ slurm_cluster_name }}
-SlurmctldHost={{ slurm_controller_host }}
+# slurmctld validates that its local hostname matches SlurmctldHost — pass the
+# hostname (with the IP as the addr override) so a single-VM bootstrap works
+# regardless of what the user typed for `slurm_controller_host` (often an IP).
+SlurmctldHost={{ ansible_hostname }}({{ slurm_controller_host }})
 
 AuthType=auth/munge
 SlurmUser={{ slurm_user }}
@@ -14,25 +17,77 @@ SlurmdLogFile={{ slurm_log_dir }}/slurmd.log
 SlurmctldPidFile=/var/run/slurm/slurmctld.pid
 SlurmdPidFile=/var/run/slurm/slurmd.pid
 
+{% if vault_slurmdbd_storage_pass | default('') | length > 0 %}
 AccountingStorageType=accounting_storage/slurmdbd
 AccountingStorageHost=localhost
 AccountingStoragePort=6819
+{% else %}
+# slurmdbd disabled (no vault_slurmdbd_storage_pass set) — accounting writes
+# go to log only. Enable via Settings → Configuration → Slurm Accounting.
+AccountingStorageType=accounting_storage/none
+{% endif %}
 
-ProctrackType=proctrack/cgroup
-TaskPlugin=task/affinity,task/cgroup
+# cgroup-based proctrack + task_cgroup is the robust production choice, but
+# on Ubuntu 24.04's cgroup v2 inside VMs it often breaks mid-step launch
+# with "Header lengths are longer than data received". proctrack/linuxproc
+# tracks PIDs directly — no cgroup.conf / cgroup hierarchy needed, just
+# works in VMs and containers. Admins running on bare metal with cgroup v1
+# or a properly-configured v2 cluster can switch this back.
+ProctrackType=proctrack/linuxproc
+TaskPlugin=task/affinity
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
-OverSubscribe=YES
 
-{% if slurm_nodes | selectattr('gpus', 'gt', 0) | list | length > 0 %}
+# Slurm's default MPI plugin is pmix, but the Ubuntu slurmd package doesn't
+# pull in libpmix — srun steps die with a misleading "Header lengths are
+# longer than data received" when trying to init PMIx. Set to `none` so
+# steps just launch the binary directly; Gloo/NCCL/torchrun set up their
+# own rendezvous via env vars and don't need PMIx. Real MPI workloads can
+# override per-job with `srun --mpi=pmi2` (or install libpmix-dev and flip
+# this back to pmix).
+MpiDefault=none
+
+# Trust slurm.conf's Sockets/Cores/Threads even when slurmd's hwloc
+# auto-detection reports lower (common in VMs / containers where CPU topology
+# is opaque). Without this, single-VM bootstraps land in INVALID_REG state.
+SlurmdParameters=config_overrides
+
+{# Some slurm_nodes entries (e.g. created by the Edit-node upsert) don't
+   carry gpus/cpus/memory_mb yet, so guard the gpus selectattr against
+   missing keys before the gt comparison. #}
+{% if (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0 %}
 GresTypes=gpu
 {% endif %}
 
+{% if slurm_nodes | length == 0 %}
+# slurmctld won't start without at least one NodeName / PartitionName, so for
+# a fresh bootstrap we register the controller itself as an all-in-one node
+# using the gathered facts. Real nodes get added via the UI's Nodes tab.
+NodeName={{ ansible_hostname }} NodeAddr={{ slurm_controller_host }} CPUs={{ ansible_processor_vcpus }} Sockets=1 CoresPerSocket={{ ansible_processor_vcpus }} ThreadsPerCore=1 RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
+PartitionName=main Nodes={{ ansible_hostname }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
+{% else %}
 {% for node in slurm_nodes %}
-NodeName={{ node.expression }} CPUs={{ node.cpus }}{% if node.gpus is defined and node.gpus > 0 %} Gres=gpu:{{ node.gpus }}{% endif %} RealMemory={{ node.memory_mb }} State=FUTURE
+{# Tolerate stub entries created by Edit-node (no cpus/memory yet) — fall
+   back to controller facts so slurm.conf is at least parseable. Real values
+   are filled by Add-Node's hardware detection. State=UNKNOWN (not FUTURE)
+   so slurmctld accepts a slurmd registration when one comes in. #}
+NodeName={{ node.expression }} CPUs={{ node.cpus | default(ansible_processor_vcpus) }}{% if node.gpus is defined and node.gpus > 0 %} Gres=gpu:{{ node.gpus }}{% endif %} RealMemory={{ node.memory_mb | default((ansible_memtotal_mb * 0.9) | int) }} State=UNKNOWN
 {% endfor %}
 
+{% if slurm_partitions | length == 0 %}
+{# No partitions configured but nodes exist — slurmctld won't start without
+   at least one PartitionName line. Auto-create a `main` partition listing
+   every defined node so bootstrap is self-recovering. Admins can override
+   via the Partitions tab. #}
+PartitionName=main Nodes={{ slurm_nodes | map(attribute='expression') | join(',') }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
+{% else %}
 {% for partition in slurm_partitions %}
-PartitionName={{ partition.name }} Nodes={{ partition.nodes | join(',') }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time }} State=UP
+{# `partition.nodes` may legitimately be either a list (from the Partitions
+   tab) or a comma-separated string (from add-node). Normalise so jinja's
+   join doesn't iterate the characters of a string. #}
+{% set _node_str = partition.nodes if (partition.nodes is string) else (partition.nodes | join(',')) %}
+PartitionName={{ partition.name }} Nodes={{ _node_str }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time }} State=UP OverSubscribe=YES
 {% endfor %}
+{% endif %}
+{% endif %}

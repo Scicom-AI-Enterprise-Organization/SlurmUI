@@ -445,7 +445,11 @@ export default function NewJobPage() {
 
         const mounts = (config.storage_mounts ?? []) as Array<{ id: string; mountPath: string; type: string }>;
         setStorageMounts(mounts);
-        setStorage(mounts.length > 0 ? mounts[0].mountPath : "/opt");
+        // /opt is root-only on most distros — slurmd can't cd into it as the
+        // submitting user and the job dies before it starts. /tmp is world-
+        // writable and exists on every node, so it's a safe default when no
+        // shared storage mount is configured.
+        setStorage(mounts.length > 0 ? mounts[0].mountPath : "/tmp");
 
         // Compute the python venv path from Python Packages settings.
         // Per-node mode: python_local_venv_path is the venv itself.
@@ -707,12 +711,14 @@ export default function NewJobPage() {
                       {m.mountPath} ({m.type})
                     </SelectItem>
                   ))}
-                  <SelectItem value="/opt">/opt (local to each node)</SelectItem>
+                  <SelectItem value="/tmp">/tmp (local to each node, world-writable)</SelectItem>
+                  <SelectItem value="/opt">/opt (local, root-only — only works if your user can write here)</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 Job runs from this directory. Output files land here.
-                {storage === "/opt" && " Note: /opt is local per-node, so outputs on multi-node jobs only appear on the first allocated node."}
+                {storage === "/opt" && " Note: /opt is root-only on most distros — your user must have write access or the job will fail before it starts."}
+                {storage === "/tmp" && " Note: /tmp is local per-node, so outputs on multi-node jobs only appear on the first allocated node."}
               </p>
             </div>
           </div>

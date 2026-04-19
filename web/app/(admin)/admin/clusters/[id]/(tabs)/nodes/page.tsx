@@ -34,7 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope, Pencil } from "lucide-react";
 
 interface NodeInfo {
   name: string;
@@ -43,6 +43,8 @@ interface NodeInfo {
   memory: number;
   gpus?: number;
   gres?: string;
+  version?: string;
+  ip?: string;
   partitions: string[];
 }
 
@@ -75,6 +77,20 @@ export default function NodesPage() {
   const [addingNode, setAddingNode] = useState(false);
   const [addRequestId, setAddRequestId] = useState<string | null>(null);
   const [addLogOpen, setAddLogOpen] = useState(false);
+
+  // Edit node form state
+  const [editTarget, setEditTarget] = useState<{ name: string; ip: string; sshUser: string; sshPort: number } | null>(null);
+  const [editIp, setEditIp] = useState("");
+  const [editSshUser, setEditSshUser] = useState("");
+  const [editSshPort, setEditSshPort] = useState(22);
+  const [editCpus, setEditCpus] = useState(1);
+  const [editGpus, setEditGpus] = useState(0);
+  const [editMemoryMb, setEditMemoryMb] = useState(1024);
+  const [editSockets, setEditSockets] = useState(1);
+  const [editCores, setEditCores] = useState(1);
+  const [editThreads, setEditThreads] = useState(1);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editResult, setEditResult] = useState<{ ok: boolean; output: string } | null>(null);
 
   // SSH test state for new node
   const [nodeTestStatus, setNodeTestStatus] = useState<"idle" | "testing" | "ok" | "failed">("idle");
@@ -264,17 +280,24 @@ export default function NodesPage() {
             if (!taskRes.ok) return;
             const task = await taskRes.json();
             setSseLogLines(task.logs ? task.logs.split("\n") : []);
-            if (task.status === "success") {
-              setSseLogStatus("complete");
-              setSseTaskId(null);
-              setSseCancelling(false);
+            if (task.status === "success" || task.status === "failed") {
               clearInterval(poll);
-              fetchNodes();
-            } else if (task.status === "failed") {
-              setSseLogStatus("error");
-              setSseTaskId(null);
-              setSseCancelling(false);
-              clearInterval(poll);
+              // Give any still-in-flight appendLog UPDATEs a beat to settle,
+              // then do one final refetch so the dialog always shows the
+              // *complete* step log — not just whatever the race left us.
+              setTimeout(async () => {
+                try {
+                  const finalRes = await fetch(`/api/tasks/${data.taskId}`);
+                  if (finalRes.ok) {
+                    const finalTask = await finalRes.json();
+                    setSseLogLines(finalTask.logs ? finalTask.logs.split("\n") : []);
+                  }
+                } catch {}
+                setSseLogStatus(task.status === "success" ? "complete" : "error");
+                setSseTaskId(null);
+                setSseCancelling(false);
+                if (task.status === "success") fetchNodes();
+              }, 800);
             }
           } catch {}
         }, 2000);
@@ -294,6 +317,63 @@ export default function NodesPage() {
       resetNodeTest();
     } finally {
       setAddingNode(false);
+    }
+  };
+
+  // Open the Edit dialog pre-filled from cluster.config (slurm_hosts_entries +
+  // slurm_nodes), so admins fix a wrong IP / SSH user without re-adding the node.
+  const openEditNode = async (nodeName: string) => {
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}`);
+      const c = await res.json();
+      const cfg = (c.config ?? {}) as Record<string, unknown>;
+      const hosts = ((cfg.slurm_hosts_entries ?? []) as Array<{ hostname: string; ip?: string }>);
+      const slurmNodes = ((cfg.slurm_nodes ?? []) as Array<{
+        expression?: string; name?: string; ip?: string; ssh_user?: string; ssh_port?: number;
+        cpus?: number; gpus?: number; memory_mb?: number;
+        sockets?: number; cores_per_socket?: number; threads_per_core?: number;
+      }>);
+      const h = hosts.find((x) => x.hostname === nodeName);
+      const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName);
+      const ip = h?.ip ?? n?.ip ?? "";
+      const sshUser = n?.ssh_user ?? c.sshUser ?? "ubuntu";
+      const sshPort = n?.ssh_port ?? c.sshPort ?? 22;
+      setEditTarget({ name: nodeName, ip, sshUser, sshPort });
+      setEditIp(ip);
+      setEditSshUser(sshUser);
+      setEditSshPort(sshPort);
+      setEditCpus(n?.cpus ?? 1);
+      setEditGpus(n?.gpus ?? 0);
+      setEditMemoryMb(n?.memory_mb ?? 1024);
+      setEditSockets(n?.sockets ?? 1);
+      setEditCores(n?.cores_per_socket ?? (n?.cpus ?? 1));
+      setEditThreads(n?.threads_per_core ?? 1);
+      setEditResult(null);
+    } catch {
+      toast.error("Could not load node details");
+    }
+  };
+
+  const submitEditNode = async () => {
+    if (!editTarget) return;
+    setSavingEdit(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/nodes/${encodeURIComponent(editTarget.name)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ip: editIp, sshUser: editSshUser, sshPort: editSshPort,
+          cpus: editCpus, gpus: editGpus, memoryMb: editMemoryMb,
+          sockets: editSockets, coresPerSocket: editCores, threadsPerCore: editThreads,
+        }),
+      });
+      const d = await res.json();
+      setEditResult({ ok: res.ok && d.success, output: d.output ?? d.error ?? `HTTP ${res.status}` });
+      if (res.ok && d.success) await fetchNodes();
+    } catch (e) {
+      setEditResult({ ok: false, output: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -526,10 +606,19 @@ export default function NodesPage() {
     setLogsLoading(true);
     setLogsLines([]);
     try {
-      // Run directly on controller (skip nested SSH which breaks through bastion)
-      const cmd = source === "system"
+      // Look up the node's IP + SSH details so we can hop from the controller
+      // into the worker and fetch ITS journal, not the controller's.
+      const nodeEntry = nodes.find((n) => n.name === nodeName);
+      const ip = nodeEntry?.ip;
+      const remoteCmd = source === "system"
         ? "sudo dmesg --time-format iso | tail -100"
         : `sudo journalctl -u ${source} --no-pager -n 100 --output short-iso 2>/dev/null || echo 'Service ${source} not found'`;
+      // If we know the node IP and it's not the controller itself, wrap in
+      // ssh -n so we fetch from the right box. Fall back to running locally
+      // on the controller when we don't know the IP (e.g. stub entries).
+      const cmd = ip
+        ? `ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 ${ip} '${remoteCmd}'`
+        : remoteCmd;
       const res = await fetch(`/api/clusters/${clusterId}/exec`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -730,6 +819,7 @@ export default function NodesPage() {
                   <TableHead>CPUs</TableHead>
                   <TableHead>Memory</TableHead>
                   <TableHead>GPUs</TableHead>
+                  <TableHead>Slurm</TableHead>
                   <TableHead>Partitions</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
@@ -749,6 +839,21 @@ export default function NodesPage() {
                       const g = (node as any).gres ?? "";
                       const match = g.match(/gpu:(\d+)/);
                       return match ? match[1] : ((node as any).gpus ?? 0);
+                    })()}</TableCell>
+                    <TableCell>{(() => {
+                      const v = node.version ?? "";
+                      // Highlight mismatch: if any node's version differs from
+                      // the first one's, row gets a warning color — fastest way
+                      // to spot the controller/worker drift that causes the
+                      // "Header lengths are longer than data received" error.
+                      const ref = nodes[0]?.version ?? "";
+                      const mismatch = v && ref && v !== ref;
+                      return v ? (
+                        <span className={`font-mono text-xs ${mismatch ? "text-destructive font-semibold" : ""}`}
+                          title={mismatch ? `Differs from ${nodes[0]?.name}: ${ref}` : undefined}>
+                          {v}
+                        </span>
+                      ) : <span className="text-xs text-muted-foreground">—</span>;
                     })()}</TableCell>
                     <TableCell>{node.partitions?.join(", ") ?? "-"}</TableCell>
                     <TableCell>
@@ -790,6 +895,14 @@ export default function NodesPage() {
                           disabled={diagnosingNode === node.name}
                         >
                           {diagnosingNode === node.name ? <Loader2 className="h-4 w-4 animate-spin" /> : <Stethoscope className="h-4 w-4" />}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          title="Edit IP / SSH user / port"
+                          onClick={() => openEditNode(node.name)}
+                        >
+                          <Pencil className="h-4 w-4" />
                         </Button>
                         <Button
                           variant="ghost"
@@ -1000,6 +1113,88 @@ export default function NodesPage() {
               </div>
             ))}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit node dialog */}
+      <Dialog open={!!editTarget} onOpenChange={(o) => { if (!o) { setEditTarget(null); setEditResult(null); } }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit node {editTarget?.name}</DialogTitle>
+            <DialogDescription>
+              Rewrites this node&apos;s <code className="font-mono">NodeName=…</code> line in <code className="font-mono">slurm.conf</code> on the controller and restarts <code className="font-mono">slurmctld</code> + <code className="font-mono">slurmd</code>.
+              The hostname (<strong>{editTarget?.name}</strong>) cannot be renamed — delete and re-add for that.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">IP / hostname</Label>
+              <Input value={editIp} onChange={(e) => setEditIp(e.target.value)} placeholder="10.0.0.5" />
+            </div>
+            <div className="grid gap-3 grid-cols-2">
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">SSH user</Label>
+                <Input value={editSshUser} onChange={(e) => setEditSshUser(e.target.value)} placeholder="ubuntu" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">SSH port</Label>
+                <Input type="number" min={1} max={65535}
+                  value={editSshPort}
+                  onChange={(e) => setEditSshPort(parseInt(e.target.value, 10) || 22)} />
+              </div>
+            </div>
+
+            <div className="grid gap-3 grid-cols-3">
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">CPUs</Label>
+                <Input type="number" min={1} value={editCpus}
+                  onChange={(e) => setEditCpus(parseInt(e.target.value, 10) || 1)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">GPUs</Label>
+                <Input type="number" min={0} value={editGpus}
+                  onChange={(e) => setEditGpus(parseInt(e.target.value, 10) || 0)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Memory (MB)</Label>
+                <Input type="number" min={1} value={editMemoryMb}
+                  onChange={(e) => setEditMemoryMb(parseInt(e.target.value, 10) || 1024)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Sockets</Label>
+                <Input type="number" min={1} value={editSockets}
+                  onChange={(e) => setEditSockets(parseInt(e.target.value, 10) || 1)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Cores / socket</Label>
+                <Input type="number" min={1} value={editCores}
+                  onChange={(e) => setEditCores(parseInt(e.target.value, 10) || 1)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Threads / core</Label>
+                <Input type="number" min={1} value={editThreads}
+                  onChange={(e) => setEditThreads(parseInt(e.target.value, 10) || 1)} />
+              </div>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Slurm rejects node registration when the configured CPUs/Sockets/Cores/Threads product differs from what <code className="font-mono">slurmd</code> reports. On VMs where hwloc is opaque, the <code className="font-mono">SlurmdParameters=config_overrides</code> default bypasses the check.
+            </p>
+
+            {editResult && (
+              <pre className={`max-h-48 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all ${editResult.ok ? "" : "border-destructive/40 text-destructive"}`}>
+                {editResult.output}
+              </pre>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setEditTarget(null); setEditResult(null); }}>Close</Button>
+            <Button
+              onClick={submitEditNode}
+              disabled={savingEdit || !editIp || !editSshUser}
+            >
+              {savingEdit ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Saving…</> : "Save changes"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

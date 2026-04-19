@@ -66,7 +66,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     const p = h.port || 22;
     return `
 echo "[discover] ${h.hostname} (${h.ip}) real hostname..."
-REAL_${h.hostname.replace(/[^A-Za-z0-9_]/g, "_")}=$(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} 'echo "$(hostname -f 2>/dev/null || hostname) $(hostname -s 2>/dev/null || hostname)"' 2>/dev/null || echo "")
+REAL_${h.hostname.replace(/[^A-Za-z0-9_]/g, "_")}=$(ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} 'echo "$(hostname -f 2>/dev/null || hostname) $(hostname -s 2>/dev/null || hostname)"' 2>/dev/null || echo "")
 echo "  ${h.hostname} (${h.ip}) => $REAL_${h.hostname.replace(/[^A-Za-z0-9_]/g, "_")}"`;
   }).join("\n");
 

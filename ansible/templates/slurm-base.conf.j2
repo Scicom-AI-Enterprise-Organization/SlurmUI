@@ -15,7 +15,7 @@ SlurmdLogFile=/var/log/slurm/slurmd.log
 SlurmctldPidFile=/var/run/slurm/slurmctld.pid
 SlurmdPidFile=/var/run/slurm/slurmd.pid
 
-{% if nodes | selectattr('gpus', 'gt', 0) | list | length > 0 %}
+{% if (nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0 %}
 GresTypes=gpu
 {% endif %}
 AccountingStorageType=accounting_storage/none

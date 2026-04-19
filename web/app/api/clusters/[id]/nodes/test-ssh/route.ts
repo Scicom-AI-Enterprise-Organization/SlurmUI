@@ -109,7 +109,7 @@ echo "MEM_KB=$MEM_KB"
 echo "GPUS=$GPUS"
 echo "__DETECT_OK__"
 EOF`
-      : `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${targetPort} ${targetUser}@${ip} hostname && echo __SSH_OK__`;
+      : `ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${targetPort} ${targetUser}@${ip} hostname && echo __SSH_OK__`;
 
     const result = await bastionExec(
       cluster.controllerHost, cluster.sshUser, cluster.sshPort,
@@ -208,7 +208,7 @@ DETECT_EOF`
 
   const result = await sshExecSimple(
     controllerTarget,
-    `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${targetPort} ${targetUser}@${ip} 'hostname && echo __SSH_OK__'`
+    `ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${targetPort} ${targetUser}@${ip} 'hostname && echo __SSH_OK__'`
   );
 
   if (result.success && result.stdout.includes("__SSH_OK__")) {

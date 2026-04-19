@@ -3,15 +3,15 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
+import { appendTaskLog } from "@/lib/task-log";
 
 interface RouteParams { params: Promise<{ id: string }> }
 interface HostEntry { hostname: string; ip: string; user?: string; port?: number }
 
-async function appendLog(taskId: string, line: string) {
-  try {
-    await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${taskId}`;
-  } catch {}
-}
+// Diagnose's onStream fires many lines very fast — naive fire-and-forget
+// UPDATEs race in Postgres and arrive out of order in the dialog. Route
+// through the per-task queue helper so order is strict.
+const appendLog = (taskId: string, line: string) => appendTaskLog(taskId, line);
 
 async function finishTask(taskId: string, success: boolean) {
   await prisma.backgroundTask.update({
@@ -91,7 +91,7 @@ fi
 echo ""
 
 echo "[4/6] slurmd status on the node (via SSH)..."
-timeout 10 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
+timeout 10 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
   echo "  Uptime: $(uptime)"
   echo "  slurmd:"
   S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
@@ -104,7 +104,7 @@ timeout 10 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 
 echo ""
 
 echo "[5/6] Chrony time sync on the node..."
-timeout 10 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
+timeout 10 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
   if command -v chronyc >/dev/null; then
     chronyc tracking 2>&1 | grep -E "Reference ID|System time|Last offset|RMS offset" | sed "s/^/    /"
   else
@@ -114,7 +114,7 @@ timeout 10 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 
 echo ""
 
 echo "[6/6] Last 15 slurmd log lines on the node..."
-timeout 10 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
+timeout 10 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
   S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
   $S journalctl -u slurmd -n 15 --no-pager 2>&1 || $S tail -n 15 /var/log/slurm/slurmd.log 2>&1
 ' 2>&1 | sed 's/^/  /' || true

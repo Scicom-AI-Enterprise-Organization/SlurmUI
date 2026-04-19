@@ -59,13 +59,15 @@ minute, click the same button and reattach to the live log. Every task has a
 - Docker + Docker Compose
 - 4 GB free RAM
 
-### Run it
+### Run it on Linux
 
 ```bash
 git clone https://github.com/your-org/aura.git
 cd aura
 docker compose -f docker-compose.dev.yml up --build
 ```
+
+**Only works on Linux because use `network_mode: host`**.
 
 Open [http://localhost:3000](http://localhost:3000) and log in with **`admin@aura.local`** / **`admin`**.
 
@@ -94,6 +96,63 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
    memory / topology via an SSH probe and writes a correct `NodeName=` line.
 4. **Partitions → Apply to Cluster**, then **Users → Add User** for yourself.
 5. Hit **Submit Job**, pick "Hello world", Submit.
+
+### Spin a throwaway cluster with Multipass
+
+If you don't have a real cluster handy, [Multipass](https://multipass.run/) gives
+you an Ubuntu VM in one command — perfect for end-to-end testing of bootstrap,
+add-node, job submit, etc.
+
+```bash
+sudo snap install multipass
+multipass launch 24.04 --name aura-test --cpus 2 --memory 8G --disk 40G
+multipass info aura-test           # note the IPv4 — that's your controller host
+```
+
+> **Disk space tip** — Multipass stores VM images under `/var/snap/multipass/common/data/multipassd/vault`,
+> which lives on `/`. If that's tight, bind-mount the vault to a roomier disk
+> *before* launching anything:
+> ```bash
+> sudo snap stop multipass
+> sudo mkdir -p /path/with/space/multipass-vault
+> sudo rsync -a /var/snap/multipass/common/data/multipassd/vault/ /path/with/space/multipass-vault/
+> sudo rm -rf /var/snap/multipass/common/data/multipassd/vault
+> sudo mkdir /var/snap/multipass/common/data/multipassd/vault
+> sudo mount --bind /path/with/space/multipass-vault /var/snap/multipass/common/data/multipassd/vault
+> sudo snap start multipass
+> ```
+> Use `mount --bind` rather than a symlink — Multipass's AppArmor policy rejects
+> paths outside `/var/snap/...`. Add the bind to `/etc/fstab` to persist across
+> reboots.
+
+Then in SlurmUI's **New Cluster**:
+
+| Field | Value |
+|---|---|
+| Controller host | IP from `multipass info aura-test` |
+| SSH user | `ubuntu` |
+| SSH port | `22` |
+| Bastion | **off** |
+
+Pick whichever SSH key path you prefer:
+
+- **Reuse Multipass's bundled key** (zero setup): paste the contents of
+  `sudo cat /var/snap/multipass/common/data/multipassd/ssh-keys/id_rsa` into
+  the private-key field.
+- **Generate a fresh key from the UI** (cleaner): click **Generate** in the
+  New Cluster dialog, copy the public key it shows, then inject it into the
+  VM:
+  ```bash
+  multipass exec aura-test -- bash -c \
+    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+     echo '<paste-pubkey>' >> ~/.ssh/authorized_keys && \
+     chmod 600 ~/.ssh/authorized_keys"
+  ```
+
+Click **Bootstrap**, wait for the log to finish, and you've got a working
+single-node cluster. To add a worker, `multipass launch ... --name aura-worker`
+and use **Nodes → Add Node** with that VM's IP. Tear everything down with
+`multipass delete --purge aura-test aura-worker`.
 
 ---
 

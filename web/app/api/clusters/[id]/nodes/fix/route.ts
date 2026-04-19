@@ -105,7 +105,7 @@ echo ""
 # we don't hang if the controller can't reach it. Main fix is the state flip
 # above; this is just belt-and-suspenders for wedged slurmd.
 echo "[note] Attempting slurmd restart on ${nodeName} (best-effort, 5s timeout)..."
-timeout 5 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} 'sudo -n systemctl restart slurmd 2>&1' 2>&1 | head -3 | sed 's/^/  /' || echo "  (skipped — could not reach node)"
+timeout 5 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} 'sudo -n systemctl restart slurmd 2>&1' 2>&1 | head -3 | sed 's/^/  /' || echo "  (skipped — could not reach node)"
 echo ""
 
 echo "[aura] Fix complete."

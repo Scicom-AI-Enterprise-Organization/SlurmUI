@@ -311,17 +311,38 @@ export function sshExecScript(
     }
   });
 
+  // Hard cap so a wedged SSH connection (controller dropped, stuck command,
+  // dnsmasq blackhole) doesn't hang an API request forever. Long-running
+  // tasks (bootstrap, package installs) own their own task system and don't
+  // await this directly, so 60s is fine as a default for short commands.
+  const timeoutMs = parseInt(process.env.AURA_SSH_SCRIPT_TIMEOUT_MS ?? "60000", 10);
+  let timedOut = false;
+  let completed = false;
+  const timer = setTimeout(() => {
+    if (completed) return;
+    timedOut = true;
+    callbacks.onStream(`[stderr] ssh timed out after ${Math.round(timeoutMs / 1000)}s — killing process`, seq++);
+    try { proc.kill("SIGKILL"); } catch {}
+  }, timeoutMs);
+
   proc.on("close", (code) => {
-    callbacks.onComplete(code === 0, { exitCode: code });
+    if (completed) return;
+    completed = true;
+    clearTimeout(timer);
+    callbacks.onComplete(code === 0 && !timedOut, { exitCode: code, timedOut });
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   proc.on("error", (err) => {
+    if (completed) return;
+    completed = true;
+    clearTimeout(timer);
     callbacks.onComplete(false, { error: err.message });
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   const cleanup = () => {
+    clearTimeout(timer);
     try { proc.kill(); } catch {}
     try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   };

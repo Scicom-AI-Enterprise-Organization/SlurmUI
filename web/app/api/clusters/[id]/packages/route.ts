@@ -135,7 +135,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       const p = w.port || 22;
       return `
 echo "  Installing on ${w.hostname} (${w.ip})..."
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; export DEBIAN_FRONTEND=noninteractive; $S apt-get update -qq 2>&1 | tail -3; $S apt-get install -y -qq ${pkgList} 2>&1 | grep -E "^(Setting up|already)" | head -20 || true; echo "  done on ${w.hostname}"'`;
+ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; export DEBIAN_FRONTEND=noninteractive; $S apt-get update -qq 2>&1 | tail -3; $S apt-get install -y -qq ${pkgList} 2>&1 | grep -E "^(Setting up|already)" | head -20 || true; echo "  done on ${w.hostname}"'`;
     }).join("\n");
 
     const script = `#!/bin/bash

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
+import { randomUUID } from "crypto";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -71,6 +72,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   const clusterSlurmName = (cluster.config as Record<string, unknown>).slurm_cluster_name as string ?? "aura-cluster";
 
+  // Generate the slurmdbd storage password server-side so we can persist it
+  // into cluster.config.vault_slurmdbd_storage_pass. Without this, the next
+  // bootstrap would see an empty password, decide accounting is disabled,
+  // and tear it back down. Reuse the existing password if one is already
+  // stored so re-applying doesn't break existing MariaDB state.
+  const existingPass = (cluster.config as Record<string, unknown>).vault_slurmdbd_storage_pass as string ?? "";
+  const dbPass = existingPass && existingPass.length > 0
+    ? existingPass
+    : randomUUID().replace(/-/g, "");
+
   const scriptDisable = `#!/bin/bash
 set -euo pipefail
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
@@ -133,7 +144,7 @@ echo "[aura] Starting MariaDB..."
 $S systemctl enable --now mariadb 2>&1 | tail -3
 sleep 2
 
-DBPASS=$(head -c 24 /dev/urandom | base64 | tr -d '=+/' | head -c 24)
+DBPASS='${dbPass}'
 echo "[aura] Creating slurm_acct_db + user (password reset each run)..."
 # ALTER USER ensures the password matches even if the user pre-exists from a
 # previous failed apply. Otherwise CREATE USER IF NOT EXISTS silently skips
@@ -266,6 +277,22 @@ echo "[aura] Done. Jobs are now ordered FIFO — no fair-share math."
       },
       onComplete: async (success) => {
         if (success) {
+          // Persist the accounting decision into cluster.config so the next
+          // Bootstrap doesn't undo it. The ansible role gates slurmdbd on
+          // vault_slurmdbd_storage_pass — set it when enabling, clear on none.
+          try {
+            const freshCluster = await prisma.cluster.findUnique({ where: { id } });
+            const cfg = (freshCluster?.config ?? {}) as Record<string, unknown>;
+            if (mode === "slurmdbd") {
+              cfg.vault_slurmdbd_storage_pass = dbPass;
+            } else if (mode === "none") {
+              cfg.vault_slurmdbd_storage_pass = "";
+            }
+            await prisma.cluster.update({
+              where: { id },
+              data: { config: cfg as never },
+            });
+          } catch {}
           await appendLog(task.id, `\n[aura] Accounting mode "${mode}" applied successfully.`);
           await logAudit({
             action: "cluster.accounting",

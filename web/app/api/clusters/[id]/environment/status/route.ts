@@ -49,7 +49,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     const p = h.port || 22;
     return `
 echo "${marker}_HOST=${h.hostname}"
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} '
+ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} '
   if [ ! -f /etc/profile.d/aura.sh ]; then echo "__NO_FILE__"; else
     grep -oE "^export [A-Za-z_][A-Za-z0-9_]*=" /etc/profile.d/aura.sh | sed "s/^export //;s/=\\$//";
   fi

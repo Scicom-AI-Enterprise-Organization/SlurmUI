@@ -18,10 +18,16 @@
     - chrony
     - nfs_server
     - munge
-    - sssd
+    # sssd / FreeIPA are optional — skip the whole role when freeipa_server
+    # isn't configured (single-node test clusters typically don't have it).
+    - role: sssd
+      when: freeipa_server is defined and (freeipa_server | length > 0)
     - hosts_block
     - slurm_controller
-    - aura_agent
+    # aura_agent is only needed in NATS mode — skip when no binary source is
+    # configured (SSH-mode clusters don't need the agent at all).
+    - role: aura_agent
+      when: aura_agent_binary_src is defined and (aura_agent_binary_src | length > 0)
 
 - name: Bootstrap worker nodes
   hosts: slurm_workers
@@ -31,6 +37,7 @@
     - chrony
     - nfs_client
     - munge
-    - sssd
+    - role: sssd
+      when: freeipa_server is defined and (freeipa_server | length > 0)
     - hosts_block
     - slurm_worker

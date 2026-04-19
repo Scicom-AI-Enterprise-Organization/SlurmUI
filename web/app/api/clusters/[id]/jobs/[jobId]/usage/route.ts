@@ -101,7 +101,7 @@ for NODE in $EXPANDED; do
     SU="${defaultUser}"; SI="$NODE"; SP="22"
   fi
   echo "__SSH_TARGET__=$SU@$SI:$SP"
-  timeout 8 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \\
+  timeout 8 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \\
     -p "$SP" "$SU@$SI" "bash -s" << 'REMOTE_EOF' 2>&1
 set +e
 JOBID=__JOBID_PLACEHOLDER__

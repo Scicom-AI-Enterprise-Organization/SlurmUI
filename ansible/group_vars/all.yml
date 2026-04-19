@@ -16,3 +16,33 @@ slurm_spool_dir: /var/spool/slurm
 
 mgmt_nfs_path: /mgmt
 data_nfs_path: /aura-usrdata
+
+# NFS export + chrony allow CIDR. Override in cluster-config for production
+# (point at the worker subnet); the default is permissive enough for a
+# single-VM bootstrap to succeed without explicit config.
+nfs_allowed_network: "0.0.0.0/0"
+
+# Static /etc/hosts entries the cluster needs (worker name → IP). Empty list
+# is fine for a single-node bootstrap; populated as workers get added through
+# the Nodes tab (Sync /etc/hosts).
+slurm_hosts_entries: []
+
+# Slurm node + partition defaults — empty so a fresh bootstrap doesn't fail.
+# Real values are written into cluster.config when nodes/partitions are added
+# via the UI and re-applied during slurm.conf rendering.
+slurm_nodes: []
+slurm_partitions: []
+
+# slurmdbd connection defaults (only used when accounting is enabled).
+vault_slurmdbd_storage_pass: ""
+slurmdbd_storage_host: "localhost"
+slurmdbd_storage_user: "slurm"
+slurmdbd_storage_db: "slurm_acct_db"
+
+# NFS server addresses default to the controller for single-node setups.
+mgmt_nfs_server: "{{ slurm_controller_host }}"
+data_nfs_server: "{{ slurm_controller_host }}"
+
+# Optional aura agent (NATS-mode); empty means skip.
+aura_agent_nats_url: ""
+aura_agent_binary_src: ""
