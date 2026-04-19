@@ -135,10 +135,12 @@ export default function NodesPage() {
   const [previewRunning, setPreviewRunning] = useState(false);
 
   // Per-node action state
-  const [deployingNode, setDeployingNode] = useState<string | null>(null);
-  // nodeName → taskId map so clicking the spinning Deploy icon while a deploy
-  // is in flight re-opens the live log dialog pointing at the same task.
+  // nodeName → taskId map for in-flight deploys. "Deploying?" is derived
+  // from this — multiple nodes can deploy in parallel, each with its own
+  // spinner. Clicking the spinner opens the live log for that task.
+  // A sentinel "" value means "deploy starting" (no taskId yet from server).
   const [deployTasks, setDeployTasks] = useState<Record<string, string>>({});
+  const isDeploying = (name: string) => name in deployTasks;
   const [fixingNode, setFixingNode] = useState<string | null>(null);
   const [diagnosingNode, setDiagnosingNode] = useState<string | null>(null);
   const [syncingHosts, setSyncingHosts] = useState(false);
@@ -378,11 +380,18 @@ export default function NodesPage() {
     }
   };
 
-  // Deploy a registered-but-undeployed node by firing the full /nodes/add
-  // install flow. Specs come from cluster.config.slurm_nodes (populated by
-  // /register). Shows the same live-log dialog the single-node add used.
+  // Deploy a registered-but-undeployed node. Runs silently in the
+  // background — the only UI is the spinner on the Deploy icon. User clicks
+  // the spinning icon to pop open the live log dialog via reopenDeployLog.
   const handleDeployNode = async (nodeName: string) => {
-    setDeployingNode(nodeName);
+    // Mark this node as deploying immediately (sentinel empty taskId) so its
+    // spinner appears even before the /nodes/add response comes back.
+    setDeployTasks((prev) => ({ ...prev, [nodeName]: "" }));
+    const clearDeploy = () => setDeployTasks((prev) => {
+      const next = { ...prev };
+      delete next[nodeName];
+      return next;
+    });
     try {
       const cRes = await fetch(`/api/clusters/${clusterId}`);
       const c = await cRes.json();
@@ -391,14 +400,9 @@ export default function NodesPage() {
       const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName);
       if (!n) {
         toast.error(`No config entry for ${nodeName}`);
-        setDeployingNode(null);
+        clearDeploy();
         return;
       }
-
-      setSseLogTitle(`Deploying node: ${nodeName}`);
-      setSseLogLines([]);
-      setSseLogStatus("streaming");
-      setSseLogOpen(true);
 
       const res = await fetch(`/api/clusters/${clusterId}/nodes/add`, {
         method: "POST",
@@ -418,53 +422,33 @@ export default function NodesPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setSseLogLines((p) => [...p, `[error] ${err.error ?? `HTTP ${res.status}`}`]);
-        setSseLogStatus("error");
-        setDeployingNode(null);
+        toast.error(`Deploy ${nodeName}: ${err.error ?? `HTTP ${res.status}`}`);
+        clearDeploy();
         return;
       }
       const data = await res.json();
       if (!data.taskId) {
-        setSseLogStatus("complete");
-        setDeployingNode(null);
+        clearDeploy();
         fetchNodes();
         return;
       }
-      setSseTaskId(data.taskId);
       setDeployTasks((prev) => ({ ...prev, [nodeName]: data.taskId }));
       const poll = setInterval(async () => {
         try {
           const tRes = await fetch(`/api/tasks/${data.taskId}`);
           if (!tRes.ok) return;
           const t = await tRes.json();
-          setSseLogLines(t.logs ? t.logs.split("\n") : []);
           if (t.status === "success" || t.status === "failed") {
             clearInterval(poll);
-            setTimeout(async () => {
-              try {
-                const finalRes = await fetch(`/api/tasks/${data.taskId}`);
-                if (finalRes.ok) {
-                  const ft = await finalRes.json();
-                  setSseLogLines(ft.logs ? ft.logs.split("\n") : []);
-                }
-              } catch {}
-              setSseLogStatus(t.status === "success" ? "complete" : "error");
-              setSseTaskId(null);
-              setDeployingNode(null);
-              setDeployTasks((prev) => {
-                const next = { ...prev };
-                delete next[nodeName];
-                return next;
-              });
-              fetchNodes();
-            }, 800);
+            if (t.status === "failed") toast.error(`Deploy ${nodeName} failed — click the spinner icon to view log`);
+            clearDeploy();
+            fetchNodes();
           }
         } catch {}
       }, 2000);
     } catch (e) {
-      setSseLogLines((p) => [...p, `[error] ${e instanceof Error ? e.message : "Error"}`]);
-      setSseLogStatus("error");
-      setDeployingNode(null);
+      toast.error(`Deploy ${nodeName}: ${e instanceof Error ? e.message : "Error"}`);
+      clearDeploy();
     }
   };
 
@@ -473,7 +457,11 @@ export default function NodesPage() {
   // to check progress again by clicking the spinning Deploy icon.
   const reopenDeployLog = async (nodeName: string) => {
     const taskId = deployTasks[nodeName];
-    if (!taskId) return;
+    if (!taskId) {
+      // Sentinel "" — deploy just started, no taskId from server yet.
+      toast.info(`Waiting for ${nodeName}'s deploy to start…`);
+      return;
+    }
     setSseLogTitle(`Deploying node: ${nodeName}`);
     setSseLogLines([]);
     setSseLogStatus("streaming");
@@ -1243,12 +1231,12 @@ export default function NodesPage() {
                             variant="ghost"
                             size="icon-sm"
                             className="text-amber-700 dark:text-amber-400"
-                            title={deployingNode === node.name ? "Deploying — click to view log" : "Deploy (install slurmd)"}
-                            onClick={() => deployingNode === node.name
+                            title={isDeploying(node.name) ? "Deploying — click to view log" : "Deploy (install slurmd)"}
+                            onClick={() => isDeploying(node.name)
                               ? reopenDeployLog(node.name)
                               : handleDeployNode(node.name)}
                           >
-                            {deployingNode === node.name
+                            {isDeploying(node.name)
                               ? <Loader2 className="h-4 w-4 animate-spin" />
                               : <Zap className="h-4 w-4" />}
                           </Button>
@@ -1547,7 +1535,7 @@ export default function NodesPage() {
                 className="h-48 font-mono text-sm"
                 disabled={bulkRunning}
               />
-              <div className="flex gap-2">
+              <div className="flex gap-2 pt-2">
                 <Button size="sm" variant="outline" onClick={previewBulk} disabled={bulkRunning || previewRunning || !bulkText.trim()}>
                   {previewRunning ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Validating…</> : "Preview & validate"}
                 </Button>
