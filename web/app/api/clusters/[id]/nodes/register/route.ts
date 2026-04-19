@@ -60,7 +60,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     await tx.cluster.update({ where: { id }, data: { config: config as any } });
     return { deployed: newNode.deployed };
-  }, { isolation: "Serializable" });
+  }, { isolationLevel: "Serializable" });
 
   if (!result) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   return NextResponse.json({ ok: true, nodeName, deployed: result.deployed });
