@@ -46,7 +46,11 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       const MARKER = "__AURA_SINFO_" + Date.now() + "__";
       const script = `
 echo "${MARKER}_START"
-sinfo --json 2>/dev/null || sinfo -N --noheader --format='%N|%T|%c|%m|%G|%P|%v' 2>/dev/null || echo '{}'
+# Use the flat per-node format, NOT sinfo --json. The JSON variant groups
+# nodes that share state/partition into a single entry (with cpus.total
+# summed and memory.maximum as the group max), which we then pin onto every
+# node individually — the "6 CPUs / 8 GB on all rows" bug.
+sinfo -N --noheader --format='%N|%T|%c|%m|%G|%P|%v' 2>/dev/null || echo ''
 echo "${MARKER}_END"
 # Per-node Slurm version map (emitted OUTSIDE the main markers so the JSON
 # parser upstream doesn't choke on these extra lines appended to sinfo's

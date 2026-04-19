@@ -267,6 +267,12 @@ if [ -n "$CTRL_MUNGE_UID" ]; then
 fi
 echo "  worker uids before install: slurm=$(id -u slurm 2>/dev/null || echo missing) munge=$(id -u munge 2>/dev/null || echo missing)"
 
+# Strip the 127.0.1.1 <hostname> line that Ubuntu cloud-init writes into
+# /etc/hosts — it makes hostname resolve to loopback, which breaks multi-node
+# rendezvous (Gloo/NCCL master_addr ends up as 127.0.1.1 and remote ranks
+# get Connection refused).
+$S sed -i "/^127\\.0\\.1\\.1[[:space:]]/d" /etc/hosts || true
+
 $S apt-get install -y -qq slurmd munge 2>/dev/null || $S yum install -y -q slurm-slurmd munge 2>/dev/null || true
 
 # Post-install UID check — apt might have "repaired" our pre-created user

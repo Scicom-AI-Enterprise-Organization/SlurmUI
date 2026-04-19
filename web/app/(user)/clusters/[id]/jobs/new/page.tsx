@@ -37,6 +37,7 @@ const FORM_EXAMPLES = {
     jobName: "nccl-allreduce",
     nodes: 2,
     ntasks: 2,
+    ntasksPerNode: 1,
     cpusPerTask: 4,
     gpus: 1,
     memoryGb: 8,
@@ -44,7 +45,10 @@ const FORM_EXAMPLES = {
     command: `# Multi-node PyTorch all-reduce over NCCL (GPU).
 # One task per node; each rank uses the local GPU.
 echo "[launcher] $(date -u +%H:%M:%S) sbatch host=$(hostname) nodelist=$SLURM_JOB_NODELIST"
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+# Resolve the master's routable IP (Ubuntu's /etc/hosts maps hostname to
+# 127.0.1.1, which breaks multi-node rendezvous).
+MASTER_HOST=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+export MASTER_ADDR=$(srun -N1 -n1 -w $MASTER_HOST bash -c "hostname -I | awk '{print \\\$1}'")
 export MASTER_PORT=29500
 echo "[launcher] MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
@@ -91,14 +95,18 @@ PY
     jobName: "gloo-allreduce",
     nodes: 2,
     ntasks: 2,
+    ntasksPerNode: 1,
     cpusPerTask: 2,
     gpus: 0,
     memoryGb: 4,
     time: "00:10:00",
     command: `# Multi-node PyTorch all-reduce over Gloo (CPU).
-# scontrol expands the compressed nodelist so MASTER_ADDR is a real hostname.
-export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+# Resolve the master's *routable* IP rather than its hostname — Ubuntu cloud
+# images map "hostname" to 127.0.1.1 in /etc/hosts, which breaks Gloo.
+MASTER_HOST=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -1)
+export MASTER_ADDR=$(srun -N1 -n1 -w $MASTER_HOST bash -c "hostname -I | awk '{print \\\$1}'")
 export MASTER_PORT=29500
+echo "[launcher] MASTER_ADDR=$MASTER_ADDR (resolved from $MASTER_HOST)"
 
 srun --ntasks=\${SLURM_NTASKS} --ntasks-per-node=1 bash -c '
 python3 - <<PY
@@ -135,6 +143,7 @@ echo "Done at $(date)"`,
     jobName: "torch-train",
     nodes: 1,
     ntasks: 1,
+    ntasksPerNode: 1,
     cpusPerTask: 8,
     gpus: 2,
     memoryGb: 64,
@@ -154,6 +163,7 @@ torchrun \\
     jobName: "vllm-serve",
     nodes: 1,
     ntasks: 1,
+    ntasksPerNode: 1,
     cpusPerTask: 4,
     gpus: 2,
     memoryGb: 64,
@@ -317,6 +327,7 @@ interface ParsedSbatch {
   jobName?: string;
   nodes?: number;
   ntasks?: number;
+  ntasksPerNode?: number;
   cpusPerTask?: number;
   gpus?: number;
   memoryGb?: number;
@@ -360,6 +371,7 @@ function parseSbatchScript(script: string): ParsedSbatch {
       case "--job-name": case "-J": out.jobName = val; break;
       case "--nodes": case "-N": out.nodes = parseInt(val, 10) || 1; break;
       case "--ntasks": case "-n": out.ntasks = parseInt(val, 10) || 1; break;
+      case "--ntasks-per-node": out.ntasksPerNode = parseInt(val, 10) || 0; break;
       case "--cpus-per-task": case "-c": out.cpusPerTask = parseInt(val, 10) || 1; break;
       case "--gres": {
         const m = val.match(/gpu(?::[^:]+)?:(\d+)/);
@@ -401,6 +413,7 @@ export default function NewJobPage() {
   const [jobName, setJobName] = useState("");
   const [nodes, setNodes] = useState(1);
   const [ntasks, setNtasks] = useState(1);
+  const [ntasksPerNode, setNtasksPerNode] = useState(0);
   const [cpusPerTask, setCpusPerTask] = useState(1);
   const [gpus, setGpus] = useState(0);
   const [memoryGb, setMemoryGb] = useState(0);
@@ -502,6 +515,7 @@ export default function NewJobPage() {
     if (parsed.jobName !== undefined) setJobName(parsed.jobName);
     if (parsed.nodes !== undefined) setNodes(parsed.nodes);
     if (parsed.ntasks !== undefined) setNtasks(parsed.ntasks);
+    if (parsed.ntasksPerNode !== undefined) setNtasksPerNode(parsed.ntasksPerNode);
     if (parsed.cpusPerTask !== undefined) setCpusPerTask(parsed.cpusPerTask);
     if (parsed.gpus !== undefined) setGpus(parsed.gpus);
     if (parsed.memoryGb !== undefined) setMemoryGb(parsed.memoryGb);
@@ -517,10 +531,11 @@ export default function NewJobPage() {
   };
 
   const loadFormExample = (key: keyof typeof FORM_EXAMPLES) => {
-    const ex = FORM_EXAMPLES[key];
+    const ex = FORM_EXAMPLES[key] as typeof FORM_EXAMPLES[typeof key] & { ntasksPerNode?: number };
     setJobName(ex.jobName);
     setNodes(ex.nodes);
     setNtasks(ex.ntasks);
+    setNtasksPerNode(ex.ntasksPerNode ?? 0);
     setCpusPerTask(ex.cpusPerTask);
     setGpus(ex.gpus);
     setMemoryGb(ex.memoryGb);
@@ -538,6 +553,7 @@ export default function NewJobPage() {
     lines.push(`#SBATCH --partition=${partition}`);
     lines.push(`#SBATCH --nodes=${nodes}`);
     lines.push(`#SBATCH --ntasks=${ntasks}`);
+    if (ntasksPerNode > 0) lines.push(`#SBATCH --ntasks-per-node=${ntasksPerNode}`);
     if (cpusPerTask > 1) lines.push(`#SBATCH --cpus-per-task=${cpusPerTask}`);
     if (gpus > 0) lines.push(`#SBATCH --gres=gpu:${gpus}`);
     if (memoryGb > 0) lines.push(`#SBATCH --mem=${memoryGb}G`);
@@ -797,6 +813,21 @@ export default function NewJobPage() {
                     value={ntasks}
                     onChange={(e) => setNtasks(Math.max(1, parseInt(e.target.value) || 1))}
                   />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ntasks-per-node">Tasks per node</Label>
+                  <Input
+                    id="ntasks-per-node"
+                    type="number"
+                    min={0}
+                    value={ntasksPerNode}
+                    onChange={(e) => setNtasksPerNode(Math.max(0, parseInt(e.target.value) || 0))}
+                    placeholder="0 = let Slurm decide"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    0 lets Slurm pack freely. Set to 1 for multi-node demos
+                    (one rank per box, e.g. Gloo/NCCL all-reduce).
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="cpus">CPUs per task</Label>

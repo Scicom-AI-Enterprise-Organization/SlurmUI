@@ -79,6 +79,21 @@ echo "[write] ${h.hostname} (${h.ip})..."
 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} bash -s <<NODE_EOF
 set +e
 S=""; [ "\\$(id -u)" != "0" ] && S="sudo -n"
+
+# Step 1: report + strip the Ubuntu cloud-init loopback-alias line
+# (127.0.1.1 <hostname>) — without this the aura-managed hostname entries
+# lose the lookup race and Gloo/NCCL master_addr resolves to 127.0.1.1,
+# which remote ranks can't reach → "Connection refused" at init_process_group.
+BEFORE_LOOP=\\$(grep -c '^127\\.0\\.1\\.1[[:space:]]' /etc/hosts 2>/dev/null || echo 0)
+\\$S sed -i "/^127\\\\.0\\\\.1\\\\.1[[:space:]]/d" /etc/hosts
+AFTER_LOOP=\\$(grep -c '^127\\.0\\.1\\.1[[:space:]]' /etc/hosts 2>/dev/null || echo 0)
+if [ "\\$BEFORE_LOOP" = "0" ]; then
+  echo "  loopback-alias: none present — ok"
+else
+  echo "  loopback-alias: removed \\$BEFORE_LOOP line(s) (127.0.1.1 \\$(hostname))"
+fi
+
+# Step 2: replace the aura-managed block.
 \\$S sed -i '/# BEGIN aura-hosts/,/# END aura-hosts/d' /etc/hosts
 \\$S bash -c "cat >> /etc/hosts" <<HOSTS_EOF
 # BEGIN aura-hosts
@@ -86,6 +101,16 @@ ${hostsEntries.map((e) => `${e.ip} ${e.hostname} $REAL_${e.hostname.replace(/[^A
 # END aura-hosts
 HOSTS_EOF
 echo "  wrote \\$(grep -c 'aura-hosts' /etc/hosts) marker lines, \\$(grep -A 100 'BEGIN aura-hosts' /etc/hosts | grep -B 100 'END aura-hosts' | wc -l) total lines"
+
+# Step 3: verify hostname resolves to the aura-managed IP (NOT 127.*).
+RESOLVED=\\$(getent hosts \\$(hostname) 2>/dev/null | awk '{print \\$1}' | head -1)
+if [ -z "\\$RESOLVED" ]; then
+  echo "  FAIL: hostname \\$(hostname) does not resolve at all"
+elif echo "\\$RESOLVED" | grep -qE '^127\\.'; then
+  echo "  FAIL: hostname \\$(hostname) still resolves to loopback \\$RESOLVED — multi-node rendezvous will break"
+else
+  echo "  verify: hostname \\$(hostname) → \\$RESOLVED  (ok, not loopback)"
+fi
 NODE_EOF`;
   }).join("\n");
 
