@@ -117,6 +117,8 @@ echo ""
 echo "[aura] Done. Jobs submit without account enforcement."
 `;
 
+  const scriptEnable = buildEnableSlurmdbdScript({ dbPass, clusterSlurmName, usernames });
+
   const scriptFifo = `#!/bin/bash
 set -euo pipefail
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
