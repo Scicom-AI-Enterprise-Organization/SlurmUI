@@ -14,11 +14,14 @@ import {
   Settings,
   ScrollText,
   BookOpen,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface SidebarProps {
-  role: "ADMIN" | "USER";
+  // "USER" retained only for legacy session tokens predating the role
+  // collapse — displayed as a regular non-admin sidebar.
+  role: "ADMIN" | "VIEWER" | "USER";
 }
 
 type NavAction = { href: string; icon: React.ElementType; label: string };
@@ -41,6 +44,7 @@ const adminSections: NavSection[] = [
       { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { href: "/jobs", label: "Jobs", icon: Briefcase },
       { href: "/admin/clusters", label: "Clusters", icon: Server, action: { href: "/admin/clusters/new", icon: Plus, label: "New Cluster" } },
+      { href: "/admin/organization", label: "Organization", icon: Users },
       { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText },
       { href: "/admin/settings", label: "Settings", icon: Settings },
       { href: "/explain", label: "Learn Slurm", icon: BookOpen },

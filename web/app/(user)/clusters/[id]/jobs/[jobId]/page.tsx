@@ -35,6 +35,7 @@ interface JobDetail {
   createdAt: string;
   updatedAt: string;
   cluster?: { name: string; status: string };
+  user?: { email: string; name: string | null; unixUsername: string | null };
 }
 
 export default function JobDetailPage() {
@@ -235,6 +236,17 @@ export default function JobDetailPage() {
           <p className="text-sm text-muted-foreground">
             Cluster: {job.cluster?.name ?? clusterId} | Partition: {job.partition}
             {job.slurmJobId && ` | Slurm ID: ${job.slurmJobId}`}
+            {job.user && (
+              <>
+                {" | "}Submitted by:{" "}
+                <span className="font-medium text-foreground">
+                  {job.user.name || job.user.unixUsername || job.user.email}
+                </span>
+                {job.user.name && (
+                  <span className="ml-1 text-xs">&lt;{job.user.email}&gt;</span>
+                )}
+              </>
+            )}
           </p>
         </div>
         <div className="flex gap-2">

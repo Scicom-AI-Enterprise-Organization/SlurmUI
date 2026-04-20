@@ -27,6 +27,10 @@ export default async function SshPage({ params }: PageProps) {
       initialPort={cluster.sshPort}
       initialBastion={cluster.sshBastion}
       initialSshKeyId={cluster.sshKeyId}
+      initialJumpHost={cluster.sshJumpHost}
+      initialJumpUser={cluster.sshJumpUser}
+      initialJumpPort={cluster.sshJumpPort}
+      initialJumpKeyId={cluster.sshJumpKeyId}
       sshKeys={sshKeys}
     />
   );

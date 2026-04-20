@@ -229,11 +229,11 @@ export function DeleteClusterButton({ clusterId, clusterName }: DeleteClusterBut
               <ul className="text-sm space-y-1.5 list-disc ml-5 text-muted-foreground">
                 <li>Stop and purge Slurm daemons (slurmctld, slurmd, munge) on all nodes</li>
                 <li>Unmount NFS shares on worker nodes and remove fstab entries</li>
-                <li>Remove Aura-created configs: /etc/slurm, munge key, /etc/hosts entries</li>
-                <li>Uninstall the Aura agent service and binary from the controller</li>
+                <li>Remove SlurmUI-created configs: /etc/slurm, munge key, /etc/hosts entries</li>
+                <li>Uninstall the SlurmUI agent service and binary from the controller</li>
               </ul>
               <p className="text-sm text-muted-foreground mt-1">
-                The nodes themselves are not deprovisioned — only Aura-managed software and
+                The nodes themselves are not deprovisioned — only SlurmUI-managed software and
                 configuration is removed. You can safely reprovision after this.
               </p>
               <DialogFooter>

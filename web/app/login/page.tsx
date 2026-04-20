@@ -1,11 +1,48 @@
 "use client";
 
+import { useState } from "react";
 import { signIn } from "next-auth/react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { ShieldCheck, KeyRound } from "lucide-react";
+import { ShieldCheck, KeyRound, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 export default function LoginPage() {
+  const router = useRouter();
+  const search = useSearchParams();
+  const callbackUrl = search.get("callbackUrl") || "/dashboard";
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(null);
+    setSubmitting(true);
+    try {
+      const res = await signIn("credentials", {
+        email: email.toLowerCase().trim(),
+        password,
+        redirect: false,
+      });
+      if (!res) {
+        setErr("No response from server");
+        return;
+      }
+      if (res.error) {
+        setErr("Invalid email or password");
+        return;
+      }
+      router.push(callbackUrl);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="flex min-h-screen bg-background">
       {/* Left — Branded Panel */}
@@ -62,21 +99,66 @@ export default function LoginPage() {
             <span className="text-lg font-bold">SlurmUI</span>
           </div>
 
-          <h2 className="text-xl font-semibold text-foreground">Single Sign-On</h2>
-          <p className="mt-1 mb-8 text-sm text-muted-foreground">
-            Sign in with your corporate account
+          <h2 className="text-xl font-semibold text-foreground">Sign in</h2>
+          <p className="mt-1 mb-6 text-sm text-muted-foreground">
+            Use your email and password, or continue with Keycloak SSO.
           </p>
+
+          <form onSubmit={submit} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="login-email">Email</Label>
+              <Input
+                id="login-email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="login-password">Password</Label>
+              <Input
+                id="login-password"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            {err && (
+              <p className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-sm text-destructive">
+                {err}
+              </p>
+            )}
+            <Button type="submit" className="w-full" disabled={submitting}>
+              {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Sign in
+            </Button>
+          </form>
+
+          <div className="my-6 flex items-center gap-2">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-xs uppercase text-muted-foreground">or</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
 
           <motion.div whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }}>
             <Button
+              variant="outline"
               className="w-full gap-2"
               size="lg"
-              onClick={() => signIn("keycloak", { callbackUrl: "/dashboard" })}
+              onClick={() => signIn("keycloak", { callbackUrl })}
             >
               <ShieldCheck className="h-4 w-4" />
               Continue with Keycloak
             </Button>
           </motion.div>
+
+          <p className="mt-6 text-center text-xs text-muted-foreground">
+            New here? Ask an admin for an invite link.
+          </p>
 
         </motion.div>
       </div>

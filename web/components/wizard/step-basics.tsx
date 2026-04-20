@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Check, X } from "lucide-react";
+import { Loader2, Check, X, ChevronDown, ChevronRight } from "lucide-react";
 
 export interface ClusterBasics {
   clusterName: string;
@@ -22,6 +22,10 @@ export interface ClusterBasics {
   sshUser: string;
   sshPort: string;
   sshKeyId: string;
+  sshJumpHost: string;
+  sshJumpUser: string;
+  sshJumpPort: string;
+  sshJumpKeyId: string;
 }
 
 export interface SshKeyOption {
@@ -41,11 +45,14 @@ interface StepBasicsProps {
 export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBasicsProps) {
   const [sshTest, setSshTest] = useState<SshTestStatus>("idle");
   const [sshTestMsg, setSshTestMsg] = useState("");
+  // Expand the jumphost panel by default whenever any jump field is already
+  // set (e.g. when editing a pre-filled form), collapsed otherwise.
+  const [jumpOpen, setJumpOpen] = useState<boolean>(!!data.sshJumpHost);
 
   const update = (field: keyof ClusterBasics, value: string) => {
     onChange({ ...data, [field]: value });
     // Reset SSH test when connection details change
-    if (["controllerHost", "sshUser", "sshPort", "sshKeyId"].includes(field)) {
+    if (["controllerHost", "sshUser", "sshPort", "sshKeyId", "sshJumpHost", "sshJumpUser", "sshJumpPort", "sshJumpKeyId"].includes(field)) {
       setSshTest("idle");
       setSshTestMsg("");
       onSshTestChange?.("idle");
@@ -67,6 +74,10 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
           host: data.controllerHost,
           user: data.sshUser || "root",
           port: parseInt(data.sshPort) || 22,
+          jumpHost: data.sshJumpHost || undefined,
+          jumpUser: data.sshJumpUser || undefined,
+          jumpPort: data.sshJumpPort ? parseInt(data.sshJumpPort) || 22 : undefined,
+          jumpKeyId: data.sshJumpKeyId || undefined,
         }),
       });
       const result = await res.json();
@@ -207,6 +218,79 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
       {sshTest === "failed" && (
         <p className="text-sm text-destructive">{sshTestMsg}</p>
       )}
+
+      <div className="rounded-md border border-dashed">
+        <button
+          type="button"
+          onClick={() => setJumpOpen((o) => !o)}
+          className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium hover:bg-accent/40"
+        >
+          {jumpOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          Jumphost (optional)
+          {data.sshJumpHost && !jumpOpen && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              {data.sshJumpUser || "root"}@{data.sshJumpHost}
+            </span>
+          )}
+        </button>
+        {jumpOpen && (
+          <div className="space-y-3 border-t p-3">
+            <div className="space-y-2">
+              <Label>Jump SSH Key</Label>
+              <Select
+                value={data.sshJumpKeyId || "__same__"}
+                onValueChange={(v) => update("sshJumpKeyId", v === "__same__" ? "" : v)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a key" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__same__">Same as cluster key</SelectItem>
+                  {sshKeys.map((key) => (
+                    <SelectItem key={key.id} value={key.id}>{key.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Choose a different key if the bastion rejects the cluster key. Manage keys in Settings.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sshJumpHost">Jump Host</Label>
+              <Input
+                id="sshJumpHost"
+                placeholder="bastion.example.com"
+                value={data.sshJumpHost}
+                onChange={(e) => update("sshJumpHost", e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave empty to connect directly. When set, SlurmUI reaches the controller via <code>ssh -J</code>.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="sshJumpUser">Jump User</Label>
+                <Input
+                  id="sshJumpUser"
+                  placeholder="root"
+                  value={data.sshJumpUser}
+                  onChange={(e) => update("sshJumpUser", e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="sshJumpPort">Jump Port</Label>
+                <Input
+                  id="sshJumpPort"
+                  type="number"
+                  placeholder="22"
+                  value={data.sshJumpPort}
+                  onChange={(e) => update("sshJumpPort", e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -74,7 +74,10 @@ services:
       context: ./web
       dockerfile: Dockerfile.dev
     working_dir: /app
-    command: sh -c "npm install && npx prisma db push"
+    # Dev: db push with --accept-data-loss keeps things flexible. Prod uses
+    # migrate deploy; dev prefers diff-from-schema so schema tweaks reflect
+    # without authoring a migration for each one.
+    command: sh -c "npm install && npx prisma db push --accept-data-loss"
     environment:
       DATABASE_URL: postgresql://aura:aura@postgres:5432/aura?schema=public
     volumes:

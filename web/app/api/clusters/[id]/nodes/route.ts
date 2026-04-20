@@ -80,6 +80,18 @@ echo "__VERSIONS_END__"
         ? full.slice(startIdx + `${MARKER}_START`.length, endIdx).trim()
         : "";
 
+      // Flip cluster.status based on the probe result so the badge reflects
+      // reality on this very request. If markers made it through, SSH is up
+      // (status → ACTIVE). If nothing came back at all, SSH is dead (OFFLINE).
+      // Skip PROVISIONING — bootstrap owns that transition.
+      if (cluster.status !== "PROVISIONING") {
+        const sshWorked = startIdx !== -1;
+        const desired = sshWorked ? "ACTIVE" : "OFFLINE";
+        if (cluster.status !== desired) {
+          await prisma.cluster.update({ where: { id }, data: { status: desired } });
+        }
+      }
+
       // Per-node Slurm version map (sinfo -N -o '%N|%v' appended after the
       // main output). Build once, then merge into whichever parsing path runs.
       const versionByNode: Record<string, string> = {};

@@ -880,9 +880,10 @@ export default function NodesPage() {
     setBulkRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   };
 
-  // Bulk "Start" worker now just registers each row — install is triggered
-  // per-row via the Deploy button in the main nodes table.
-  const addOneBulk = async (idx: number, row: BulkRow) => {
+  // Bulk "Start" worker. Registers one row. Returns true if the row ended
+  // up in `added` state so the caller can build the deploy batch without
+  // waiting for React's async state flush.
+  const addOneBulk = async (idx: number, row: BulkRow): Promise<boolean> => {
     try {
       patchRow(idx, { status: "adding", msg: "Registering…" });
       const res = await fetch(`/api/clusters/${clusterId}/nodes/register`, {
@@ -904,11 +905,68 @@ export default function NodesPage() {
       const data = await res.json();
       if (!res.ok) {
         patchRow(idx, { status: "failed", msg: data.error || `HTTP ${res.status}` });
-        return;
+        return false;
       }
-      patchRow(idx, { status: "added", msg: "Registered — click Deploy on node row" });
+      patchRow(idx, { status: "added", msg: "Registered — deploying…" });
+      return true;
     } catch (e) {
       patchRow(idx, { status: "failed", msg: e instanceof Error ? e.message : "Error" });
+      return false;
+    }
+  };
+
+  // Deploy a single registered node and resolve when the task completes.
+  // Used by runBulk to parallelize deploys and wait for all before closing.
+  const deployAndWait = async (row: BulkRow): Promise<boolean> => {
+    setDeployTasks((prev) => ({ ...prev, [row.hostname]: "" }));
+    const clearDeploy = () => setDeployTasks((prev) => {
+      const next = { ...prev };
+      delete next[row.hostname];
+      return next;
+    });
+    try {
+      const addRes = await fetch(`/api/clusters/${clusterId}/nodes/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeName: row.hostname,
+          ip: row.ip,
+          sshUser: row.user,
+          sshPort: row.port,
+          cpus: row.cpus || 1,
+          gpus: row.gpus || 0,
+          memoryMb: row.memoryMb || 1024,
+          sockets: row.sockets || 1,
+          coresPerSocket: row.coresPerSocket || row.cpus || 1,
+          threadsPerCore: row.threadsPerCore || 1,
+        }),
+      });
+      if (!addRes.ok) {
+        clearDeploy();
+        return false;
+      }
+      const data = await addRes.json();
+      if (!data.taskId) {
+        clearDeploy();
+        return true;
+      }
+      setDeployTasks((prev) => ({ ...prev, [row.hostname]: data.taskId }));
+      // Poll until terminal.
+      while (true) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const tRes = await fetch(`/api/tasks/${data.taskId}`);
+          if (!tRes.ok) continue;
+          const t = await tRes.json();
+          if (t.status === "success" || t.status === "failed") {
+            clearDeploy();
+            return t.status === "success";
+          }
+        } catch {}
+      }
+    } catch {
+      clearDeploy();
+      return false;
     }
   };
 
@@ -919,39 +977,37 @@ export default function NodesPage() {
     }
     const rows = bulkRows;
     setBulkRunning(true);
-    let failures = 0;
     try {
-      // Register sequentially — parallel writes race on cluster.config, and
-      // even with Serializable Postgres would fail one of the txns. Register
-      // is cheap (no SSH, no install) so serial is fine.
+      // Phase 1: register each row sequentially (cluster.config writes race
+      // under parallel POSTs). Collect successfully-registered rows into
+      // toDeploy directly — don't rely on React state, which won't be
+      // flushed in time when we read bulkRows.
+      const toDeploy: BulkRow[] = [];
       for (let i = 0; i < rows.length; i++) {
-        await addOneBulk(i, rows[i]);
+        const ok = await addOneBulk(i, rows[i]);
+        if (ok) toDeploy.push(rows[i]);
       }
-      // Count post-run failures from state (addOneBulk uses patchRow which is
-      // async via setState, so read from latest rows via a flushSync-ish
-      // peek — simplest is to check after a microtask).
-      await new Promise((r) => setTimeout(r, 0));
+
+      // Phase 2: fire deploys in the BACKGROUND (no await) and pre-populate
+      // deployTasks so the ⚡ spinners on the main nodes table appear the
+      // instant the dialog closes. Each deploy polls independently and
+      // clears its own spinner.
+      if (toDeploy.length > 0) {
+        setDeployTasks((prev) => {
+          const next = { ...prev };
+          for (const r of toDeploy) next[r.hostname] = "";
+          return next;
+        });
+        for (const r of toDeploy) { void deployAndWait(r); }
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Bulk add crashed");
     } finally {
       setBulkRunning(false);
       fetchNodes();
-      // If every row ended up added, close the dialog and clear state so the
-      // next open is a clean slate. Leave it open if anything failed so the
-      // admin can read the error messages.
-      setBulkRows((curr) => {
-        failures = curr.filter((r) => r.status === "failed").length;
-        const allAdded = curr.length > 0 && curr.every((r) => r.status === "added");
-        if (allAdded) {
-          setBulkText("");
-          setBulkOpen(false);
-          return [];
-        }
-        return curr;
-      });
-      if (failures > 0) {
-        toast.error(`${failures} row(s) failed to register — see the dialog`);
-      }
+      setBulkRows([]);
+      setBulkText("");
+      setBulkOpen(false);
     }
   };
 
@@ -1019,8 +1075,8 @@ export default function NodesPage() {
           </Button>
           <div className="relative">
             <Button
-              disabled={clusterStatus !== "ACTIVE"}
-              title={clusterStatus !== "ACTIVE" ? "Bootstrap the cluster first" : undefined}
+              disabled={clusterStatus === "PROVISIONING"}
+              title={clusterStatus === "PROVISIONING" ? "Bootstrap is still in progress" : undefined}
               onClick={() => setAddMenuOpen((v) => !v)}
             >
               <Plus className="mr-2 h-4 w-4" />
@@ -1161,9 +1217,14 @@ export default function NodesPage() {
         </div>
       </div>
 
-      {clusterStatus && clusterStatus !== "ACTIVE" && (
+      {clusterStatus === "PROVISIONING" && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">
           Cluster must be bootstrapped before adding nodes. Click the <strong>Bootstrap</strong> button above to set up the controller first.
+        </div>
+      )}
+      {clusterStatus === "OFFLINE" && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-400">
+          Controller is unreachable over SSH right now. Adding nodes will still write config, but deploys will fail until the controller is back online.
         </div>
       )}
 

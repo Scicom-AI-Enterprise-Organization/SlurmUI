@@ -26,7 +26,17 @@ model Cluster {
   natsCredentials String         // encrypted at rest
   sshUser         String         @default("root")
   sshPort         Int            @default(22)
-  sshBastion      Boolean        @default(false) // true if SSH host is a bastion/jump server
+  sshBastion      Boolean        @default(false) // true if SSH host is a bastion/jump server (interactive-shell mode)
+  // Separate ProxyJump (ssh -J) hop. When sshJumpHost is set, every SSH call
+  // routes through this host first, then connects to controllerHost. Reuses
+  // the cluster's main sshKey for both hops.
+  sshJumpHost     String?
+  sshJumpUser     String?        @default("root")
+  sshJumpPort     Int?           @default(22)
+  // Optional separate SSH key for the jump hop. No Prisma relation to keep
+  // the main `sshKey` include-path unchanged across dozens of call sites;
+  // we fetch this key by ID on demand inside ssh-exec helpers.
+  sshJumpKeyId    String?
   status          ClusterStatus  @default(PROVISIONING)
   config          Json           // full cluster-config.json
   sshKeyId              String?
@@ -65,12 +75,20 @@ model Job {
   status     JobStatus @default(PENDING)
   exitCode   Int?
   output     String?   @db.Text
+  // GitOps tracking. Populated only when the job was submitted via the
+  // gitops reconciler. `sourceName` is metadata.name from the manifest and
+  // is unique per cluster so a single manifest maps to a single job lineage;
+  // `sourceRef` is "<repo-rel-path>@<sha256(content)>" so the reconciler
+  // can detect content changes and skip / cancel-resubmit accordingly.
+  sourceRef  String?
+  sourceName String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
   @@index([clusterId])
   @@index([userId])
   @@index([status])
+  @@unique([clusterId, sourceName])
 }
 
 model JobTemplate {
@@ -101,17 +119,26 @@ enum JobStatus {
 
 model User {
   id            String        @id @default(uuid())
+  // Keycloak-backed users get the OIDC sub here; locally-credentialled
+  // users get `local:<uuid>` so the unique index still holds.
   keycloakId    String        @unique
   email         String        @unique
   name          String?
+  // bcrypt hash. Null = Keycloak-only user, login via Credentials blocked.
+  passwordHash  String?
+  // Proof the email belongs to this user. Set to now() on invite acceptance
+  // since clicking the single-use invite link proves control of the inbox.
+  emailVerified DateTime?
   unixUid       Int?          @unique
   unixGid       Int?
   unixUsername  String?       @unique
-  role          UserRole      @default(USER)
+  role          UserRole      @default(VIEWER)
   createdAt     DateTime      @default(now())
   clusters      ClusterUser[]
   appSessions   AppSession[]
   jobTemplates  JobTemplate[]
+  invitesCreated Invite[]     @relation("InviteCreator")
+  passwordResets PasswordResetToken[]
 }
 
 model AppSession {
@@ -133,6 +160,46 @@ model AppSession {
 enum UserRole {
   ADMIN
   USER
+  VIEWER
+}
+
+// Single-use password reset token. Admin-initiated only (no self-serve
+// "forgot password" flow yet) — admin generates a link, user opens it and
+// sets a new password. Expires fast since it short-circuits auth.
+model PasswordResetToken {
+  id          String    @id @default(uuid())
+  token       String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdById String    // admin who issued the link
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Single-use signup invitation. Admins generate these from the organization
+// page; accepting the link creates a User with the baked-in role. Tokens are
+// 32 random bytes base64url-encoded and never round-tripped except via the
+// copy-once-on-creation dialog.
+model Invite {
+  id           String    @id @default(uuid())
+  token        String    @unique
+  // Optional email lock. When set, the public accept page pre-fills this
+  // value and the server rejects any other address.
+  email        String?
+  role         UserRole
+  createdById  String
+  createdBy    User      @relation("InviteCreator", fields: [createdById], references: [id])
+  expiresAt    DateTime
+  usedAt       DateTime?
+  usedByUserId String?
+  createdAt    DateTime  @default(now())
+
+  @@index([createdById])
+  @@index([expiresAt])
 }
 
 model ClusterUser {

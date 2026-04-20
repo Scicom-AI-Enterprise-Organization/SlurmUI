@@ -34,6 +34,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
 
+  // Job has no Prisma relation back to User (kept out of the schema to avoid
+  // cascading migration churn), so fetch it separately and splice into the
+  // response so the detail page can show who submitted.
+  const user = await prisma.user.findUnique({
+    where: { id: job.userId },
+    select: { email: true, name: true, unixUsername: true },
+  });
+
   // If job is running, optionally fetch latest status from agent
   if (job.status === "RUNNING" && job.slurmJobId && job.cluster.status !== "OFFLINE") {
     try {
@@ -70,7 +78,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
   }
 
-  return NextResponse.json(job);
+  return NextResponse.json({ ...job, user });
 }
 
 // DELETE /api/clusters/[id]/jobs/[jobId] — cancel job

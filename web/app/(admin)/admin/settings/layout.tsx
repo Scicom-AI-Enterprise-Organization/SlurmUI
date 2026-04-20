@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Key, GitBranch, Bell } from "lucide-react";
+import { Key, GitBranch, Bell, GitCommit } from "lucide-react";
 
 const sections = [
   { href: "/admin/settings/ssh-keys", label: "SSH Keys", icon: Key },
   { href: "/admin/settings/alerts", label: "Alerts", icon: Bell },
   { href: "/admin/settings/git-sync", label: "Git Sync", icon: GitBranch },
+  { href: "/admin/settings/gitops-jobs", label: "Git Jobs", icon: GitCommit },
 ];
 
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {

@@ -20,7 +20,7 @@ export default async function NewClusterPage() {
             SSH key required before creating a cluster
           </div>
           <p className="text-sm text-muted-foreground">
-            Aura needs an SSH key to deploy the agent and provision cluster nodes.
+            SlurmUI needs an SSH key to deploy the agent and provision cluster nodes.
             Add at least one SSH key in Settings before creating a cluster.
           </p>
           <Link href="/admin/settings">

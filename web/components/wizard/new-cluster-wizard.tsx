@@ -29,6 +29,10 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
     sshUser: "root",
     sshPort: "22",
     sshKeyId: sshKeys.length === 1 ? sshKeys[0].id : "",
+    sshJumpHost: "",
+    sshJumpUser: "root",
+    sshJumpPort: "22",
+    sshJumpKeyId: "",
   });
   const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -55,17 +59,30 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
           sshKeyId: basics.sshKeyId,
           sshUser: basics.sshUser || "root",
           sshPort: parseInt(basics.sshPort) || 22,
+          sshJumpHost: basics.sshJumpHost || undefined,
+          sshJumpUser: basics.sshJumpHost ? (basics.sshJumpUser || "root") : undefined,
+          sshJumpPort: basics.sshJumpHost ? (parseInt(basics.sshJumpPort) || 22) : undefined,
+          sshJumpKeyId: basics.sshJumpHost && basics.sshJumpKeyId ? basics.sshJumpKeyId : undefined,
         }),
       });
       if (!res.ok) {
-        const err = await res.json();
-        setErrorMsg(err.error ?? "Failed to create cluster");
+        const bodyText = await res.text();
+        let msg: string;
+        try {
+          const err = JSON.parse(bodyText);
+          msg = err.error ?? `HTTP ${res.status}`;
+        } catch {
+          // Non-JSON response (Next.js 500 HTML page, for instance) — show a
+          // truncated excerpt so the real error isn't hidden.
+          msg = `HTTP ${res.status}: ${bodyText.slice(0, 300)}`;
+        }
+        setErrorMsg(msg);
         return;
       }
       const cluster = await res.json();
       router.push(`/admin/clusters/${cluster.id}/configuration`);
-    } catch {
-      setErrorMsg("Failed to create cluster. Please check your connection and try again.");
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Failed to create cluster. Please check your connection and try again.");
     } finally {
       setCreating(false);
     }

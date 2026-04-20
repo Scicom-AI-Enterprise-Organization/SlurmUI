@@ -22,8 +22,8 @@ wraps the day-to-day operations in a single web UI:
 
 - **For admins** — bootstrap a fresh controller, add/remove nodes, edit
   partitions, install apt/pip packages cluster-wide, mount NFS or S3 storage,
-  manage Linux users, and flip accounting / scheduling modes without shelling
-  into the controller.
+  manage Linux users, invite teammates via one-time links (ADMIN or VIEWER),
+  and flip accounting / scheduling modes without shelling into the controller.
 - **For users** — browse NFS + object storage, submit batch jobs from a form or
   raw editor (with ready-to-run examples), save reusable templates, watch job
   output live, and read an in-app "Learn Slurm" guide.
@@ -36,6 +36,11 @@ wraps the day-to-day operations in a single web UI:
 - **For disaster recovery & migration** — one-way **Git Sync** exports every
   cluster's config, SSH keys (optional), and job history as YAML into a git
   repo; a **Restore from git** button rebuilds a fresh SlurmUI from that repo.
+- **For GitOps workflows** — point **Git Jobs** at a repo of YAML manifests
+  (`jobs/**/*.yaml`) and the reconciler submits new jobs, cancel-and-resubmits
+  on content change, and cancels jobs whose manifest was deleted. Optional
+  one-way mirror of live PENDING/RUNNING jobs back into `running/` in the
+  same repo. Off by default; enable + schedule (min 30 s) from settings.
 
 Two connection modes, pick whichever fits your network:
 
@@ -69,7 +74,7 @@ docker compose -f docker-compose.dev.yml up --build
 
 **Only works on Linux because use `network_mode: host`**.
 
-Open [http://localhost:3000](http://localhost:3000) and log in with **`admin@aura.local`** / **`admin`**.
+Open [http://localhost:3000](http://localhost:3000) and log in with **`admin@aura.local`** / **`admin`** (Keycloak), or use the email-and-password form for accounts created via **invite link** (see [Identity & access](#identity--access)).
 
 This brings up:
 
@@ -178,11 +183,12 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 ### User-facing pages
 
 - **Dashboard** — last-24h running / completed / failed area chart + status donut; themed via CSS tokens so light/dark/brand switches are automatic.
-- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
+- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. Per-row **Restart** button on FAILED jobs runs `scontrol requeue`. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
 - **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
 - **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
 - **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
+- **Profile** (`/profile`) — your identity card, Linux account (copy-to-clipboard for username / UID / GID), cluster provisioning table, and activity totals (jobs submitted, running, templates saved). Local-login accounts can change their own password here.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
 ### Global admin settings
@@ -194,6 +200,96 @@ Under **/admin/settings** (sub-sidebar):
 | **SSH Keys** | Generate or import SSH key pairs, see which clusters use each, delete unused. |
 | **Alerts** | Webhook channels for Slack, Teams, or generic JSON. Per-channel event filter (glob like `cluster.*` or specific actions), optional cluster scoping, and a **pre-create test** that has to succeed before the channel can be saved. Fed by `logAudit` and by the health monitor for transitions (`cluster.unreachable/recovered`, `node.unhealthy/recovered`, `storage.disconnected/reconnected`, `job.stuck`, `job.held`). |
 | **Git Sync** | Configure a backing git repo; one-way export of state, and **Restore from git** for migrating to a new SlurmUI. |
+| **Git Jobs** | Separate GitOps loop for *job submission* — clone a repo, scan `jobs/**/*.yaml`, and reconcile against the Job table (submit new, cancel-and-resubmit on content change, cancel-and-drop on deletion). Also **Mirror running jobs**, a one-way push of every live PENDING/RUNNING job into `running/<cluster>/<slurmId>.yaml`. Off by default; interval clamped to ≥ 30 s. |
+
+The admin sidebar also has a dedicated **/admin/organization** page (below)
+for user / invite management.
+
+### Identity & access
+
+Two authentication paths stand side-by-side:
+
+1. **Keycloak SSO** — the primary provider. Realm / client / group roles
+   mapped to `ADMIN` if any of `aura-admin` / `admin` is present, else
+   `VIEWER`. Upsert on first sign-in, re-checked on every token refresh.
+2. **Email + password** — for local accounts created through an invite
+   link. Passwords are bcrypt-hashed; Keycloak-only rows (no `passwordHash`)
+   can't use this path.
+
+Two roles only:
+
+| Role | What it can do |
+|---|---|
+| `ADMIN` | Everything — manage clusters, users, invites, Git Jobs, etc. |
+| `VIEWER` | Read-only. Middleware rejects any non-GET API call with HTTP 403. |
+
+**Organization page** (`/admin/organization`) drives the whole flow:
+
+- **Invite by link** — pick role (Admin/Viewer), optional email lock,
+  expiry (default 24 h, max 30 days). Raw token is shown **once** in a
+  copy-link dialog and never echoed again. The recipient opens
+  `/invite/<token>`, sets name + password, and is auto-signed-in; the
+  invite is single-use and expires on first claim.
+- **Members table** — change role (confirm dialog, can't demote yourself),
+  delete user (confirm dialog, refuses if they own jobs), generate a
+  **password reset link** for local accounts.
+- **Password reset link** — admin issues `/reset/<token>` (1 h expiry,
+  single-use, also invalidates any other outstanding reset tokens on
+  success). Delivered out-of-band; the user sets a new password and is
+  auto-signed-in. Keycloak users are rejected — change those in Keycloak.
+- **Pending invites** — see outstanding ones with a masked token preview;
+  revoke with one click.
+
+Public routes (no auth required) are tightly scoped: `/login`,
+`/invite/[token]`, `/reset/[token]`, and their matching
+`/api/invites/by-token/*` / `/api/password-reset/by-token/*` endpoints.
+Everything else requires a session; non-admin mutating calls are blocked
+at the middleware layer.
+
+### Git Jobs (GitOps for job submission)
+
+Separate from Git Sync, **Git Jobs** treats a git repo as the source of
+truth for *what should run*. Admin settings live at
+**/admin/settings/gitops-jobs**.
+
+Manifest format (`<repo>/[path/]jobs/**/*.yaml`):
+
+```yaml
+apiVersion: aura/v1
+kind: Job
+metadata:
+  name: train-001              # unique per cluster — identifies the job lineage
+  cluster: gpu-a               # cluster name (must exist in SlurmUI)
+  user: alice@example.com      # must match a User.email
+spec:
+  partition: gpu
+  script: |
+    #!/bin/bash
+    #SBATCH --gres=gpu:1
+    srun python train.py
+```
+
+Reconciler loop (off by default; interval ≥ 30 s):
+
+- New manifest → submit via the same internal helper as the REST
+  `POST /api/clusters/[id]/jobs` route (`lib/submit-job.ts`).
+- Content hash changed → cancel running job + delete row + resubmit
+  (detected via `sha256(yaml)` stored in `Job.sourceRef`).
+- Manifest removed from repo → cancel + drop.
+- Unchanged → skip.
+
+Idempotency comes from `@@unique([clusterId, sourceName])` on `Job`, so the
+same manifest name always maps to one job lineage per cluster.
+
+**Mirror running jobs** (on-demand button, no toggle required beyond
+`repoUrl` being set) overwrites `<path>/running/<cluster>/<slurmId>.yaml`
+with snapshots of every live PENDING/RUNNING job and commits + pushes. The
+reconciler never reads `running/`, so the mirror can coexist with
+declarative submissions without loops.
+
+Auth is identical to Git Sync — HTTPS PAT, deploy key, or inline
+credentials. Read-only access is sufficient for reconcile; write is only
+needed for the mirror.
 
 ### Git sync & migration
 
@@ -403,7 +499,8 @@ Near-term:
 - Resource dashboard per user (GPU-hours, queue time percentiles).
 - FreeIPA integration for centralized users (already stubbed in config).
 - Agent auto-update channel.
-- Two-way GitOps: webhook-driven reconcile on `git push`, drift detection, PR-review workflow (MVP one-way sync + restore already shipped).
+- Two-way GitOps: webhook-driven reconcile on `git push`, drift detection, PR-review workflow (one-way Git Sync + polling Git Jobs reconciler already shipped).
+- Self-serve "forgot password" flow (admin-issued reset links are already available).
 
 Longer term:
 - Multi-tenant quotas via `sacctmgr` fair-share automation.

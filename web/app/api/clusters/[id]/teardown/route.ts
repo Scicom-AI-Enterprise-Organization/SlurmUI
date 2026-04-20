@@ -52,7 +52,7 @@ stop_svc() {
 }
 
 echo "============================================"
-echo "  Aura Cluster Teardown"
+echo "  SlurmUI Cluster Teardown"
 echo "============================================"
 echo "running as: \$(whoami) (uid=\$(id -u)) — sudo prefix: \\"\${S:-<none>}\\""
 echo ""

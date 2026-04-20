@@ -416,7 +416,7 @@ export default function JobListPage() {
         <p className="text-center text-muted-foreground">Loading...</p>
       ) : (
         <>
-          <JobTable jobs={jobs} />
+          <JobTable jobs={jobs} onChange={fetchJobs} />
 
           {pagination.total > 0 && (
             <div className="flex items-center justify-between">
@@ -506,7 +506,7 @@ export default function JobListPage() {
             </DialogTitle>
             {resetResult?.ok && resetResult.count !== undefined && (
               <DialogDescription>
-                Cancelled {resetResult.count} job{resetResult.count === 1 ? "" : "s"} in Aura&apos;s record.
+                Cancelled {resetResult.count} job{resetResult.count === 1 ? "" : "s"} in SlurmUI&apos;s record.
                 Slurm output below.
               </DialogDescription>
             )}

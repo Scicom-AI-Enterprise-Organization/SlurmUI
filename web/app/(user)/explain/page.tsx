@@ -330,8 +330,8 @@ echo $CUDA_VISIBLE_DEVICES     # e.g. "0,1"`}</Pre>
               <Code>sacctmgr</Code> to manage <i>associations</i>: tuples of
               (cluster, account, user, partition) with limits attached.
             </p>
-            <Pre>{`sacctmgr -i add cluster aura
-sacctmgr -i add account research Description="..." Organization=Aura
+            <Pre>{`sacctmgr -i add cluster slurmui
+sacctmgr -i add account research Description="..." Organization=SlurmUI
 sacctmgr -i add user alice Account=research DefaultAccount=research
 sacctmgr modify user alice set MaxJobs=10 MaxWall=1-00:00:00
 

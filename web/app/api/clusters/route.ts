@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
+import { probeClusterHealth } from "@/lib/cluster-health";
 
 export async function GET() {
   const session = await auth();
@@ -23,6 +24,8 @@ export async function GET() {
     orderBy: { createdAt: "desc" },
   });
 
+  for (const c of clusters) probeClusterHealth(c.id);
+
   return NextResponse.json(clusters);
 }
 
@@ -33,7 +36,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort } = body;
+  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId } = body;
   if (!name || !controllerHost) {
     return NextResponse.json(
       { error: "Missing required fields: name, controllerHost" },
@@ -73,29 +76,39 @@ export async function POST(req: NextRequest) {
   const installToken = randomUUID();
   const installTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-  const cluster = await prisma.cluster.create({
-    data: {
-      name,
-      controllerHost,
-      connectionMode: mode,
-      natsUrl: natsUrl || null,
-      natsCredentials: "",
-      sshUser: sshUser || "root",
-      sshPort: sshPort || 22,
-      status: "PROVISIONING",
-      config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
-      installToken,
-      installTokenExpiresAt,
-      ...(sshKeyId ? { sshKeyId } : {}),
-    },
-  });
+  try {
+    const cluster = await prisma.cluster.create({
+      data: {
+        name,
+        controllerHost,
+        connectionMode: mode,
+        natsUrl: natsUrl || null,
+        natsCredentials: "",
+        sshUser: sshUser || "root",
+        sshPort: sshPort || 22,
+        sshJumpHost: sshJumpHost || null,
+        sshJumpUser: sshJumpHost ? (sshJumpUser || "root") : null,
+        sshJumpPort: sshJumpHost ? (sshJumpPort || 22) : null,
+        sshJumpKeyId: sshJumpHost && sshJumpKeyId ? sshJumpKeyId : null,
+        status: "PROVISIONING",
+        config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
+        installToken,
+        installTokenExpiresAt,
+        ...(sshKeyId ? { sshKeyId } : {}),
+      },
+    });
 
-  await logAudit({
-    action: "cluster.create",
-    entity: "Cluster",
-    entityId: cluster.id,
-    metadata: { name, controllerHost, connectionMode: mode },
-  });
+    await logAudit({
+      action: "cluster.create",
+      entity: "Cluster",
+      entityId: cluster.id,
+      metadata: { name, controllerHost, connectionMode: mode },
+    });
 
-  return NextResponse.json(cluster, { status: 201 });
+    return NextResponse.json(cluster, { status: 201 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown database error";
+    console.error("[clusters POST] create failed:", err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }

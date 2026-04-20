@@ -18,6 +18,44 @@ interface SshTarget {
   port: number;
   privateKey: string; // raw PEM content
   bastion?: boolean;  // true if SSH server is a bastion that only supports interactive shell
+  // ProxyJump (ssh -J) — when set, ssh routes through this host first.
+  jumpHost?: string | null;
+  jumpUser?: string | null;
+  jumpPort?: number | null;
+  // Optional: raw PEM for the jump hop when it needs a different key from
+  // the destination. When unset, the same `privateKey` is used for both hops.
+  jumpPrivateKey?: string | null;
+}
+
+/**
+ * Build the jump arguments for ssh. Always uses an explicit `ProxyCommand`
+ * so the jump-hop flags (StrictHostKeyChecking, IdentityFile, etc.) are
+ * guaranteed to apply — OpenSSH < 8.9's `-J` silently drops `-i` and strict
+ * host-key settings when it invokes the child ssh.
+ *
+ * `tmpDir` is where we plant the jump key (when different from the main key).
+ * Caller is responsible for deleting it (every spawn helper rm -rf's its
+ * tmpDir when the process exits).
+ */
+function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: string): string[] {
+  if (!target.jumpHost) return [];
+  const u = target.jumpUser || "root";
+  const p = target.jumpPort || 22;
+
+  let jumpKeyPath = mainKeyPath;
+  if (target.jumpPrivateKey && target.jumpPrivateKey !== target.privateKey) {
+    jumpKeyPath = join(tmpDir, "ssh_jump_key");
+    writeFileSync(jumpKeyPath, target.jumpPrivateKey, { mode: 0o600 });
+    chmodSync(jumpKeyPath, 0o600);
+  }
+
+  // -W %h:%p makes the bastion forward raw TCP to the destination; it's
+  // the canonical stdin/stdout tunnel for ProxyCommand-based jumps.
+  // LogLevel=ERROR silences the "Permanently added ... to the list of known
+  // hosts" warnings the child ssh emits every call — those otherwise pollute
+  // the Test-SSH UI and the log dialogs.
+  const proxy = `ssh -i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -W %h:%p ${u}@${target.jumpHost}`;
+  return ["-o", `ProxyCommand=${proxy}`];
 }
 
 interface SshExecCallbacks {
@@ -36,11 +74,23 @@ export async function getClusterSshTarget(clusterId: string): Promise<SshTarget 
   });
   if (!cluster || !cluster.sshKey) return null;
 
+  // Fetch the jump key out-of-band (no Prisma relation) so we don't perturb
+  // the dozens of existing `include: { sshKey: true }` call sites.
+  let jumpPrivateKey: string | null = null;
+  if (cluster.sshJumpKeyId && cluster.sshJumpKeyId !== cluster.sshKeyId) {
+    const jumpKey = await prisma.sshKey.findUnique({ where: { id: cluster.sshJumpKeyId } });
+    jumpPrivateKey = jumpKey?.privateKey ?? null;
+  }
+
   return {
     host: cluster.controllerHost,
     user: cluster.sshUser,
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
+    jumpHost: cluster.sshJumpHost,
+    jumpUser: cluster.sshJumpUser,
+    jumpPort: cluster.sshJumpPort,
+    jumpPrivateKey,
   };
 }
 
@@ -66,8 +116,10 @@ export function sshExec(
     "-p", String(target.port),
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=15",
     "-o", "BatchMode=yes",
+    ...buildJumpArgs(target, tmpDir, keyPath),
     `${target.user}@${target.host}`,
     command,
   ], {
@@ -135,8 +187,10 @@ export function sshExecSimple(
         "-p", String(target.port),
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
         "-o", "ConnectTimeout=15",
         "-tt",
+        ...buildJumpArgs(target, tmpDir, keyPath),
         `${target.user}@${target.host}`,
       ], { stdio: ["pipe", "pipe", "pipe"] });
 
@@ -203,8 +257,10 @@ export function sshExecSimple(
       "-p", String(target.port),
       "-o", "StrictHostKeyChecking=no",
       "-o", "UserKnownHostsFile=/dev/null",
+      "-o", "LogLevel=ERROR",
       "-o", "ConnectTimeout=15",
       "-o", "BatchMode=yes",
+      ...buildJumpArgs(target, tmpDir, keyPath),
       `${target.user}@${target.host}`,
       command,
     ], {
@@ -259,6 +315,7 @@ export function sshExecScript(
     "-p", String(target.port),
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=15",
   ];
 
@@ -267,6 +324,10 @@ export function sshExecScript(
   } else {
     sshArgs.push("-o", "BatchMode=yes");
   }
+
+  // ProxyJump hop (if configured on the cluster). Pushed *before* the
+  // user@host target so ssh interprets it as a global option.
+  for (const a of buildJumpArgs(target, tmpDir, keyPath)) sshArgs.push(a);
 
   sshArgs.push(`${target.user}@${target.host}`);
 

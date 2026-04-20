@@ -189,7 +189,7 @@ export function SetupStepper({ clusterId, controllerHost, sshKeyConfigured }: Se
           SSH key not configured
         </div>
         <p className="text-sm text-muted-foreground">
-          An SSH key is required before nodes can be provisioned. Aura uses it to reach cluster
+          An SSH key is required before nodes can be provisioned. SlurmUI uses it to reach cluster
           nodes via Ansible.
         </p>
         <ol className="text-sm space-y-1 list-decimal list-inside text-muted-foreground">

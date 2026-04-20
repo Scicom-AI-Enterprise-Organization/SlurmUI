@@ -20,7 +20,7 @@ NATS_URL="${natsUrl}"
 
 echo ""
 echo "============================================"
-echo "  Aura Agent Installer"
+echo "  SlurmUI Agent Installer"
 echo "  Cluster: ${cluster.name}"
 echo "============================================"
 echo ""

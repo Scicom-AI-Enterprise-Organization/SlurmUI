@@ -1,6 +1,7 @@
 import NextAuth from "next-auth";
 import KeycloakProvider from "next-auth/providers/keycloak";
-import { PrismaAdapter } from "@auth/prisma-adapter";
+import CredentialsProvider from "next-auth/providers/credentials";
+import bcrypt from "bcryptjs";
 import { prisma } from "./prisma";
 import type { UserRole } from "@prisma/client";
 
@@ -21,13 +22,8 @@ declare module "next-auth" {
   }
 }
 
-declare module "@auth/core/jwt" {
-  interface JWT {
-    role?: UserRole;
-    keycloakId?: string;
-    userId?: string;
-  }
-}
+// Note: v5 beta's JWT type is permissive — we just assign string fields on
+// the token and cast back in the session callback.
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
@@ -35,6 +31,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     signIn: "/login",
   },
   providers: [
+    // Local email+password. Only works for users with a passwordHash — i.e.
+    // accounts created through an invite link. Keycloak-only users (no
+    // passwordHash) cannot log in through this provider.
+    CredentialsProvider({
+      name: "Email & password",
+      credentials: {
+        email: { label: "Email", type: "email" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        const email = typeof credentials?.email === "string" ? credentials.email.toLowerCase().trim() : "";
+        const password = typeof credentials?.password === "string" ? credentials.password : "";
+        if (!email || !password) return null;
+        const user = await prisma.user.findUnique({ where: { email } });
+        if (!user?.passwordHash) return null;
+        const ok = await bcrypt.compare(password, user.passwordHash);
+        if (!ok) return null;
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          keycloakId: user.keycloakId,
+        };
+      },
+    }),
     KeycloakProvider({
       clientId: process.env.KEYCLOAK_ID!,
       clientSecret: process.env.KEYCLOAK_SECRET!,
@@ -44,7 +66,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const clientRoles: string[] = profile.resource_access?.[process.env.KEYCLOAK_ID!]?.roles ?? [];
         const groups: string[] = profile.groups ?? [];
         const allRoles = new Set([...realmRoles, ...clientRoles, ...groups]);
-        const role: UserRole = allRoles.has("aura-admin") || allRoles.has("admin") ? "ADMIN" : "USER";
+        const role: UserRole = allRoles.has("aura-admin") || allRoles.has("admin") ? "ADMIN" : "VIEWER";
         return {
           id: profile.sub,
           name: profile.name ?? profile.preferred_username,
@@ -61,25 +83,44 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     async jwt({ token, user, account }) {
       if (user) {
-        // Upsert user in database — role always comes from Keycloak
-        const role = user.role ?? "USER";
-        const dbUser = await prisma.user.upsert({
-          where: { keycloakId: user.keycloakId ?? user.id! },
-          update: {
-            name: user.name,
-            email: user.email!,
-            role,
-          },
-          create: {
-            keycloakId: user.keycloakId ?? user.id!,
-            email: user.email!,
-            name: user.name,
-            role,
-          },
-        });
-        token.role = role;
-        token.keycloakId = dbUser.keycloakId;
-        token.userId = dbUser.id;
+        if (account?.provider === "credentials") {
+          // Credentials flow — user row already exists (authorize() fetched it).
+          // Trust the returned fields verbatim; role is DB-owned.
+          token.role = (user.role ?? "VIEWER") as UserRole;
+          token.keycloakId = user.keycloakId ?? "";
+          token.userId = user.id!;
+        } else {
+          // Keycloak (or other upstream OIDC) — upsert, role comes from IdP.
+          const role = user.role ?? "VIEWER";
+          const dbUser = await prisma.user.upsert({
+            where: { keycloakId: user.keycloakId ?? user.id! },
+            update: {
+              name: user.name,
+              email: user.email!,
+              role,
+            },
+            create: {
+              keycloakId: user.keycloakId ?? user.id!,
+              email: user.email!,
+              name: user.name,
+              role,
+            },
+          });
+          token.role = role;
+          token.keycloakId = dbUser.keycloakId;
+          token.userId = dbUser.id;
+        }
+      } else if (token.userId) {
+        // Subsequent callbacks (no `user` arg) — re-read role from the DB so
+        // admin-promoted or demoted users see the change on the next page
+        // load instead of waiting for a full sign-out/sign-in cycle.
+        try {
+          const fresh = await prisma.user.findUnique({
+            where: { id: token.userId as string },
+            select: { role: true },
+          });
+          if (fresh?.role) token.role = fresh.role as UserRole;
+        } catch {}
       }
       return token;
     },

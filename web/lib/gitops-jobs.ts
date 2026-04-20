@@ -1,0 +1,568 @@
+/**
+ * GitOps for job submission.
+ *
+ * Watches a target git repo on a fixed cron interval and reconciles the set
+ * of `jobs/**\/*.yaml` manifests against the `Job` table. One manifest =
+ * one (clusterId, sourceName) Job lineage. Content changes (cancel + resubmit)
+ * are detected via a sha256 of the YAML body stored in `Job.sourceRef`.
+ *
+ * Off by default. Enable via the `gitops_jobs_config` Setting row (admin UI).
+ *
+ * Manifest shape:
+ *   apiVersion: aura/v1
+ *   kind: Job
+ *   metadata: { name: <unique-per-cluster>, cluster: <cluster name>, user: <email> }
+ *   spec: { partition: <name>, script: |- <sbatch> }
+ *
+ * Auth + clone reuses the same credential pattern as lib/git-sync.ts (PAT for
+ * https URLs, deploy key via GIT_SSH_COMMAND for git@ URLs).
+ */
+
+import { spawn } from "child_process";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, readdirSync, statSync } from "fs";
+import { createHash } from "crypto";
+import { join, relative } from "path";
+import { tmpdir } from "os";
+import * as yaml from "js-yaml";
+import { prisma } from "./prisma";
+import { submitJob } from "./submit-job";
+import { logAudit } from "./audit";
+
+export interface GitOpsJobsConfig {
+  enabled: boolean;
+  repoUrl: string;
+  branch: string;
+  /** Subfolder inside the repo to scan; manifests live under `<path>/jobs/**`. */
+  path: string;
+  deployKey: string;
+  httpsToken: string;
+  /** Reconcile cadence. Clamped to >= 30 seconds. */
+  intervalSec: number;
+  lastReconcileAt?: string;
+  lastStatus?: "success" | "failed";
+  lastMessage?: string;
+}
+
+export const DEFAULT_GITOPS_JOBS_CONFIG: GitOpsJobsConfig = {
+  enabled: false,
+  repoUrl: "",
+  branch: "main",
+  path: "",
+  deployKey: "",
+  httpsToken: "",
+  intervalSec: 30,
+};
+
+const SETTING_KEY = "gitops_jobs_config";
+
+export async function loadGitOpsJobsConfig(): Promise<GitOpsJobsConfig> {
+  const row = await prisma.setting.findUnique({ where: { key: SETTING_KEY } });
+  if (!row) return { ...DEFAULT_GITOPS_JOBS_CONFIG };
+  try {
+    return { ...DEFAULT_GITOPS_JOBS_CONFIG, ...JSON.parse(row.value) };
+  } catch {
+    return { ...DEFAULT_GITOPS_JOBS_CONFIG };
+  }
+}
+
+export async function saveGitOpsJobsConfig(cfg: GitOpsJobsConfig): Promise<void> {
+  // Clamp interval to a sane minimum so the cron can't be set to 0.
+  const safe: GitOpsJobsConfig = { ...cfg, intervalSec: Math.max(30, Math.floor(cfg.intervalSec || 30)) };
+  await prisma.setting.upsert({
+    where: { key: SETTING_KEY },
+    create: { key: SETTING_KEY, value: JSON.stringify(safe) },
+    update: { value: JSON.stringify(safe) },
+  });
+}
+
+// ─────────────── git shell (mirrors git-sync.ts to stay consistent) ───────────
+
+function runGit(args: string[], cwd: string, env: NodeJS.ProcessEnv, onLog: (l: string) => void): Promise<{ code: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn("git", args, { cwd, env });
+    let stdout = "";
+    proc.stdout.on("data", (c: Buffer) => {
+      const s = c.toString();
+      stdout += s;
+      for (const line of s.split("\n")) if (line.trim()) onLog(line.trim());
+    });
+    proc.stderr.on("data", (c: Buffer) => {
+      for (const line of c.toString().split("\n")) if (line.trim()) onLog(`[git] ${line.trim()}`);
+    });
+    proc.on("close", (code) => resolve({ code, stdout }));
+    proc.on("error", (err) => { onLog(`[error] ${err.message}`); resolve({ code: -1, stdout }); });
+  });
+}
+
+function walkFiles(base: string): string[] {
+  if (!existsSync(base)) return [];
+  const out: string[] = [];
+  const stack = [base];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) stack.push(full);
+      else out.push(full);
+    }
+  }
+  return out;
+}
+
+// ─────────────────────────── manifest model ────────────────────────────────
+
+interface JobManifest {
+  apiVersion?: string;
+  kind?: string;
+  metadata?: { name?: string; cluster?: string; user?: string };
+  spec?: { partition?: string; script?: string };
+}
+
+interface ParsedManifest {
+  /** Repo-relative path, used as the stable identifier in `sourceRef`. */
+  relPath: string;
+  contentHash: string;
+  name: string;
+  clusterName: string;
+  userEmail: string;
+  partition: string;
+  script: string;
+}
+
+export interface ReconcileSummary {
+  scanned: number;
+  submitted: number;
+  resubmitted: number;
+  cancelled: number;
+  unchanged: number;
+  skipped: { path: string; reason: string }[];
+  errors: { path: string; error: string }[];
+}
+
+function parseManifest(relPath: string, body: string): { ok: ParsedManifest } | { err: string } {
+  let doc: JobManifest;
+  try {
+    doc = yaml.load(body) as JobManifest;
+  } catch (e) {
+    return { err: `yaml parse: ${e instanceof Error ? e.message : "unknown"}` };
+  }
+  if (!doc || typeof doc !== "object") return { err: "empty document" };
+  if (doc.kind !== "Job") return { err: `kind must be "Job", got "${doc.kind}"` };
+  const name = doc.metadata?.name;
+  const clusterName = doc.metadata?.cluster;
+  const userEmail = doc.metadata?.user;
+  const partition = doc.spec?.partition;
+  const script = doc.spec?.script;
+  if (!name) return { err: "metadata.name required" };
+  if (!clusterName) return { err: "metadata.cluster required" };
+  if (!userEmail) return { err: "metadata.user required" };
+  if (!partition) return { err: "spec.partition required" };
+  if (!script) return { err: "spec.script required" };
+  return {
+    ok: {
+      relPath,
+      contentHash: createHash("sha256").update(body).digest("hex").slice(0, 16),
+      name,
+      clusterName,
+      userEmail,
+      partition,
+      script,
+    },
+  };
+}
+
+// ─────────────────────────── slurm cancel helper ─────────────────────────────
+
+async function cancelSlurmJob(jobId: string, onLog: (l: string) => void): Promise<void> {
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    include: { cluster: { include: { sshKey: true } } },
+  });
+  if (!job?.slurmJobId || !job.cluster) {
+    await prisma.job.update({ where: { id: jobId }, data: { status: "CANCELLED" } }).catch(() => {});
+    return;
+  }
+  const c = job.cluster;
+  if (c.connectionMode === "SSH" && c.sshKey) {
+    const { sshExecScript } = await import("./ssh-exec");
+    await new Promise<void>((resolve) => {
+      sshExecScript(
+        { host: c.controllerHost, user: c.sshUser, port: c.sshPort, privateKey: c.sshKey!.privateKey, bastion: c.sshBastion },
+        `scancel ${job.slurmJobId} 2>&1 || true`,
+        { onStream: (l) => onLog(`[scancel] ${l}`), onComplete: () => resolve() },
+      );
+    });
+  } else if (c.connectionMode === "NATS") {
+    try {
+      const { publishCommand } = await import("./nats");
+      await publishCommand(c.id, {
+        request_id: job.id,
+        type: "cancel_job",
+        payload: { slurm_job_id: job.slurmJobId },
+      });
+    } catch (e) {
+      onLog(`[scancel] nats publish failed: ${e instanceof Error ? e.message : "unknown"}`);
+    }
+  }
+  await prisma.job.update({ where: { id: jobId }, data: { status: "CANCELLED" } }).catch(() => {});
+}
+
+// ─────────────────────────── reconcile entry point ───────────────────────────
+
+export async function runReconcile(onLog: (line: string) => void): Promise<ReconcileSummary> {
+  const cfg = await loadGitOpsJobsConfig();
+  if (!cfg.enabled) throw new Error("gitops jobs sync is disabled");
+  if (!cfg.repoUrl) throw new Error("repoUrl is not set");
+
+  const summary: ReconcileSummary = {
+    scanned: 0, submitted: 0, resubmitted: 0, cancelled: 0, unchanged: 0,
+    skipped: [], errors: [],
+  };
+
+  const workDir = mkdtempSync(join(tmpdir(), "aura-gitops-jobs-"));
+  let keyPath: string | null = null;
+  let gitUrl = cfg.repoUrl;
+  const env: NodeJS.ProcessEnv = { ...process.env };
+
+  try {
+    if (cfg.repoUrl.startsWith("http") && cfg.httpsToken) {
+      const u = new URL(cfg.repoUrl);
+      u.username = "x-access-token";
+      u.password = cfg.httpsToken;
+      gitUrl = u.toString();
+    } else if (cfg.deployKey) {
+      keyPath = join(workDir, "_deploy_key");
+      writeFileSync(keyPath, cfg.deployKey.endsWith("\n") ? cfg.deployKey : cfg.deployKey + "\n", { mode: 0o600 });
+      env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+    }
+
+    onLog(`[gitops] cloning ${cfg.repoUrl} (branch ${cfg.branch})`);
+    const clone = await runGit(["clone", "--depth", "1", "--branch", cfg.branch, gitUrl, "repo"], workDir, env, onLog);
+    if (clone.code !== 0) throw new Error("git clone failed");
+    const repoDir = join(workDir, "repo");
+    const jobsRoot = cfg.path ? join(repoDir, cfg.path, "jobs") : join(repoDir, "jobs");
+
+    // ── Parse all manifests ──────────────────────────────────────────────
+    const parsed: ParsedManifest[] = [];
+    for (const file of walkFiles(jobsRoot)) {
+      if (!file.endsWith(".yaml") && !file.endsWith(".yml")) continue;
+      summary.scanned++;
+      const rel = relative(repoDir, file);
+      const body = readFileSync(file, "utf8");
+      const res = parseManifest(rel, body);
+      if ("err" in res) {
+        summary.skipped.push({ path: rel, reason: res.err });
+        onLog(`[gitops] skip ${rel}: ${res.err}`);
+        continue;
+      }
+      parsed.push(res.ok);
+    }
+
+    // ── Cache cluster + user lookups ─────────────────────────────────────
+    const clusters = await prisma.cluster.findMany({ select: { id: true, name: true } });
+    const clusterByName = new Map(clusters.map((c) => [c.name, c.id]));
+    const emails = Array.from(new Set(parsed.map((p) => p.userEmail)));
+    const users = await prisma.user.findMany({ where: { email: { in: emails } }, select: { id: true, email: true } });
+    const userByEmail = new Map(users.map((u) => [u.email, u.id]));
+
+    // Track which (clusterId, sourceName) keys are present in this scan so we
+    // can identify deletions afterwards.
+    const seenKeys = new Set<string>();
+
+    for (const m of parsed) {
+      const clusterId = clusterByName.get(m.clusterName);
+      if (!clusterId) {
+        summary.skipped.push({ path: m.relPath, reason: `cluster "${m.clusterName}" not found` });
+        continue;
+      }
+      const userId = userByEmail.get(m.userEmail);
+      if (!userId) {
+        summary.skipped.push({ path: m.relPath, reason: `user "${m.userEmail}" not found` });
+        continue;
+      }
+      seenKeys.add(`${clusterId}\x00${m.name}`);
+
+      const sourceRef = `${m.relPath}@sha256:${m.contentHash}`;
+      const existing = await prisma.job.findUnique({
+        where: { clusterId_sourceName: { clusterId, sourceName: m.name } },
+      });
+
+      try {
+        if (!existing) {
+          onLog(`[gitops] submit new ${m.relPath}`);
+          await submitJob({
+            clusterId, userId,
+            script: m.script, partition: m.partition,
+            sourceRef, sourceName: m.name,
+            auditExtra: { via: "gitops", manifest: m.relPath },
+          });
+          summary.submitted++;
+          continue;
+        }
+
+        if (existing.sourceRef === sourceRef) {
+          summary.unchanged++;
+          continue;
+        }
+
+        // Content changed → cancel-if-active + resubmit. Per user spec:
+        // always cancel+resubmit on change, regardless of running state.
+        onLog(`[gitops] resubmit ${m.relPath} (sourceRef changed)`);
+        if (existing.status === "PENDING" || existing.status === "RUNNING") {
+          await cancelSlurmJob(existing.id, onLog);
+          summary.cancelled++;
+        }
+        // Drop the stale row so the @@unique([clusterId, sourceName]) lets
+        // the new submission take its place. Keep history? No — the audit log
+        // already records the lineage and the old job was cancelled; keeping
+        // both rows would clutter the user's job list with phantom entries.
+        await prisma.job.delete({ where: { id: existing.id } }).catch(() => {});
+        await submitJob({
+          clusterId, userId,
+          script: m.script, partition: m.partition,
+          sourceRef, sourceName: m.name,
+          auditExtra: { via: "gitops", manifest: m.relPath, replaces: existing.id },
+        });
+        summary.resubmitted++;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "unknown";
+        summary.errors.push({ path: m.relPath, error: msg });
+        onLog(`[gitops] error on ${m.relPath}: ${msg}`);
+      }
+    }
+
+    // ── Removals: any gitops-owned job whose manifest no longer exists ───
+    const owned = await prisma.job.findMany({
+      where: { sourceName: { not: null } },
+      select: { id: true, clusterId: true, sourceName: true, status: true, sourceRef: true },
+    });
+    for (const j of owned) {
+      const key = `${j.clusterId}\x00${j.sourceName}`;
+      if (seenKeys.has(key)) continue;
+      onLog(`[gitops] manifest removed → cancel+drop ${j.sourceRef}`);
+      if (j.status === "PENDING" || j.status === "RUNNING") {
+        await cancelSlurmJob(j.id, onLog);
+      }
+      await prisma.job.delete({ where: { id: j.id } }).catch(() => {});
+      summary.cancelled++;
+    }
+
+    onLog(`[gitops] done: scanned=${summary.scanned} submitted=${summary.submitted} resubmitted=${summary.resubmitted} cancelled=${summary.cancelled} unchanged=${summary.unchanged} skipped=${summary.skipped.length} errors=${summary.errors.length}`);
+
+    await saveGitOpsJobsConfig({
+      ...cfg,
+      lastReconcileAt: new Date().toISOString(),
+      lastStatus: summary.errors.length === 0 ? "success" : "failed",
+      lastMessage: summary.errors.length === 0
+        ? `submitted ${summary.submitted}, resubmitted ${summary.resubmitted}, cancelled ${summary.cancelled}`
+        : `${summary.errors.length} error(s)`,
+    });
+
+    await logAudit({
+      action: "gitops_jobs.reconcile",
+      entity: "Setting",
+      entityId: SETTING_KEY,
+      metadata: {
+        scanned: summary.scanned,
+        submitted: summary.submitted,
+        resubmitted: summary.resubmitted,
+        cancelled: summary.cancelled,
+        unchanged: summary.unchanged,
+        skipped: summary.skipped.length,
+        errors: summary.errors.length,
+      },
+    });
+
+    return summary;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown";
+    onLog(`[error] ${message}`);
+    await saveGitOpsJobsConfig({
+      ...cfg,
+      lastReconcileAt: new Date().toISOString(),
+      lastStatus: "failed",
+      lastMessage: message,
+    });
+    throw err;
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+// ─────────────────── export running jobs (one-way mirror) ──────────────────
+
+export interface ExportRunningSummary {
+  exported: number;
+  pruned: number; // stale files in running/ that no longer match an active job
+}
+
+/**
+ * Clone the configured repo and write a YAML manifest for every currently
+ * PENDING/RUNNING job into `<path>/running/<cluster>/<slurmId|jobId>.yaml`.
+ * Commits + pushes the diff. Stale files are removed so the mirror reflects
+ * the live set exactly.
+ *
+ * Writes to `running/` — intentionally NOT `jobs/` — so the reconciler does
+ * not treat these manifests as declarative submissions.
+ */
+export async function runExportRunning(onLog: (line: string) => void): Promise<ExportRunningSummary> {
+  const cfg = await loadGitOpsJobsConfig();
+  if (!cfg.repoUrl) throw new Error("repoUrl is not set");
+
+  const workDir = mkdtempSync(join(tmpdir(), "aura-gitops-running-"));
+  let keyPath: string | null = null;
+  let gitUrl = cfg.repoUrl;
+  const env: NodeJS.ProcessEnv = { ...process.env };
+
+  try {
+    if (cfg.repoUrl.startsWith("http") && cfg.httpsToken) {
+      const u = new URL(cfg.repoUrl);
+      u.username = "x-access-token";
+      u.password = cfg.httpsToken;
+      gitUrl = u.toString();
+    } else if (cfg.deployKey) {
+      keyPath = join(workDir, "_deploy_key");
+      writeFileSync(keyPath, cfg.deployKey.endsWith("\n") ? cfg.deployKey : cfg.deployKey + "\n", { mode: 0o600 });
+      env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+    }
+
+    onLog(`[export] cloning ${cfg.repoUrl} (branch ${cfg.branch})`);
+    let clone = await runGit(["clone", "--depth", "1", "--branch", cfg.branch, gitUrl, "repo"], workDir, env, onLog);
+    if (clone.code !== 0) {
+      onLog(`[export] branch ${cfg.branch} missing, falling back to default then creating`);
+      clone = await runGit(["clone", "--depth", "1", gitUrl, "repo"], workDir, env, onLog);
+      if (clone.code !== 0) throw new Error("git clone failed");
+      await runGit(["checkout", "-B", cfg.branch], join(workDir, "repo"), env, onLog);
+    }
+    const repoDir = join(workDir, "repo");
+    await runGit(["config", "user.name", "Aura GitOps"], repoDir, env, onLog);
+    await runGit(["config", "user.email", "aura-gitops@localhost"], repoDir, env, onLog);
+
+    const baseDir = cfg.path ? join(repoDir, cfg.path) : repoDir;
+    const runningDir = join(baseDir, "running");
+
+    // Wipe the directory so deletions propagate. Same pattern as git-sync.ts.
+    if (existsSync(runningDir)) rmSync(runningDir, { recursive: true, force: true });
+    mkdirSync(runningDir, { recursive: true });
+
+    const jobs = await prisma.job.findMany({
+      where: { status: { in: ["PENDING", "RUNNING"] } },
+      include: { cluster: { select: { name: true } } },
+    });
+    const userIds = Array.from(new Set(jobs.map((j) => j.userId)));
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, email: true, unixUsername: true },
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+
+    let exported = 0;
+    for (const j of jobs) {
+      const u = userById.get(j.userId);
+      const clusterDir = join(runningDir, j.cluster.name);
+      mkdirSync(clusterDir, { recursive: true });
+      const fileId = j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8);
+      const filePath = join(clusterDir, `${fileId}.yaml`);
+      const body = yaml.dump({
+        apiVersion: "aura/v1",
+        kind: "RunningJob",
+        metadata: {
+          name: j.sourceName ?? fileId,
+          cluster: j.cluster.name,
+          user: u?.email ?? null,
+        },
+        status: {
+          jobId: j.id,
+          slurmJobId: j.slurmJobId,
+          state: j.status,
+          partition: j.partition,
+          sourceRef: j.sourceRef ?? null,
+          createdAt: j.createdAt.toISOString(),
+          updatedAt: j.updatedAt.toISOString(),
+        },
+        spec: {
+          partition: j.partition,
+          script: j.script,
+        },
+      }, { lineWidth: 120 });
+      writeFileSync(
+        filePath,
+        `# Managed by Aura GitOps — snapshot of a live job. Do not edit.\n${body}`,
+      );
+      exported++;
+    }
+
+    await runGit(["add", "-A", "running"], baseDir, env, onLog);
+    const status = await runGit(["status", "--porcelain"], repoDir, env, onLog);
+    if (!status.stdout.trim()) {
+      onLog(`[export] no changes (exported=${exported})`);
+      return { exported, pruned: 0 };
+    }
+
+    const commit = await runGit(["commit", "-m", `Aura running-jobs snapshot @ ${new Date().toISOString()}`], repoDir, env, onLog);
+    if (commit.code !== 0) throw new Error("git commit failed");
+    const push = await runGit(["push", "origin", cfg.branch], repoDir, env, onLog);
+    if (push.code !== 0) throw new Error("git push failed (check deploy key / PAT permissions)");
+
+    onLog(`[export] pushed (exported=${exported})`);
+
+    await logAudit({
+      action: "gitops_jobs.export_running",
+      entity: "Setting",
+      entityId: SETTING_KEY,
+      metadata: { exported },
+    });
+
+    return { exported, pruned: 0 };
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+// ─────────────────────────── background monitor ──────────────────────────────
+
+let tickHandle: ReturnType<typeof setTimeout> | null = null;
+let ticking = false;
+let started = false;
+
+async function tick(): Promise<void> {
+  if (ticking) return;
+  ticking = true;
+  try {
+    const cfg = await loadGitOpsJobsConfig();
+    if (!cfg.enabled || !cfg.repoUrl) return;
+    await runReconcile((line) => console.log(`[gitops-jobs] ${line}`));
+  } catch (err) {
+    console.warn("[gitops-jobs] tick failed:", err instanceof Error ? err.message : err);
+  } finally {
+    ticking = false;
+  }
+}
+
+async function scheduleNext(): Promise<void> {
+  // Re-read config each time so interval changes apply without a restart.
+  const cfg = await loadGitOpsJobsConfig().catch(() => DEFAULT_GITOPS_JOBS_CONFIG);
+  const intervalSec = Math.max(30, cfg.intervalSec || 30);
+  tickHandle = setTimeout(async () => {
+    await tick();
+    scheduleNext();
+  }, intervalSec * 1000);
+}
+
+export function startGitopsJobsMonitor(): void {
+  if (started) return;
+  started = true;
+  console.log("[gitops-jobs] monitor armed (off until enabled in settings)");
+  // Defer initial run so the server finishes booting and the DB is reachable.
+  setTimeout(() => {
+    tick().catch(() => {});
+    scheduleNext();
+  }, 15_000);
+}
+
+export function stopGitopsJobsMonitor(): void {
+  if (tickHandle) clearTimeout(tickHandle);
+  tickHandle = null;
+  started = false;
+}

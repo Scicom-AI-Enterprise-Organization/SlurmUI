@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
-import { sendCommandAndWait, publishCommand } from "@/lib/nats";
-import { sshExecScript } from "@/lib/ssh-exec";
-import { startJobWatcher } from "@/lib/job-watcher";
+import { submitJob } from "@/lib/submit-job";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -130,165 +127,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Missing required fields: script, partition" }, { status: 400 });
   }
 
-  // Create job record first so we have an ID for tracking
-  const job = await prisma.job.create({
-    data: { clusterId: id, userId: session.user.id, script, partition, status: "PENDING" },
-  });
-
   try {
-    const config = cluster.config as Record<string, unknown>;
-    const username = dbUser.unixUsername ?? "";
-    const dataNfsPath = (config.data_nfs_path as string | undefined) ?? "";
-    const workDir = username && dataNfsPath ? `${dataNfsPath}/${username}` : "";
-
-    // SSH mode: run sbatch directly on the controller via SSH.
-    if (cluster.connectionMode === "SSH") {
-      const clusterWithKey = await prisma.cluster.findUnique({
-        where: { id },
-        include: { sshKey: true },
-      });
-      if (!clusterWithKey?.sshKey) {
-        throw new Error("Cluster has no SSH key assigned");
-      }
-
-      const target = {
-        host: cluster.controllerHost,
-        user: cluster.sshUser,
-        port: cluster.sshPort,
-        privateKey: clusterWithKey.sshKey.privateKey,
-        bastion: cluster.sshBastion,
-      };
-
-      if (!username) {
-        throw new Error("Cannot submit — your user has not been provisioned with a Linux account.");
-      }
-      const submitDir = workDir || `/tmp`;
-      const scriptName = `.aura-job-${job.id.slice(0, 8)}.sh`;
-      const scriptPath = `${submitDir}/${scriptName}`;
-      const scriptB64 = Buffer.from(script).toString("base64");
-
-      const wrapper = `#!/bin/bash
-set +e
-S=""; [ "$(id -u)" != "0" ] && S="sudo"
-
-# Ensure submission dir exists and is writable by the user
-$S mkdir -p ${submitDir}
-$S chown ${username}:${username} ${submitDir} 2>/dev/null || true
-
-# Write the user's script (base64-decoded to preserve quoting)
-echo "${scriptB64}" | base64 -d | $S tee ${scriptPath} > /dev/null
-$S chown ${username}:${username} ${scriptPath}
-$S chmod 755 ${scriptPath}
-
-# Submit as the target user. --parsable prints "<jobid>[;cluster]" to stdout.
-OUT=$(sudo -u ${username} -H bash -c "cd ${submitDir} && sbatch --parsable ${scriptPath}" 2>&1)
-RC=$?
-echo "__AURA_SBATCH_EXIT__=$RC"
-echo "__AURA_SBATCH_OUT__=$OUT"
-exit $RC
-`;
-
-      const stdoutLines: string[] = [];
-      const success = await new Promise<boolean>((resolve) => {
-        sshExecScript(target, wrapper, {
-          onStream: (line) => stdoutLines.push(line),
-          onComplete: (ok) => resolve(ok),
-        });
-      });
-
-      const full = stdoutLines.join("\n");
-      const outMatch = full.match(/__AURA_SBATCH_OUT__=([\s\S]*?)(?:\n__|$)/);
-      const sbatchOut = outMatch ? outMatch[1].trim() : full;
-
-      if (!success) {
-        throw new Error(sbatchOut || "sbatch failed");
-      }
-
-      const idMatch = sbatchOut.match(/(\d+)/);
-      if (!idMatch) {
-        throw new Error(sbatchOut || "Could not parse Slurm job ID");
-      }
-      const slurmJobId = parseInt(idMatch[1], 10);
-
-      const updated = await prisma.job.update({
-        where: { id: job.id },
-        data: { slurmJobId, status: "RUNNING" },
-      });
-
-      // Detached watcher — survives tab close. Writes output + final status
-      // to the DB; the SSE stream polls the DB rather than tailing directly.
-      startJobWatcher(clusterWithKey as any, updated as any);
-
-      await logAudit({
-        action: "job.submit",
-        entity: "Job",
-        entityId: job.id,
-        metadata: { clusterId: id, clusterName: cluster.name, partition, slurmJobId, mode: "ssh" },
-      });
-
-      return NextResponse.json(updated, { status: 201 });
-    }
-
-    const result = await sendCommandAndWait(
-      id,
-      {
-        request_id: job.id,
-        type: "submit_job",
-        payload: {
-          script,
-          partition,
-          job_name: `aura-${job.id.slice(0, 8)}`,
-          work_dir: workDir,
-          username,
-        },
-      },
-      60_000 // sbatch is fast
-    ) as { slurm_job_id?: number; output_file?: string };
-
-    const updated = await prisma.job.update({
-      where: { id: job.id },
-      data: { slurmJobId: result.slurm_job_id ?? null, status: "RUNNING" },
+    const updated = await submitJob({
+      clusterId: id,
+      userId: session.user.id,
+      script,
+      partition,
     });
-
-    // Fire-and-forget: stream the job output file via the same request ID.
-    // The WS subscriber on the job page will pick up the streamed lines.
-    if (result.slurm_job_id && result.output_file) {
-      publishCommand(id, {
-        request_id: job.id,
-        type: "watch_job",
-        payload: {
-          slurm_job_id: result.slurm_job_id,
-          output_file: result.output_file,
-        },
-      }).catch((err) => console.error("[jobs] Failed to dispatch watch_job:", err));
-    } else if (result.slurm_job_id) {
-      // No output file (e.g. admin job with no workDir) — mark completed immediately.
-      // We can't stream output but the job was submitted successfully.
-      await prisma.job.update({
-        where: { id: job.id },
-        data: { status: "COMPLETED", exitCode: 0 },
-      }).catch(() => {});
-    }
-
-    await logAudit({
-      action: "job.submit",
-      entity: "Job",
-      entityId: job.id,
-      metadata: { clusterId: id, clusterName: cluster.name, partition, slurmJobId: result.slurm_job_id },
-    });
-
     return NextResponse.json(updated, { status: 201 });
   } catch (err) {
-    await prisma.job.update({ where: { id: job.id }, data: { status: "FAILED" } });
-
-    await logAudit({
-      action: "job.submit_failed",
-      entity: "Job",
-      entityId: job.id,
-      metadata: { clusterId: id, clusterName: cluster.name, partition, error: err instanceof Error ? err.message : "Unknown" },
-    });
-
     const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: `Job submission failed: ${message}`, job }, { status: 502 });
+    return NextResponse.json({ error: `Job submission failed: ${message}` }, { status: 502 });
   }
 }

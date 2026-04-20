@@ -6,6 +6,7 @@ import { handleWebSocket } from "./lib/ws";
 import { auth } from "./lib/auth";
 import { startHeartbeatMonitor } from "./lib/heartbeat";
 import { startHealthMonitor } from "./lib/health-monitor";
+import { startGitopsJobsMonitor } from "./lib/gitops-jobs";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
@@ -68,4 +69,5 @@ app.prepare().then(() => {
     console.error("[Heartbeat] Failed to start monitor:", err);
   });
   startHealthMonitor();
+  startGitopsJobsMonitor();
 });

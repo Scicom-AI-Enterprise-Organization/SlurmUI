@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { redactConfig } from "@/lib/redact-config";
+import { probeClusterHealth } from "@/lib/cluster-health";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -29,6 +30,11 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   }
 
+  // Kick off a debounced background liveness probe. Updates cluster.status
+  // to OFFLINE when SSH fails (e.g. VMs deleted), ACTIVE when it recovers.
+  // The current GET still returns the stale status — next refresh sees truth.
+  probeClusterHealth(id);
+
   // Redact secret config values (S3 keys, passwords, etc.) before sending.
   const redacted = { ...cluster, config: redactConfig(cluster.config) };
 
@@ -50,7 +56,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId } = body;
+  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId } = body;
 
   const VALID_STATUSES = ["PROVISIONING", "ACTIVE", "DEGRADED", "OFFLINE", "ERROR"];
   if (status && !VALID_STATUSES.includes(status)) {
@@ -83,6 +89,18 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       ...(sshPort !== undefined && { sshPort }),
       ...(sshBastion !== undefined && { sshBastion }),
       ...(sshKeyId && { sshKeyId }),
+      // Jump fields — accept explicit null/empty-string to clear, otherwise
+      // apply. When sshJumpHost is set to empty, also wipe the companions so
+      // we don't leave orphaned user/port/key values in the DB.
+      ...(sshJumpHost !== undefined && {
+        sshJumpHost: sshJumpHost || null,
+        sshJumpUser: sshJumpHost ? (sshJumpUser || "root") : null,
+        sshJumpPort: sshJumpHost ? (sshJumpPort || 22) : null,
+        sshJumpKeyId: sshJumpHost && sshJumpKeyId ? sshJumpKeyId : null,
+      }),
+      ...(sshJumpHost === undefined && sshJumpUser !== undefined && { sshJumpUser }),
+      ...(sshJumpHost === undefined && sshJumpPort !== undefined && { sshJumpPort }),
+      ...(sshJumpHost === undefined && sshJumpKeyId !== undefined && { sshJumpKeyId: sshJumpKeyId || null }),
     },
   });
 

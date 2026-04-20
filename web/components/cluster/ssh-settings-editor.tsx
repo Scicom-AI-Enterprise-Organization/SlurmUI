@@ -14,7 +14,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Check, X, Save } from "lucide-react";
+import { Loader2, Check, X, Save, ChevronDown, ChevronRight } from "lucide-react";
 
 interface SshKeyOption {
   id: string;
@@ -28,6 +28,10 @@ interface SshSettingsEditorProps {
   initialPort: number;
   initialBastion: boolean;
   initialSshKeyId: string | null;
+  initialJumpHost: string | null;
+  initialJumpUser: string | null;
+  initialJumpPort: number | null;
+  initialJumpKeyId: string | null;
   sshKeys: SshKeyOption[];
 }
 
@@ -38,6 +42,10 @@ export function SshSettingsEditor({
   initialPort,
   initialBastion,
   initialSshKeyId,
+  initialJumpHost,
+  initialJumpUser,
+  initialJumpPort,
+  initialJumpKeyId,
   sshKeys,
 }: SshSettingsEditorProps) {
   const router = useRouter();
@@ -46,6 +54,11 @@ export function SshSettingsEditor({
   const [port, setPort] = useState(String(initialPort));
   const [bastion, setBastion] = useState(initialBastion);
   const [sshKeyId, setSshKeyId] = useState(initialSshKeyId ?? "");
+  const [jumpHost, setJumpHost] = useState(initialJumpHost ?? "");
+  const [jumpUser, setJumpUser] = useState(initialJumpUser ?? "root");
+  const [jumpPort, setJumpPort] = useState(String(initialJumpPort ?? 22));
+  const [jumpKeyId, setJumpKeyId] = useState(initialJumpKeyId ?? "");
+  const [jumpOpen, setJumpOpen] = useState<boolean>(!!initialJumpHost);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -59,7 +72,11 @@ export function SshSettingsEditor({
     user !== initialUser ||
     port !== String(initialPort) ||
     bastion !== initialBastion ||
-    sshKeyId !== (initialSshKeyId ?? "");
+    sshKeyId !== (initialSshKeyId ?? "") ||
+    jumpHost !== (initialJumpHost ?? "") ||
+    jumpUser !== (initialJumpUser ?? "root") ||
+    jumpPort !== String(initialJumpPort ?? 22) ||
+    jumpKeyId !== (initialJumpKeyId ?? "");
 
   const canTest = !!(host && sshKeyId);
 
@@ -75,6 +92,10 @@ export function SshSettingsEditor({
           host,
           user: user || "root",
           port: parseInt(port) || 22,
+          jumpHost: jumpHost || undefined,
+          jumpUser: jumpHost ? (jumpUser || "root") : undefined,
+          jumpPort: jumpHost ? parseInt(jumpPort) || 22 : undefined,
+          jumpKeyId: jumpHost && jumpKeyId ? jumpKeyId : undefined,
         }),
       });
       const result = await res.json();
@@ -105,6 +126,12 @@ export function SshSettingsEditor({
           sshPort: parseInt(port) || 22,
           sshBastion: bastion,
           sshKeyId: sshKeyId || undefined,
+          // Send empty string for sshJumpHost when the user cleared it —
+          // that signals "wipe jump settings" to the PATCH handler.
+          sshJumpHost: jumpHost,
+          sshJumpUser: jumpHost ? (jumpUser || "root") : undefined,
+          sshJumpPort: jumpHost ? (parseInt(jumpPort) || 22) : undefined,
+          sshJumpKeyId: jumpHost && jumpKeyId ? jumpKeyId : "",
         }),
       });
       if (!res.ok) {
@@ -202,6 +229,76 @@ export function SshSettingsEditor({
         {testStatus === "failed" && (
           <p className="text-sm text-destructive">{testMsg}</p>
         )}
+
+        <div className="rounded-md border border-dashed">
+          <button
+            type="button"
+            onClick={() => setJumpOpen((o) => !o)}
+            className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium hover:bg-accent/40"
+          >
+            {jumpOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            Jumphost (optional)
+            {jumpHost && !jumpOpen && (
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                {(jumpUser || "root")}@{jumpHost}
+              </span>
+            )}
+          </button>
+          {jumpOpen && (
+            <div className="space-y-3 border-t p-3">
+              <div className="space-y-2">
+                <Label>Jump SSH Key</Label>
+                <Select
+                  value={jumpKeyId || "__same__"}
+                  onValueChange={(v) => { setJumpKeyId(v === "__same__" ? "" : v); setTestStatus("idle"); }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a key" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__same__">Same as cluster key</SelectItem>
+                    {sshKeys.map((key) => (
+                      <SelectItem key={key.id} value={key.id}>{key.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Choose a different key if the bastion rejects the cluster key.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Jump Host</Label>
+                <Input
+                  placeholder="bastion.example.com"
+                  value={jumpHost}
+                  onChange={(e) => { setJumpHost(e.target.value); setTestStatus("idle"); }}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Leave empty to connect directly. When set, SlurmUI reaches the controller via <code>ssh -J</code>.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Jump User</Label>
+                  <Input
+                    placeholder="root"
+                    value={jumpUser}
+                    onChange={(e) => { setJumpUser(e.target.value); setTestStatus("idle"); }}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Jump Port</Label>
+                  <Input
+                    type="number"
+                    placeholder="22"
+                    value={jumpPort}
+                    onChange={(e) => { setJumpPort(e.target.value); setTestStatus("idle"); }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 

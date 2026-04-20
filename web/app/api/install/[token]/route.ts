@@ -126,7 +126,7 @@ systemctl daemon-reload
 systemctl enable aura-agent
 systemctl start aura-agent
 echo "[aura] aura-agent service started"
-echo "[aura] Done. The agent will connect to NATS and appear in Aura shortly."
+echo "[aura] Done. The agent will connect to NATS and appear in SlurmUI shortly."
 `;
 
   return new Response(script, {

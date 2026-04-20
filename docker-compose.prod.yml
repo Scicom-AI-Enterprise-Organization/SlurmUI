@@ -60,7 +60,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["npx", "prisma", "db", "push"]
+    # db push diffs the live schema against prisma/schema.prisma and refuses
+    # additive-but-potentially-destructive changes (e.g. a new @@unique). Use
+    # migrate deploy which applies the versioned migration files instead —
+    # those were authored with the correct intent and won't bail out.
+    command: ["npx", "prisma", "migrate", "deploy"]
     environment:
       DATABASE_URL: postgresql://aura:aura@postgres:5432/aura?schema=public
     depends_on:

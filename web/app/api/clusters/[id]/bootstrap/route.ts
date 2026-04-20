@@ -63,7 +63,7 @@ if [ "$(id -u)" != "0" ]; then S="sudo"; fi
 
 echo ""
 echo "============================================"
-echo "  Aura Cluster Bootstrap"
+echo "  SlurmUI Cluster Bootstrap"
 echo "============================================"
 echo ""
 
