@@ -97,7 +97,8 @@ export function probeClusterHealth(clusterId: string): void {
         _jumpPrivateKey = jk?.privateKey ?? null;
       }
 
-      const result = await sshPing({ ...cluster, _jumpPrivateKey });
+      // TS can't narrow `cluster.sshKey` across the spread, so pass explicitly.
+      const result = await sshPing({ ...cluster, sshKey: cluster.sshKey, _jumpPrivateKey });
 
       // Persist probe outcome into cluster.config.health so the UI can show
       // why status flipped (timestamp + last error + consecutive-fail count).
