@@ -112,6 +112,7 @@ services:
       ANSIBLE_PLAYBOOKS_DIR: /opt/aura/ansible
       # Leave empty for unauthenticated metrics (local dev only)
       METRICS_TOKEN: ""
+      AURA_BASTION_DEBUG: 1
     volumes:
       - ./web:/app
       - web_node_modules:/app/node_modules

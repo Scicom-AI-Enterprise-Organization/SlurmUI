@@ -102,7 +102,7 @@ export default function OrganizationPage() {
       setUsers(Array.isArray(u) ? u : []);
       setInvites(Array.isArray(i) ? i : []);
     } catch {
-      toast.error("Failed to load organization");
+      // silent — don't toast-spam transient network blips
     } finally {
       setLoading(false);
     }

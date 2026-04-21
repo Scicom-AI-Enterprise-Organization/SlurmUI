@@ -59,30 +59,59 @@ export default function JobDetailPage() {
   const [resyncing, setResyncing] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
-  const [restartResult, setRestartResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [restartLogOpen, setRestartLogOpen] = useState(false);
+  const [restartLogLines, setRestartLogLines] = useState<string[]>([]);
+  const [restartLogStatus, setRestartLogStatus] = useState<"streaming" | "complete" | "error">("streaming");
+  const [restartJobId, setRestartJobId] = useState<string | null>(null);
 
   const handleRestart = async () => {
     if (!job) return;
     setConfirmRestart(false);
     setRestarting(true);
-    // Always fresh sbatch of the stored script — works whether or not Slurm
-    // ever saw the original job. Matches the row-level rerun in the list.
+    setRestartLogLines([]);
+    setRestartLogStatus("streaming");
+    setRestartJobId(null);
+    setRestartLogOpen(true);
     try {
       const res = await fetch(`/api/clusters/${clusterId}/jobs/${job.id}/resubmit`, {
         method: "POST",
       });
       const d = await res.json().catch(() => ({}));
-      const ok = res.ok;
-      setRestartResult({
-        ok,
-        message: ok
-          ? `Resubmitted as job ${d.id?.slice(0, 8) ?? "?"}${d.slurmJobId ? ` (slurm ${d.slurmJobId})` : ""}.`
-          : (d.error || `HTTP ${res.status}`),
-      });
-      if (ok) fetchJob();
+      if (!res.ok || !d.taskId) {
+        setRestartLogLines((prev) => [...prev, `[error] ${d.error ?? `HTTP ${res.status}`}`]);
+        setRestartLogStatus("error");
+        setRestarting(false);
+        return;
+      }
+      const taskId = d.taskId as string;
+      // Poll the task for streaming logs. Stops when task status flips
+      // to success/failed. Mirrors the admin node/deploy/diagnose flows.
+      const poll = setInterval(async () => {
+        try {
+          const taskRes = await fetch(`/api/tasks/${taskId}`);
+          if (!taskRes.ok) return;
+          const t = await taskRes.json();
+          // Strip the resubmit-job-id marker line before displaying.
+          const logs: string = t.logs ?? "";
+          const jobIdMatch = logs.match(/__AURA_RESUBMIT_JOB_ID__=([a-f0-9-]+)/);
+          const cleaned = logs.replace(/__AURA_RESUBMIT_JOB_ID__=.*\n?/g, "");
+          setRestartLogLines(cleaned ? cleaned.split("\n") : []);
+          if (jobIdMatch) setRestartJobId(jobIdMatch[1]);
+          if (t.status === "success") {
+            setRestartLogStatus("complete");
+            clearInterval(poll);
+            setRestarting(false);
+            fetchJob();
+          } else if (t.status === "failed") {
+            setRestartLogStatus("error");
+            clearInterval(poll);
+            setRestarting(false);
+          }
+        } catch {}
+      }, 2000);
     } catch (e) {
-      setRestartResult({ ok: false, message: e instanceof Error ? e.message : "Network error" });
-    } finally {
+      setRestartLogLines((prev) => [...prev, `[error] ${e instanceof Error ? e.message : "Network error"}`]);
+      setRestartLogStatus("error");
       setRestarting(false);
     }
   };
@@ -156,7 +185,7 @@ export default function JobDetailPage() {
         setJob(await res.json());
       }
     } catch {
-      toast.error("Failed to load job");
+      // swallow — transient network blips shouldn't toast-spam the user
     } finally {
       setLoading(false);
     }
@@ -482,19 +511,41 @@ export default function JobDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Restart result dialog */}
-      <Dialog open={!!restartResult} onOpenChange={(o) => { if (!o) setRestartResult(null); }}>
-        <DialogContent>
+      {/* Live log dialog — streams SSH output while the resubmit runs. */}
+      <Dialog open={restartLogOpen} onOpenChange={(o) => { if (!o && restartLogStatus !== "streaming") setRestartLogOpen(false); }}>
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
-            <DialogTitle className={restartResult?.ok ? "" : "text-destructive"}>
-              {restartResult?.ok ? "Job resubmitted" : "Rerun failed"}
+            <DialogTitle>
+              {restartLogStatus === "complete"
+                ? (restartJobId ? `Job resubmitted as ${restartJobId.slice(0, 8)}` : "Job resubmitted")
+                : restartLogStatus === "error"
+                  ? "Rerun failed"
+                  : `Rerunning job ${job?.id.slice(0, 8)}`}
+              {restartLogStatus === "streaming" && <span className="ml-2 text-xs text-muted-foreground">(running…)</span>}
             </DialogTitle>
           </DialogHeader>
-          <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">
-            {restartResult?.message}
+          <pre className="max-h-[60vh] overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            {restartLogLines.join("\n") || "Waiting for output…"}
           </pre>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRestartResult(null)}>Close</Button>
+            {restartLogStatus === "complete" && restartJobId ? (
+              <Button
+                onClick={() => {
+                  setRestartLogOpen(false);
+                  window.location.href = `/clusters/${clusterId}/jobs/${restartJobId}`;
+                }}
+              >
+                Go to job {restartJobId.slice(0, 8)}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() => setRestartLogOpen(false)}
+                disabled={restartLogStatus === "streaming"}
+              >
+                {restartLogStatus === "streaming" ? "Running…" : "Close"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

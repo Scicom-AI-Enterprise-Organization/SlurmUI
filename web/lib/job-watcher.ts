@@ -156,6 +156,17 @@ echo "__AURA_JOB_FINAL__=$FINAL"
     }).catch(() => {});
   }, 2000);
 
+  // Flip Job.status as soon as we see a terminal `[aura] Job state: <S>`
+  // line in the stream, instead of waiting on proc.on("close"). Bastion
+  // mode can delay the close by up to 30s (idle fallback), which leaves
+  // the UI showing "Running" long after the job has actually finished.
+  let statusFlipped = false;
+  const stateLineRe = /^\[aura\] Job state:\s*([A-Z_+]+)/;
+  const terminalSet = new Set([
+    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
+    "BOOT_FAIL", "OUT_OF_MEMORY", "DEADLINE", "PREEMPTED",
+  ]);
+
   sshExecScript(target, remoteScript, {
     onStream: (line) => {
       if (line.includes("__AURA_TAIL_START__")) { inTail = true; return; }
@@ -169,6 +180,16 @@ echo "__AURA_JOB_FINAL__=$FINAL"
       if (line.startsWith("__AURA_ASSUMED_COMPLETE__=")) {
         assumedComplete = true;
         return;
+      }
+      if (!statusFlipped) {
+        const m = line.match(stateLineRe);
+        if (m && terminalSet.has(m[1])) {
+          const state = m[1].startsWith("CANCELLED") ? "CANCELLED"
+            : m[1] === "COMPLETED" ? "COMPLETED"
+            : "FAILED";
+          statusFlipped = true;
+          prisma.job.update({ where: { id: job.id }, data: { status: state } }).catch(() => {});
+        }
       }
       if (!inTail) return;
       if (line.startsWith("[stderr]")) return;

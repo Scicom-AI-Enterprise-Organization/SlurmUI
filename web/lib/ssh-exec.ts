@@ -436,13 +436,13 @@ export function sshExecScript(
       ``,
     ].join("\n");
 
-    setTimeout(() => {
-      proc.stdin.write(fullCmd);
-      // Do NOT close stdin here — the remote PTY sees EOF before it has
-      // time to execute the script. We end stdin when we see the END
-      // marker come back through stdout (see maybeForward below), and
-      // as a safety net 5s after ssh reports exit via proc.on("close").
-    }, 2000);
+    // Write immediately — Node buffers on our side and streams bytes to the
+    // PTY as the remote shell drains them, so a pre-delay just adds 2s of
+    // wall time on every bastion call for no benefit.
+    // Do NOT close stdin here — the remote PTY would see EOF before it has
+    // time to execute the script. We end stdin when we see the END marker
+    // come back through stdout (see maybeForward below).
+    proc.stdin.write(fullCmd);
   } else {
     proc.stdin.write(script);
     proc.stdin.end();
@@ -464,12 +464,6 @@ export function sshExecScript(
       if (clean === BASTION_END) {
         bastionForwarding = false;
         bastionScriptSucceeded = true;
-        // Script finished. Close stdin AND schedule a SIGKILL if ssh
-        // still hasn't closed after 5s. Some bastions keep the channel
-        // open even after the shell runs `exit` — without this the UI
-        // sits on "Running" until the 60s watchdog. proc.on("close")
-        // below will prefer bastionScriptSucceeded over exit code when
-        // deciding success, so the SIGKILL still reports success=true.
         try { proc.stdin.end(); } catch {}
         setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
         return;
@@ -482,6 +476,21 @@ export function sshExecScript(
       armBastionIdleKill();
     }
     if (line) callbacks.onStream(prefix + line, seq++);
+    // Our scripts set `trap '...echo "[trace] bash exiting (status=$ec)..."' EXIT`
+    // so the trace line is a reliable "inner bash done" signal. When we see
+    // it with status=0 we can tear down the ssh session immediately instead
+    // of waiting on the bastion's END marker / idle fallback.
+    if (target.bastion) {
+      const clean = line.replace(/\r/g, "").trim();
+      const m = clean.match(/\[trace\] bash exiting \(status=(\d+)\)/);
+      if (m) {
+        bastionScriptSucceeded = m[1] === "0";
+        try { proc.stdin.end(); } catch {}
+        // Brief grace period so any final stdout the script emitted after
+        // the trap flushes through before we SIGKILL.
+        setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 500);
+      }
+    }
   };
 
   proc.stdout.on("data", (chunk: Buffer) => {

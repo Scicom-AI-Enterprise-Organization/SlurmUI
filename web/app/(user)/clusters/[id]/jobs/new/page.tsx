@@ -483,9 +483,7 @@ export default function NewJobPage() {
         }
         setPythonVenvPath(venv.replace(/\/+$/, ""));
       })
-      .catch(() => {
-        toast.error("Failed to load cluster config");
-      });
+      .catch(() => {});
 
     fetch(`/api/clusters/${clusterId}/resources`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))

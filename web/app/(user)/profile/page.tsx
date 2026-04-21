@@ -145,7 +145,7 @@ export default function ProfilePage() {
     fetch("/api/me")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then(setData)
-      .catch(() => toast.error("Failed to load profile"))
+      .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 

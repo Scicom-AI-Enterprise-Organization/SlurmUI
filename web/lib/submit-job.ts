@@ -26,6 +26,10 @@ export interface SubmitJobInput {
   sourceName?: string;
   /** Audit metadata extension (e.g. { via: "gitops" }). */
   auditExtra?: Record<string, unknown>;
+  /** Optional log sink — every SSH stdout line passes through this callback
+   * in addition to the internal buffer. Lets callers (e.g. the resubmit
+   * route) tee output into a BackgroundTask so the UI can show a live log. */
+  onLogLine?: (line: string) => void;
 }
 
 export async function submitJob(input: SubmitJobInput): Promise<Job> {
@@ -95,6 +99,10 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
       // timeout — UI spinner just sits there.
       const wrapper = `#!/bin/bash
 set +e
+# Emit a known trace line on exit so the bastion-mode ssh layer can detect
+# "script finished" and tear down the session immediately instead of
+# waiting on its idle-timeout fallback.
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
 
 # Fail fast if the target Linux user doesn't exist — otherwise the sudo
@@ -122,7 +130,10 @@ exit $RC
       const stdoutLines: string[] = [];
       const success = await new Promise<boolean>((resolve) => {
         sshExecScript(target, wrapper, {
-          onStream: (line) => stdoutLines.push(line),
+          onStream: (line) => {
+            stdoutLines.push(line);
+            input.onLogLine?.(line);
+          },
           onComplete: (ok) => resolve(ok),
         });
       });

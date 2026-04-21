@@ -240,7 +240,7 @@ export default function NodesPage() {
         setNodes(data.nodes ?? data ?? []);
       }
     } catch {
-      toast.error("Failed to fetch nodes");
+      // silent — manual Refresh button or next poll will recover
     } finally {
       setLoading(false);
     }

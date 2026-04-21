@@ -285,7 +285,7 @@ export default function JobListPage() {
         setPagination(data.pagination ?? { page: 1, limit, total: 0, pages: 1 });
         setPartitions(data.partitions ?? []);
       })
-      .catch(() => toast.error("Failed to load jobs"))
+      .catch(() => {})
       .finally(() => setLoading(false));
   };
 

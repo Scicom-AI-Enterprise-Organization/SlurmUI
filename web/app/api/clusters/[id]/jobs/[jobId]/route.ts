@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sendCommandAndWait } from "@/lib/nats";
+import { sshExecScript } from "@/lib/ssh-exec";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -108,16 +109,64 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  // Send cancel command to agent (best effort)
+  // Actually kill the Slurm job. In SSH mode the NATS path below is a
+  // no-op (no agent), so we were just flipping the DB row to CANCELLED
+  // while the job kept running in the queue. Run scancel directly over
+  // SSH, matching what the gitops reconciler does.
   if (job.slurmJobId) {
-    try {
-      await sendCommandAndWait(id, {
-        request_id: randomUUID(),
-        type: "cancel_job",
-        payload: { job_id: String(job.slurmJobId) },
-      }, 15000);
-    } catch {
-      // Best effort — still mark as cancelled locally
+    const cluster = await prisma.cluster.findUnique({
+      where: { id },
+      include: { sshKey: true },
+    });
+
+    if (cluster?.connectionMode === "SSH" && cluster.sshKey) {
+      const target = {
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: cluster.sshKey.privateKey,
+        bastion: cluster.sshBastion,
+      };
+      // --signal=KILL + --full sends SIGKILL to every step (sbatch wrapper
+      // + the user's batch shell) without waiting for KillWait. Try as the
+      // ssh user first; fall back to sudo -n so root can cancel any job.
+      const script = `#!/bin/bash
+set +e
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
+OUT=$(scancel --signal=KILL --full ${job.slurmJobId} 2>&1)
+RC=$?
+echo "$OUT"
+if [ $RC -eq 0 ]; then
+  echo "[scancel-ok] job ${job.slurmJobId} cancelled by $(id -un)"
+  exit 0
+fi
+echo "[scancel-retry] retrying with sudo -n"
+sudo -n scancel --signal=KILL --full ${job.slurmJobId} 2>&1
+SUDO_RC=$?
+if [ $SUDO_RC -eq 0 ]; then
+  echo "[scancel-ok] job ${job.slurmJobId} cancelled via sudo"
+  exit 0
+fi
+echo "[scancel-fail] scancel rc=$RC sudo rc=$SUDO_RC"
+exit 1
+`;
+      await new Promise<void>((resolve) => {
+        sshExecScript(target, script, {
+          onStream: () => {},
+          onComplete: () => resolve(),
+        });
+      });
+    } else {
+      // NATS mode
+      try {
+        await sendCommandAndWait(id, {
+          request_id: randomUUID(),
+          type: "cancel_job",
+          payload: { job_id: String(job.slurmJobId) },
+        }, 15000);
+      } catch {
+        // Best effort — still mark as cancelled locally
+      }
     }
   }
 
