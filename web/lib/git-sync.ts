@@ -31,6 +31,13 @@ export interface GitSyncConfig {
    * this if your git host is trusted and the repo is private.
    */
   includeSecrets: boolean;
+  /**
+   * Optional cluster id allow-list. Empty (or omitted) means "all clusters".
+   * Jobs, templates, provisioned-user rows, and per-cluster config folders
+   * are filtered to this set; SSH keys + the global users index are always
+   * exported because they can be referenced cross-cluster.
+   */
+  clusterIds?: string[];
   lastSyncAt?: string;
   lastSyncStatus?: "success" | "failed";
   lastSyncMessage?: string;
@@ -158,17 +165,22 @@ function runGit(args: string[], opts: GitOpts): Promise<{ code: number | null; s
  * Collect every piece of state we want to track and return as an in-memory
  * file map: `relPath -> { value | rawString }`. Keeps the git layer dumb.
  */
-async function collectState(includeSecrets: boolean) {
+async function collectState(includeSecrets: boolean, clusterIds?: string[]) {
   const files: Array<{ rel: string; content: string }> = [];
 
-  // Clusters + child settings
+  // Clusters + child settings. An empty / missing allow-list = export all.
+  const clusterFilter = clusterIds && clusterIds.length > 0
+    ? { id: { in: clusterIds } }
+    : undefined;
   const clusters = await prisma.cluster.findMany({
+    where: clusterFilter,
     include: {
       sshKey: includeSecrets
         ? { select: { name: true, publicKey: true } }
         : { select: { name: true, publicKey: true } },
     },
   });
+  const selectedIds = new Set(clusters.map((c) => c.id));
   const clustersIndex = clusters.map((c) => ({
     id: c.id,
     name: c.name,
@@ -255,8 +267,10 @@ async function collectState(includeSecrets: boolean) {
     }))),
   });
 
-  // Per-user, per-cluster saved job templates.
+  // Per-user, per-cluster saved job templates — scoped to the allow-list
+  // so a narrow export doesn't leak other clusters' templates.
   const templates = await prisma.jobTemplate.findMany({
+    where: clusterFilter ? { clusterId: { in: [...selectedIds] } } : undefined,
     include: {
       cluster: { select: { name: true } },
     },
@@ -322,13 +336,14 @@ async function collectState(includeSecrets: boolean) {
   // Jobs: always include every PENDING/RUNNING job, plus the most recent 500
   // finished jobs for history. Active jobs must survive a migration regardless
   // of age, so we can't just rely on a recency cap.
+  const jobClusterFilter = clusterFilter ? { clusterId: { in: [...selectedIds] } } : {};
   const [activeJobs, recentJobs] = await Promise.all([
     prisma.job.findMany({
-      where: { status: { in: ["PENDING", "RUNNING"] } },
+      where: { status: { in: ["PENDING", "RUNNING"] }, ...jobClusterFilter },
       include: { cluster: { select: { name: true } } },
     }),
     prisma.job.findMany({
-      where: { status: { in: ["COMPLETED", "FAILED", "CANCELLED"] } },
+      where: { status: { in: ["COMPLETED", "FAILED", "CANCELLED"] }, ...jobClusterFilter },
       orderBy: { createdAt: "desc" },
       take: 500,
       include: { cluster: { select: { name: true } } },
@@ -443,11 +458,33 @@ export async function runSync(onLog: (line: string) => void): Promise<boolean> {
     await runGit(["config", "user.name", cfg.authorName || "SlurmUI Sync"], { ...opts, cwd: repoDir });
     await runGit(["config", "user.email", cfg.authorEmail || "slurmui-sync@localhost"], { ...opts, cwd: repoDir });
 
-    // Wipe the subtree we manage so deletions propagate.
+    // Wipe the subtree we manage so deletions propagate. When a narrower
+    // cluster allow-list is configured, only wipe the selected clusters'
+    // folders — other clusters' previously-synced data stays in the repo.
     const targetBase = cfg.path ? join(repoDir, cfg.path) : repoDir;
-    for (const sub of ["clusters", "ssh-keys", "jobs", "README.md"]) {
-      const p = join(targetBase, sub);
-      if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+    const narrow = cfg.clusterIds && cfg.clusterIds.length > 0;
+    if (narrow) {
+      // Translate ids → names so we can find the folders on disk.
+      const selected = await prisma.cluster.findMany({
+        where: { id: { in: cfg.clusterIds! } },
+        select: { name: true },
+      });
+      for (const c of selected) {
+        for (const sub of [`clusters/${c.name}`, `jobs/${c.name}`]) {
+          const p = join(targetBase, sub);
+          if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+        }
+      }
+      // Always refresh the global indices + ssh-keys.
+      for (const f of ["ssh-keys", "users", "README.md", "clusters/_index.yaml"]) {
+        const p = join(targetBase, f);
+        if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+      }
+    } else {
+      for (const sub of ["clusters", "ssh-keys", "jobs", "README.md"]) {
+        const p = join(targetBase, sub);
+        if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+      }
     }
 
     if (cfg.includeSecrets) {
@@ -457,7 +494,7 @@ export async function runSync(onLog: (line: string) => void): Promise<boolean> {
     }
 
     onLog("[sync] Collecting state from database...");
-    const files = await collectState(cfg.includeSecrets);
+    const files = await collectState(cfg.includeSecrets, cfg.clusterIds);
 
     onLog(`[sync] Writing ${files.length} file(s)...`);
     for (const f of files) {

@@ -12,7 +12,10 @@ const ACTION_CMD: Record<Action, string> = {
   hold: "scontrol hold",
   release: "scontrol release",
   requeue: "scontrol requeue",
-  terminate: "scancel",
+  // --signal=KILL --full forces SIGKILL on every task without waiting for
+  // KillWait. Without this the job lingers in CG state and resources stay
+  // reserved, which users interpret as "cancel didn't work".
+  terminate: "scancel --signal=KILL --full",
 };
 
 // POST /api/clusters/[id]/slurm-control

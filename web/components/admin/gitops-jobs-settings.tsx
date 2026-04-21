@@ -45,6 +45,13 @@ interface LastRun {
   truncated: boolean;
 }
 
+interface HistoryRow {
+  id: string;
+  status: "running" | "success" | "failed";
+  createdAt: string;
+  completedAt: string | null;
+}
+
 export function GitopsJobsSettings() {
   const [cfg, setCfg] = useState<Config>(DEFAULT);
   const [loading, setLoading] = useState(true);
@@ -59,16 +66,68 @@ export function GitopsJobsSettings() {
 
   const [lastReconcile, setLastReconcile] = useState<LastRun | null>(null);
   const [lastMirror, setLastMirror] = useState<LastRun | null>(null);
+  const [reconcileHistory, setReconcileHistory] = useState<HistoryRow[]>([]);
+  const [exportHistory, setExportHistory] = useState<HistoryRow[]>([]);
 
-  const fetchLastRuns = () => {
-    fetch("/api/sync/jobs/last-runs")
+  // History range. Defaults to last 30 minutes, updated whenever the user
+  // touches the from/to inputs or clicks "Reset".
+  const toLocalInput = (d: Date) => {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const defaultRange = () => {
+    const to = new Date();
+    const from = new Date(to.getTime() - 30 * 60 * 1000);
+    return { from: toLocalInput(from), to: toLocalInput(to) };
+  };
+  const [rangeFrom, setRangeFrom] = useState<string>(defaultRange().from);
+  const [rangeTo, setRangeTo] = useState<string>(defaultRange().to);
+
+  const fetchLastRuns = (opts?: { from?: string; to?: string }) => {
+    const fromStr = opts?.from ?? rangeFrom;
+    const toStr = opts?.to ?? rangeTo;
+    const qs = new URLSearchParams();
+    if (fromStr) qs.set("from", new Date(fromStr).toISOString());
+    if (toStr)   qs.set("to",   new Date(toStr).toISOString());
+    fetch(`/api/sync/jobs/last-runs?${qs.toString()}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!d) return;
         setLastReconcile(d.reconcile ?? null);
         setLastMirror(d.exportRunning ?? null);
+        setReconcileHistory(d.reconcileHistory ?? []);
+        setExportHistory(d.exportHistory ?? []);
       })
       .catch(() => {});
+  };
+
+  const resetRange = () => {
+    const r = defaultRange();
+    setRangeFrom(r.from);
+    setRangeTo(r.to);
+    fetchLastRuns({ from: r.from, to: r.to });
+  };
+
+  // Open a past run's logs in the same log dialog we use for live runs.
+  const viewHistoricRun = async (taskId: string, title: string) => {
+    setLogTitle(title);
+    setLogLines([]);
+    setLogStatus("running");
+    setLogOpen(true);
+    try {
+      const r = await fetch(`/api/sync/jobs/last-runs?taskId=${encodeURIComponent(taskId)}`);
+      if (!r.ok) {
+        setLogLines([`[error] could not load task ${taskId}`]);
+        setLogStatus("failed");
+        return;
+      }
+      const t = await r.json();
+      setLogLines(t.logs ? t.logs.split("\n") : ["(no logs)"]);
+      setLogStatus(t.status === "success" ? "success" : t.status === "failed" ? "failed" : "running");
+    } catch (e) {
+      setLogLines([`[error] ${e instanceof Error ? e.message : "fetch failed"}`]);
+      setLogStatus("failed");
+    }
   };
 
   useEffect(() => {
@@ -361,12 +420,64 @@ spec:
             <div className="flex items-center gap-2 text-sm font-medium">
               <History className="h-4 w-4" /> Last runs
             </div>
-            <Button variant="ghost" size="sm" onClick={fetchLastRuns}>
+            <Button variant="ghost" size="sm" onClick={() => fetchLastRuns()}>
               <RefreshCw className="h-3 w-3" />
             </Button>
           </div>
           <LastRunBlock label="Reconcile" run={lastReconcile} />
           <LastRunBlock label="Mirror running jobs" run={lastMirror} />
+
+          <div className="rounded-md border p-3 text-xs space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="font-medium text-foreground">History range</div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="hist-from" className="text-xs">From</Label>
+                <Input
+                  id="hist-from"
+                  type="datetime-local"
+                  value={rangeFrom}
+                  onChange={(e) => setRangeFrom(e.target.value)}
+                  className="h-7 w-auto text-xs"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="hist-to" className="text-xs">To</Label>
+                <Input
+                  id="hist-to"
+                  type="datetime-local"
+                  value={rangeTo}
+                  onChange={(e) => setRangeTo(e.target.value)}
+                  className="h-7 w-auto text-xs"
+                />
+              </div>
+              <Button size="sm" variant="outline" className="h-7" onClick={() => fetchLastRuns()}>
+                Apply
+              </Button>
+              <Button size="sm" variant="ghost" className="h-7" onClick={resetRange}>
+                Reset (last 30 min)
+              </Button>
+            </div>
+
+            <details className="rounded-md border p-2">
+              <summary className="cursor-pointer font-medium">
+                Reconcile runs in range ({reconcileHistory.length})
+              </summary>
+              <HistoryTable
+                rows={reconcileHistory}
+                onView={(id) => viewHistoricRun(id, `Reconcile log — ${id.slice(0, 8)}`)}
+              />
+            </details>
+
+            <details className="rounded-md border p-2">
+              <summary className="cursor-pointer font-medium">
+                Mirror runs in range ({exportHistory.length})
+              </summary>
+              <HistoryTable
+                rows={exportHistory}
+                onView={(id) => viewHistoricRun(id, `Mirror log — ${id.slice(0, 8)}`)}
+              />
+            </details>
+          </div>
         </div>
       </CardContent>
 
@@ -456,6 +567,64 @@ function LastRunBlock({ label, run }: { label: string; run: LastRun | null }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function HistoryTable({ rows, onView }: { rows: HistoryRow[]; onView: (id: string) => void }) {
+  if (rows.length === 0) {
+    return <p className="mt-2 text-muted-foreground">No past runs.</p>;
+  }
+  return (
+    <div className="mt-2 max-h-64 overflow-y-auto">
+      <table className="w-full text-left">
+        <thead>
+          <tr className="text-muted-foreground">
+            <th className="py-1 pr-3 font-normal">When</th>
+            <th className="py-1 pr-3 font-normal">Duration</th>
+            <th className="py-1 pr-3 font-normal">Status</th>
+            <th className="py-1 pr-3 font-normal">Task</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const ended = r.completedAt ?? r.createdAt;
+            const durMs = r.completedAt
+              ? new Date(r.completedAt).getTime() - new Date(r.createdAt).getTime()
+              : null;
+            const dur = durMs !== null
+              ? durMs < 1000 ? `${durMs}ms`
+                : durMs < 60_000 ? `${(durMs / 1000).toFixed(1)}s`
+                : `${Math.floor(durMs / 60_000)}m${Math.floor((durMs % 60_000) / 1000)}s`
+              : "—";
+            return (
+              <tr key={r.id} className="border-t hover:bg-muted/40">
+                <td className="py-1 pr-3">{new Date(ended).toLocaleString()}</td>
+                <td className="py-1 pr-3 text-muted-foreground">{dur}</td>
+                <td className="py-1 pr-3">
+                  <Badge
+                    variant="outline"
+                    className={
+                      r.status === "running" ? "bg-blue-100 text-blue-800" :
+                      r.status === "success" ? "bg-green-100 text-green-800" :
+                      "bg-red-100 text-red-800"
+                    }
+                  >
+                    {r.status}
+                  </Badge>
+                </td>
+                <td className="py-1 pr-3 font-mono text-[10px] text-muted-foreground">{r.id.slice(0, 8)}</td>
+                <td className="py-1 pr-3">
+                  <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => onView(r.id)}>
+                    View log
+                  </Button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

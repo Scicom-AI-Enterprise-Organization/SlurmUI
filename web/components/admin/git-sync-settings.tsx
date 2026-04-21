@@ -15,7 +15,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { GitBranch, Loader2, RefreshCw, AlertTriangle, Download } from "lucide-react";
+import { GitBranch, Loader2, RefreshCw, AlertTriangle, Download, Server, ChevronDown, ChevronUp } from "lucide-react";
 
 interface Config {
   enabled: boolean;
@@ -27,6 +27,7 @@ interface Config {
   authorName: string;
   authorEmail: string;
   includeSecrets: boolean;
+  clusterIds?: string[];
   lastSyncAt?: string;
   lastSyncStatus?: "success" | "failed";
   lastSyncMessage?: string;
@@ -42,6 +43,7 @@ const DEFAULT: Config = {
   authorName: "SlurmUI Sync",
   authorEmail: "slurmui-sync@localhost",
   includeSecrets: false,
+  clusterIds: [],
 };
 
 export function GitSyncSettings() {
@@ -57,11 +59,18 @@ export function GitSyncSettings() {
   const logRef = useRef<HTMLDivElement>(null);
   const [confirmRestore, setConfirmRestore] = useState(false);
 
+  const [clusters, setClusters] = useState<Array<{ id: string; name: string }>>([]);
+  const [clusterPickerOpen, setClusterPickerOpen] = useState(false);
+
   useEffect(() => {
     fetch("/api/settings/git-sync")
       .then((r) => r.json())
       .then((d) => setCfg({ ...DEFAULT, ...d }))
       .finally(() => setLoading(false));
+    fetch("/api/clusters")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => setClusters(Array.isArray(list) ? list.map((c: any) => ({ id: c.id, name: c.name })) : []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -197,6 +206,68 @@ export function GitSyncSettings() {
               onChange={(e) => setCfg({ ...cfg, path: e.target.value })}
             />
           </div>
+        </div>
+
+        {/* Cluster scope — empty list means "sync every cluster" */}
+        <div className="space-y-2">
+          <Label>Clusters to export</Label>
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full justify-between font-normal"
+            onClick={() => setClusterPickerOpen((v) => !v)}
+          >
+            <span className="flex items-center gap-2">
+              <Server className="h-4 w-4" />
+              {(() => {
+                const sel = cfg.clusterIds ?? [];
+                if (sel.length === 0) return <>All clusters <Badge variant="outline" className="ml-1">{clusters.length}</Badge></>;
+                if (sel.length <= 3) {
+                  const names = clusters.filter((c) => sel.includes(c.id)).map((c) => c.name);
+                  return <>{names.join(", ")} <Badge variant="outline" className="ml-1">{sel.length}</Badge></>;
+                }
+                return <>{sel.length} clusters selected</>;
+              })()}
+            </span>
+            {clusterPickerOpen
+              ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
+              : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+          </Button>
+          {clusterPickerOpen && (
+            <div className="rounded-md border bg-background p-3 space-y-2 max-h-72 overflow-y-auto">
+              <label className="flex items-center gap-2 cursor-pointer text-sm">
+                <Checkbox
+                  checked={(cfg.clusterIds ?? []).length === 0}
+                  onCheckedChange={(v) => { if (v) setCfg({ ...cfg, clusterIds: [] }); }}
+                />
+                <span>All clusters</span>
+              </label>
+              <div className="border-t" />
+              {clusters.length === 0 ? (
+                <p className="px-1 py-1 text-xs text-muted-foreground">No clusters yet.</p>
+              ) : clusters.map((c) => {
+                const sel = cfg.clusterIds ?? [];
+                const checked = sel.includes(c.id);
+                return (
+                  <label key={c.id} className="flex items-center gap-2 cursor-pointer text-sm">
+                    <Checkbox
+                      checked={checked}
+                      onCheckedChange={(v) => {
+                        const next = new Set(sel);
+                        if (v) next.add(c.id); else next.delete(c.id);
+                        setCfg({ ...cfg, clusterIds: [...next] });
+                      }}
+                    />
+                    <span className="font-mono">{c.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Pick specific clusters to narrow the export (jobs, templates, and per-cluster folders are filtered).
+            Leave empty to export every cluster — global SSH keys and the user index are always included.
+          </p>
         </div>
 
         {/* How-to for private repos */}

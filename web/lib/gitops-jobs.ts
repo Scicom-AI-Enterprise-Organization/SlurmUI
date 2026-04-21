@@ -174,25 +174,67 @@ function parseManifest(relPath: string, body: string): { ok: ParsedManifest } | 
 
 // ─────────────────────────── slurm cancel helper ─────────────────────────────
 
-async function cancelSlurmJob(jobId: string, onLog: (l: string) => void): Promise<void> {
+async function cancelSlurmJob(jobId: string, onLog: (l: string) => void): Promise<boolean> {
   const job = await prisma.job.findUnique({
     where: { id: jobId },
     include: { cluster: { include: { sshKey: true } } },
   });
   if (!job?.slurmJobId || !job.cluster) {
     await prisma.job.update({ where: { id: jobId }, data: { status: "CANCELLED" } }).catch(() => {});
-    return;
+    return true;
   }
   const c = job.cluster;
   if (c.connectionMode === "SSH" && c.sshKey) {
     const { sshExecScript } = await import("./ssh-exec");
+    let cancelOk = false;
     await new Promise<void>((resolve) => {
       sshExecScript(
         { host: c.controllerHost, user: c.sshUser, port: c.sshPort, privateKey: c.sshKey!.privateKey, bastion: c.sshBastion },
-        `scancel ${job.slurmJobId} 2>&1 || true`,
-        { onStream: (l) => onLog(`[scancel] ${l}`), onComplete: () => resolve() },
+        // --signal=KILL --full sends SIGKILL to *every* task (including the
+        // batch shell) without waiting for KillWait. Default scancel uses
+        // SIGTERM + 30s grace, which leaves the job in CG state for ages
+        // and keeps the allocation reserved. --full ensures srun steps
+        // die too, not just the top-level task.
+        //
+        // Try as the login user first. If Slurm refuses (job belongs to
+        // another user and the login user isn't a Slurm operator/admin),
+        // fall back to sudo -n so root can cancel any job.
+        `
+set +e
+SCANCEL_OUT=$(scancel --signal=KILL --full ${job.slurmJobId} 2>&1)
+SCANCEL_RC=$?
+if [ $SCANCEL_RC -eq 0 ] && ! echo "$SCANCEL_OUT" | grep -q "Kill job error"; then
+  echo "$SCANCEL_OUT"
+  echo "[scancel-ok] job ${job.slurmJobId} cancelled by $(id -un)"
+  exit 0
+fi
+echo "$SCANCEL_OUT"
+echo "[scancel-retry] retrying with sudo -n"
+sudo -n scancel --signal=KILL --full ${job.slurmJobId} 2>&1
+SUDO_RC=$?
+if [ $SUDO_RC -eq 0 ]; then
+  echo "[scancel-ok] job ${job.slurmJobId} cancelled via sudo"
+  exit 0
+fi
+echo "[scancel-fail] scancel rc=$SCANCEL_RC sudo rc=$SUDO_RC"
+exit 2
+`.trim(),
+        {
+          onStream: (l) => {
+            if (l.includes("[scancel-ok]")) cancelOk = true;
+            onLog(`[scancel] ${l}`);
+          },
+          onComplete: (success) => { if (success) cancelOk = true; resolve(); },
+        },
       );
     });
+    if (!cancelOk) {
+      // Leave the DB row's status alone — marking CANCELLED when the
+      // Slurm job is still running causes drift. Caller will retry on the
+      // next reconcile tick.
+      onLog(`[scancel] could not cancel job ${job.slurmJobId} — leaving DB status unchanged`);
+      return false;
+    }
   } else if (c.connectionMode === "NATS") {
     try {
       const { publishCommand } = await import("./nats");
@@ -206,6 +248,7 @@ async function cancelSlurmJob(jobId: string, onLog: (l: string) => void): Promis
     }
   }
   await prisma.job.update({ where: { id: jobId }, data: { status: "CANCELLED" } }).catch(() => {});
+  return true;
 }
 
 // ─────────────────────────── reconcile entry point ───────────────────────────
@@ -237,11 +280,20 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
       env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
     }
 
+    onLog(`[gitops] config: branch=${cfg.branch} path=${cfg.path || "<repo root>"} intervalSec=${cfg.intervalSec}`);
     onLog(`[gitops] cloning ${cfg.repoUrl} (branch ${cfg.branch})`);
     const clone = await runGit(["clone", "--depth", "1", "--branch", cfg.branch, gitUrl, "repo"], workDir, env, onLog);
     if (clone.code !== 0) throw new Error("git clone failed");
     const repoDir = join(workDir, "repo");
+    // Record the HEAD sha + last commit so the log pinpoints exactly which
+    // tree was reconciled (useful when triaging "why did we not pick up X").
+    const rev = await runGit(["rev-parse", "HEAD"], repoDir, env, () => {});
+    const headSha = rev.stdout.trim().slice(0, 12);
+    const lastMsg = await runGit(["log", "-1", "--pretty=format:%an %ci | %s"], repoDir, env, () => {});
+    onLog(`[gitops] HEAD=${headSha} — ${lastMsg.stdout.trim()}`);
+
     const jobsRoot = cfg.path ? join(repoDir, cfg.path, "jobs") : join(repoDir, "jobs");
+    onLog(`[gitops] scanning ${relative(repoDir, jobsRoot) || "jobs"}/ for *.yaml`);
 
     // ── Parse all manifests ──────────────────────────────────────────────
     const parsed: ParsedManifest[] = [];
@@ -257,7 +309,9 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
         continue;
       }
       parsed.push(res.ok);
+      onLog(`[gitops] parsed ${rel} → name=${res.ok.name} cluster=${res.ok.clusterName} user=${res.ok.userEmail} partition=${res.ok.partition} sha256=${res.ok.contentHash}`);
     }
+    onLog(`[gitops] manifests: ${parsed.length} valid, ${summary.skipped.length} skipped`);
 
     // ── Cache cluster + user lookups ─────────────────────────────────────
     const clusters = await prisma.cluster.findMany({ select: { id: true, name: true } });
@@ -265,6 +319,8 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
     const emails = Array.from(new Set(parsed.map((p) => p.userEmail)));
     const users = await prisma.user.findMany({ where: { email: { in: emails } }, select: { id: true, email: true } });
     const userByEmail = new Map(users.map((u) => [u.email, u.id]));
+    onLog(`[gitops] known clusters: ${[...clusterByName.keys()].join(", ") || "(none)"}`);
+    onLog(`[gitops] matched users:  ${[...userByEmail.keys()].join(", ") || "(none)"}`);
 
     // Track which (clusterId, sourceName) keys are present in this scan so we
     // can identify deletions afterwards.
@@ -290,40 +346,51 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
 
       try {
         if (!existing) {
-          onLog(`[gitops] submit new ${m.relPath}`);
-          await submitJob({
+          onLog(`[gitops] submit new ${m.relPath} (no existing job for sourceName="${m.name}")`);
+          const res = await submitJob({
             clusterId, userId,
             script: m.script, partition: m.partition,
             sourceRef, sourceName: m.name,
             auditExtra: { via: "gitops", manifest: m.relPath },
           });
+          onLog(`[gitops] submitted ${m.relPath} → job.id=${res?.id ?? "?"} slurmJobId=${res?.slurmJobId ?? "?"}`);
           summary.submitted++;
           continue;
         }
 
         if (existing.sourceRef === sourceRef) {
+          onLog(`[gitops] unchanged ${m.relPath} → job.id=${existing.id} status=${existing.status} (sourceRef matches)`);
           summary.unchanged++;
           continue;
         }
 
         // Content changed → cancel-if-active + resubmit. Per user spec:
         // always cancel+resubmit on change, regardless of running state.
-        onLog(`[gitops] resubmit ${m.relPath} (sourceRef changed)`);
+        onLog(`[gitops] resubmit ${m.relPath} (sourceRef changed: ${existing.sourceRef} → ${sourceRef})`);
+        onLog(`[gitops]   existing job.id=${existing.id} slurmJobId=${existing.slurmJobId ?? "?"} status=${existing.status}`);
         if (existing.status === "PENDING" || existing.status === "RUNNING") {
-          await cancelSlurmJob(existing.id, onLog);
+          const ok = await cancelSlurmJob(existing.id, onLog);
+          if (!ok) {
+            onLog(`[gitops]   cancel FAILED — skipping resubmit to avoid duplicate running job. Will retry next tick.`);
+            summary.errors.push({ path: m.relPath, error: "scancel failed (Slurm permission denied and sudo unavailable)" });
+            continue;
+          }
           summary.cancelled++;
+        } else {
+          onLog(`[gitops]   existing job is ${existing.status} — no cancel needed`);
         }
         // Drop the stale row so the @@unique([clusterId, sourceName]) lets
         // the new submission take its place. Keep history? No — the audit log
         // already records the lineage and the old job was cancelled; keeping
         // both rows would clutter the user's job list with phantom entries.
         await prisma.job.delete({ where: { id: existing.id } }).catch(() => {});
-        await submitJob({
+        const res = await submitJob({
           clusterId, userId,
           script: m.script, partition: m.partition,
           sourceRef, sourceName: m.name,
           auditExtra: { via: "gitops", manifest: m.relPath, replaces: existing.id },
         });
+        onLog(`[gitops] resubmitted ${m.relPath} → job.id=${res?.id ?? "?"} slurmJobId=${res?.slurmJobId ?? "?"}`);
         summary.resubmitted++;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "unknown";
@@ -337,15 +404,38 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
       where: { sourceName: { not: null } },
       select: { id: true, clusterId: true, sourceName: true, status: true, sourceRef: true },
     });
+    onLog(`[gitops] removal scan: checking ${owned.length} gitops-owned job(s) against ${seenKeys.size} seen manifest key(s)`);
+    let removedCount = 0;
     for (const j of owned) {
       const key = `${j.clusterId}\x00${j.sourceName}`;
       if (seenKeys.has(key)) continue;
-      onLog(`[gitops] manifest removed → cancel+drop ${j.sourceRef}`);
+      onLog(`[gitops] manifest removed → cancel+drop job.id=${j.id} sourceName=${j.sourceName} status=${j.status}`);
       if (j.status === "PENDING" || j.status === "RUNNING") {
         await cancelSlurmJob(j.id, onLog);
       }
       await prisma.job.delete({ where: { id: j.id } }).catch(() => {});
       summary.cancelled++;
+      removedCount++;
+    }
+    if (removedCount === 0) onLog(`[gitops] removal scan: no manifests deleted since last tick`);
+
+    // Dump a final status breakdown of all gitops-owned jobs so the operator
+    // can see at a glance what actually lives in the DB after this pass.
+    try {
+      const final = await prisma.job.groupBy({
+        by: ["status"],
+        where: { sourceName: { not: null } },
+        _count: { status: true },
+      });
+      const parts = final.map((f) => `${f.status}=${f._count.status}`).join(" ");
+      onLog(`[gitops] gitops-owned job states: ${parts || "(none)"}`);
+    } catch {}
+
+    if (summary.skipped.length > 0) {
+      for (const s of summary.skipped) onLog(`[gitops] skipped: ${s.path} (${s.reason})`);
+    }
+    if (summary.errors.length > 0) {
+      for (const e of summary.errors) onLog(`[gitops] error:   ${e.path} (${e.error})`);
     }
 
     onLog(`[gitops] done: scanned=${summary.scanned} submitted=${summary.submitted} resubmitted=${summary.resubmitted} cancelled=${summary.cancelled} unchanged=${summary.unchanged} skipped=${summary.skipped.length} errors=${summary.errors.length}`);
@@ -390,21 +480,23 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
   }
 }
 
-// ─────────────────── export running jobs (one-way mirror) ──────────────────
+// ─────────────────── export running jobs (adopt into jobs/) ──────────────
 
 export interface ExportRunningSummary {
   exported: number;
-  pruned: number; // stale files in running/ that no longer match an active job
+  pruned: number; // kept for API compatibility; no pruning in adoption mode
 }
 
 /**
- * Clone the configured repo and write a YAML manifest for every currently
- * PENDING/RUNNING job into `<path>/running/<cluster>/<slurmId|jobId>.yaml`.
- * Commits + pushes the diff. Stale files are removed so the mirror reflects
- * the live set exactly.
+ * Clone the configured repo and write a declarative manifest for every
+ * currently PENDING/RUNNING job into `<path>/jobs/<cluster>/<slurmId|jobId>.yaml`.
+ * Commits + pushes the diff, then updates each Job row with sourceName +
+ * sourceRef so the next reconciler pass treats the manifest as "unchanged"
+ * (i.e. adopts it) instead of submitting a duplicate.
  *
- * Writes to `running/` — intentionally NOT `jobs/` — so the reconciler does
- * not treat these manifests as declarative submissions.
+ * Unlike a wipe-and-write mirror, this exporter never deletes manifests for
+ * completed jobs — they remain under `jobs/` until a human removes them.
+ * That keeps reconciler state in sync without a cancel-on-completion loop.
  */
 export async function runExportRunning(onLog: (line: string) => void): Promise<ExportRunningSummary> {
   const cfg = await loadGitOpsJobsConfig();
@@ -440,11 +532,8 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     await runGit(["config", "user.email", "aura-gitops@localhost"], repoDir, env, onLog);
 
     const baseDir = cfg.path ? join(repoDir, cfg.path) : repoDir;
-    const runningDir = join(baseDir, "running");
-
-    // Wipe the directory so deletions propagate. Same pattern as git-sync.ts.
-    if (existsSync(runningDir)) rmSync(runningDir, { recursive: true, force: true });
-    mkdirSync(runningDir, { recursive: true });
+    const jobsDir = join(baseDir, "jobs");
+    mkdirSync(jobsDir, { recursive: true });
 
     const jobs = await prisma.job.findMany({
       where: { status: { in: ["PENDING", "RUNNING"] } },
@@ -457,53 +546,84 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     });
     const userById = new Map(users.map((u) => [u.id, u]));
 
+    type AdoptPatch = { jobId: string; sourceName: string; sourceRef: string };
+    const patches: AdoptPatch[] = [];
+
     let exported = 0;
     for (const j of jobs) {
       const u = userById.get(j.userId);
-      const clusterDir = join(runningDir, j.cluster.name);
+      if (!u) continue;
+      const clusterDir = join(jobsDir, j.cluster.name);
       mkdirSync(clusterDir, { recursive: true });
       const fileId = j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8);
       const filePath = join(clusterDir, `${fileId}.yaml`);
+      const sourceName = j.sourceName ?? fileId;
+
+      // Shape the YAML EXACTLY like parseManifest expects so the reconciler
+      // can adopt the row on its next pass without resubmitting.
       const body = yaml.dump({
         apiVersion: "aura/v1",
-        kind: "RunningJob",
+        kind: "Job",
         metadata: {
-          name: j.sourceName ?? fileId,
+          name: sourceName,
           cluster: j.cluster.name,
-          user: u?.email ?? null,
-        },
-        status: {
-          jobId: j.id,
-          slurmJobId: j.slurmJobId,
-          state: j.status,
-          partition: j.partition,
-          sourceRef: j.sourceRef ?? null,
-          createdAt: j.createdAt.toISOString(),
-          updatedAt: j.updatedAt.toISOString(),
+          user: u.email,
         },
         spec: {
           partition: j.partition,
           script: j.script,
         },
       }, { lineWidth: 120 });
-      writeFileSync(
-        filePath,
-        `# Managed by Aura GitOps — snapshot of a live job. Do not edit.\n${body}`,
-      );
+      const fullBody = `# Managed by SlurmUI GitOps — auto-adopted from a live job.\n${body}`;
+      writeFileSync(filePath, fullBody);
+
+      // Compute sourceRef identically to the reconciler so the adoption
+      // lookup below matches: relPath from repoDir, sha256 of the full body.
+      const relPath = relative(repoDir, filePath);
+      const contentHash = createHash("sha256").update(fullBody).digest("hex").slice(0, 16);
+      const sourceRef = `${relPath}@sha256:${contentHash}`;
+      patches.push({ jobId: j.id, sourceName, sourceRef });
       exported++;
     }
 
-    await runGit(["add", "-A", "running"], baseDir, env, onLog);
+    // Clean up the legacy running/ tree if it exists — we no longer
+    // maintain a separate mirror now that adoption writes to jobs/.
+    const legacyRunning = join(baseDir, "running");
+    if (existsSync(legacyRunning)) {
+      rmSync(legacyRunning, { recursive: true, force: true });
+      await runGit(["add", "-A", "running"], baseDir, env, onLog);
+    }
+
+    await runGit(["add", "-A", "jobs"], baseDir, env, onLog);
     const status = await runGit(["status", "--porcelain"], repoDir, env, onLog);
     if (!status.stdout.trim()) {
       onLog(`[export] no changes (exported=${exported})`);
+      // Still write the DB patches so future runs without git diffs can
+      // adopt — even if the manifest already matched, Job.sourceName may
+      // have been null before.
+      for (const p of patches) {
+        await prisma.job.update({
+          where: { id: p.jobId },
+          data: { sourceName: p.sourceName, sourceRef: p.sourceRef },
+        }).catch(() => {});
+      }
       return { exported, pruned: 0 };
     }
 
-    const commit = await runGit(["commit", "-m", `Aura running-jobs snapshot @ ${new Date().toISOString()}`], repoDir, env, onLog);
+    const commit = await runGit(["commit", "-m", `SlurmUI GitOps adopt @ ${new Date().toISOString()}`], repoDir, env, onLog);
     if (commit.code !== 0) throw new Error("git commit failed");
     const push = await runGit(["push", "origin", cfg.branch], repoDir, env, onLog);
     if (push.code !== 0) throw new Error("git push failed (check deploy key / PAT permissions)");
+
+    // After the push lands, mark each Job row with the matching sourceName
+    // + sourceRef. From here on the reconciler treats these jobs as
+    // manifest-owned and won't resubmit on the next scan.
+    for (const p of patches) {
+      await prisma.job.update({
+        where: { id: p.jobId },
+        data: { sourceName: p.sourceName, sourceRef: p.sourceRef },
+      }).catch(() => {});
+    }
 
     onLog(`[export] pushed (exported=${exported})`);
 

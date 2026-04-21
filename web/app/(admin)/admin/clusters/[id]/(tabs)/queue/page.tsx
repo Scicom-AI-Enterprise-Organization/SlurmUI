@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -114,6 +115,10 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
   const [err, setErr] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [sortBy, setSortBy] = useState<keyof QueueRow>("state");
+  // Map Slurm job id → SlurmUI Job.id so the queue can deep-link rows it
+  // actually owns. Jobs submitted outside SlurmUI won't appear here and
+  // stay as plain text.
+  const [slurmMap, setSlurmMap] = useState<Record<string, string>>({});
 
   const load = async () => {
     setLoading(true);
@@ -139,6 +144,14 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
   };
 
   useEffect(() => { if (active) load(); }, [active]);
+
+  useEffect(() => {
+    if (!active) return;
+    fetch(`/api/clusters/${clusterId}/jobs/slurm-map`)
+      .then((r) => (r.ok ? r.json() : { map: {} }))
+      .then((d) => setSlurmMap(d.map ?? {}))
+      .catch(() => {});
+  }, [active, clusterId, rows.length]);
 
   const filtered = useMemo(() => {
     const q = filter.toLowerCase();
@@ -216,7 +229,18 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
             <TableBody>
               {filtered.map((r) => (
                 <TableRow key={r.jobid}>
-                  <TableCell className="font-mono text-sm">{r.jobid}</TableCell>
+                  <TableCell className="font-mono text-sm">
+                    {slurmMap[r.jobid] ? (
+                      <Link
+                        href={`/clusters/${clusterId}/jobs/${slurmMap[r.jobid]}`}
+                        className="text-primary underline-offset-4 hover:underline"
+                      >
+                        {r.jobid}
+                      </Link>
+                    ) : (
+                      r.jobid
+                    )}
+                  </TableCell>
                   <TableCell className="font-mono text-sm">{r.partition}</TableCell>
                   <TableCell className="font-mono text-sm">{r.user}</TableCell>
                   <TableCell className="font-mono text-sm">{r.state}</TableCell>
