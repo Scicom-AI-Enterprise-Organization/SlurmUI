@@ -26,6 +26,8 @@ export interface ClusterBasics {
   sshJumpUser: string;
   sshJumpPort: string;
   sshJumpKeyId: string;
+  sshProxyCommand: string;
+  sshJumpProxyCommand: string;
 }
 
 export interface SshKeyOption {
@@ -52,7 +54,7 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
   const update = (field: keyof ClusterBasics, value: string) => {
     onChange({ ...data, [field]: value });
     // Reset SSH test when connection details change
-    if (["controllerHost", "sshUser", "sshPort", "sshKeyId", "sshJumpHost", "sshJumpUser", "sshJumpPort", "sshJumpKeyId"].includes(field)) {
+    if (["controllerHost", "sshUser", "sshPort", "sshKeyId", "sshJumpHost", "sshJumpUser", "sshJumpPort", "sshJumpKeyId", "sshProxyCommand", "sshJumpProxyCommand"].includes(field)) {
       setSshTest("idle");
       setSshTestMsg("");
       onSshTestChange?.("idle");
@@ -78,6 +80,8 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
           jumpUser: data.sshJumpUser || undefined,
           jumpPort: data.sshJumpPort ? parseInt(data.sshJumpPort) || 22 : undefined,
           jumpKeyId: data.sshJumpKeyId || undefined,
+          proxyCommand: data.sshProxyCommand || undefined,
+          jumpProxyCommand: data.sshJumpProxyCommand || undefined,
         }),
       });
       const result = await res.json();
@@ -226,7 +230,7 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
           className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium hover:bg-accent/40"
         >
           {jumpOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          Jumphost (optional)
+          Extra settings
           {data.sshJumpHost && !jumpOpen && (
             <span className="ml-2 text-xs font-normal text-muted-foreground">
               {data.sshJumpUser || "root"}@{data.sshJumpHost}
@@ -235,6 +239,19 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
         </button>
         {jumpOpen && (
           <div className="space-y-3 border-t p-3">
+            <div className="space-y-2">
+              <Label htmlFor="sshProxyCommand">Host ProxyCommand (advanced)</Label>
+              <Input
+                id="sshProxyCommand"
+                placeholder="cloudflared access tcp --hostname controller.trycloudflare.com"
+                value={data.sshProxyCommand}
+                onChange={(e) => update("sshProxyCommand", e.target.value)}
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Transport to reach the controller directly. When set, the jump fields below are ignored.
+              </p>
+            </div>
             <div className="space-y-2">
               <Label>Jump SSH Key</Label>
               <Select
@@ -287,6 +304,19 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
                   onChange={(e) => update("sshJumpPort", e.target.value)}
                 />
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sshJumpProxyCommand">Jump ProxyCommand (advanced)</Label>
+              <Input
+                id="sshJumpProxyCommand"
+                placeholder="cloudflared access tcp --hostname bastion.trycloudflare.com"
+                value={data.sshJumpProxyCommand}
+                onChange={(e) => update("sshJumpProxyCommand", e.target.value)}
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Transport used to reach the jumphost (nested inside the <code>-W</code> ssh). Leave empty for a plain TCP connection to Jump Host.
+              </p>
             </div>
           </div>
         )}

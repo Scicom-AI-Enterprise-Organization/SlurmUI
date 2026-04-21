@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { AccountingCard } from "@/components/cluster/accounting-card";
+import { GitopsOnlyCard } from "@/components/cluster/gitops-only-card";
 import { redactConfig } from "@/lib/redact-config";
 
 interface PageProps {
@@ -21,6 +22,7 @@ export default async function ConfigurationPage({ params }: PageProps) {
   return (
     <div className="space-y-6">
       {cluster.status === "ACTIVE" && <AccountingCard clusterId={id} />}
+      <GitopsOnlyCard clusterId={id} />
       <ConfigEditor clusterId={id} initialConfig={config} />
     </div>
   );

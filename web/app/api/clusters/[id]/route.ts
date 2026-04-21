@@ -56,7 +56,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId } = body;
+  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
 
   const VALID_STATUSES = ["PROVISIONING", "ACTIVE", "DEGRADED", "OFFLINE", "ERROR"];
   if (status && !VALID_STATUSES.includes(status)) {
@@ -101,6 +101,8 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       ...(sshJumpHost === undefined && sshJumpUser !== undefined && { sshJumpUser }),
       ...(sshJumpHost === undefined && sshJumpPort !== undefined && { sshJumpPort }),
       ...(sshJumpHost === undefined && sshJumpKeyId !== undefined && { sshJumpKeyId: sshJumpKeyId || null }),
+      ...(sshProxyCommand !== undefined && { sshProxyCommand: sshProxyCommand || null }),
+      ...(sshJumpProxyCommand !== undefined && { sshJumpProxyCommand: sshJumpProxyCommand || null }),
     },
   });
 

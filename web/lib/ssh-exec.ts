@@ -25,6 +25,13 @@ interface SshTarget {
   // Optional: raw PEM for the jump hop when it needs a different key from
   // the destination. When unset, the same `privateKey` is used for both hops.
   jumpPrivateKey?: string | null;
+  // Raw -o ProxyCommand override for the primary hop (to the controller).
+  // Wins over jumpHost — ssh reaches the controller via this command.
+  proxyCommand?: string | null;
+  // Raw -o ProxyCommand override for the jump hop (the jumphost is reached
+  // via this command). Nested inside the jump-W ssh when both jumpHost and
+  // this are set.
+  jumpProxyCommand?: string | null;
 }
 
 /**
@@ -38,23 +45,38 @@ interface SshTarget {
  * tmpDir when the process exits).
  */
 function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: string): string[] {
-  if (!target.jumpHost) return [];
-  const u = target.jumpUser || "root";
-  const p = target.jumpPort || 22;
+  const hostProxy = target.proxyCommand?.trim() || "";
+  const jumpProxy = target.jumpProxyCommand?.trim() || "";
+  const hasHostProxy = hostProxy.length > 0;
+  const hasJump = !!target.jumpHost;
 
+  // Host ProxyCommand wins — it's the direct transport to the controller.
+  // Jump fields are ignored in this mode.
+  if (hasHostProxy) {
+    return ["-o", `ProxyCommand=${hostProxy}`];
+  }
+  if (!hasJump) return [];
+
+  // Build the jump-hop sub-ssh. Uses the jump key (may differ from main).
   let jumpKeyPath = mainKeyPath;
   if (target.jumpPrivateKey && target.jumpPrivateKey !== target.privateKey) {
     jumpKeyPath = join(tmpDir, "ssh_jump_key");
     writeFileSync(jumpKeyPath, target.jumpPrivateKey, { mode: 0o600 });
     chmodSync(jumpKeyPath, 0o600);
   }
+  const u = target.jumpUser || "root";
+  const p = target.jumpPort || 22;
+  const jumpOpts = `-i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR`;
 
-  // -W %h:%p makes the bastion forward raw TCP to the destination; it's
-  // the canonical stdin/stdout tunnel for ProxyCommand-based jumps.
-  // LogLevel=ERROR silences the "Permanently added ... to the list of known
-  // hosts" warnings the child ssh emits every call — those otherwise pollute
-  // the Test-SSH UI and the log dialogs.
-  const proxy = `ssh -i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -W %h:%p ${u}@${target.jumpHost}`;
+  // Jump ProxyCommand (optional) is the transport INTO the jumphost —
+  // nested as the inner ssh's own ProxyCommand.
+  if (jumpProxy.length > 0) {
+    const inner = jumpProxy.replace(/'/g, "'\\''");
+    const outer = `ssh ${jumpOpts} -o 'ProxyCommand=${inner}' -W %h:%p ${u}@${target.jumpHost}`;
+    return ["-o", `ProxyCommand=${outer}`];
+  }
+
+  const proxy = `ssh ${jumpOpts} -W %h:%p ${u}@${target.jumpHost}`;
   return ["-o", `ProxyCommand=${proxy}`];
 }
 
@@ -91,6 +113,8 @@ export async function getClusterSshTarget(clusterId: string): Promise<SshTarget 
     jumpUser: cluster.sshJumpUser,
     jumpPort: cluster.sshJumpPort,
     jumpPrivateKey,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 }
 

@@ -33,6 +33,8 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
     sshJumpUser: "root",
     sshJumpPort: "22",
     sshJumpKeyId: "",
+    sshProxyCommand: "",
+    sshJumpProxyCommand: "",
   });
   const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -63,6 +65,8 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
           sshJumpUser: basics.sshJumpHost ? (basics.sshJumpUser || "root") : undefined,
           sshJumpPort: basics.sshJumpHost ? (parseInt(basics.sshJumpPort) || 22) : undefined,
           sshJumpKeyId: basics.sshJumpHost && basics.sshJumpKeyId ? basics.sshJumpKeyId : undefined,
+          sshProxyCommand: basics.sshProxyCommand || undefined,
+          sshJumpProxyCommand: basics.sshJumpProxyCommand || undefined,
         }),
       });
       if (!res.ok) {

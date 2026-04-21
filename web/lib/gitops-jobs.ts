@@ -36,7 +36,7 @@ export interface GitOpsJobsConfig {
   path: string;
   deployKey: string;
   httpsToken: string;
-  /** Reconcile cadence. Clamped to >= 30 seconds. */
+  /** Reconcile cadence. Clamped to >= 60 seconds. */
   intervalSec: number;
   lastReconcileAt?: string;
   lastStatus?: "success" | "failed";
@@ -50,7 +50,7 @@ export const DEFAULT_GITOPS_JOBS_CONFIG: GitOpsJobsConfig = {
   path: "",
   deployKey: "",
   httpsToken: "",
-  intervalSec: 30,
+  intervalSec: 60,
 };
 
 const SETTING_KEY = "gitops_jobs_config";
@@ -67,7 +67,7 @@ export async function loadGitOpsJobsConfig(): Promise<GitOpsJobsConfig> {
 
 export async function saveGitOpsJobsConfig(cfg: GitOpsJobsConfig): Promise<void> {
   // Clamp interval to a sane minimum so the cron can't be set to 0.
-  const safe: GitOpsJobsConfig = { ...cfg, intervalSec: Math.max(30, Math.floor(cfg.intervalSec || 30)) };
+  const safe: GitOpsJobsConfig = { ...cfg, intervalSec: Math.max(60, Math.floor(cfg.intervalSec || 60)) };
   await prisma.setting.upsert({
     where: { key: SETTING_KEY },
     create: { key: SETTING_KEY, value: JSON.stringify(safe) },
@@ -532,7 +532,35 @@ async function tick(): Promise<void> {
   try {
     const cfg = await loadGitOpsJobsConfig();
     if (!cfg.enabled || !cfg.repoUrl) return;
-    await runReconcile((line) => console.log(`[gitops-jobs] ${line}`));
+
+    // Create a BackgroundTask row so the settings UI can surface the last
+    // cron-run logs the same way it surfaces manual "Reconcile now" logs.
+    const task = await prisma.backgroundTask.create({
+      data: { clusterId: "__global__", type: "gitops_jobs_reconcile" },
+    }).catch(() => null);
+
+    const appendLog = async (line: string) => {
+      console.log(`[gitops-jobs] ${line}`);
+      if (!task) return;
+      try {
+        await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${task.id}`;
+      } catch {}
+    };
+
+    let ok = true;
+    try {
+      await runReconcile(appendLog);
+    } catch (err) {
+      ok = false;
+      await appendLog(`[error] ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (task) {
+      await prisma.backgroundTask.update({
+        where: { id: task.id },
+        data: { status: ok ? "success" : "failed", completedAt: new Date() },
+      }).catch(() => {});
+    }
   } catch (err) {
     console.warn("[gitops-jobs] tick failed:", err instanceof Error ? err.message : err);
   } finally {
@@ -543,7 +571,7 @@ async function tick(): Promise<void> {
 async function scheduleNext(): Promise<void> {
   // Re-read config each time so interval changes apply without a restart.
   const cfg = await loadGitOpsJobsConfig().catch(() => DEFAULT_GITOPS_JOBS_CONFIG);
-  const intervalSec = Math.max(30, cfg.intervalSec || 30);
+  const intervalSec = Math.max(60, cfg.intervalSec || 60);
   tickHandle = setTimeout(async () => {
     await tick();
     scheduleNext();

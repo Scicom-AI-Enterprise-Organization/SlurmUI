@@ -256,6 +256,16 @@ export default function JobListPage() {
   const [resetting, setResetting] = useState(false);
   const [resetResult, setResetResult] = useState<{ ok: boolean; output: string; count?: number } | null>(null);
 
+  // Per-cluster GitOps-only flag. When true, hide the Submit Job button and
+  // show a banner explaining that manifests must land in the repo instead.
+  const [gitopsOnly, setGitopsOnly] = useState(false);
+  useEffect(() => {
+    fetch(`/api/clusters/${clusterId}/gitops-only`)
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .then((d) => setGitopsOnly(!!d.enabled))
+      .catch(() => {});
+  }, [clusterId]);
+
   const fetchJobs = () => {
     setLoading(true);
     const qs = new URLSearchParams({
@@ -337,12 +347,19 @@ export default function JobListPage() {
             {resetting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eraser className="mr-2 h-4 w-4" />}
             Reset Queue
           </Button>
-          <Link href={`/clusters/${clusterId}/jobs/new`}>
-            <Button>
+          {gitopsOnly ? (
+            <Button disabled title="This cluster only accepts jobs from the Git Jobs repo">
               <Plus className="mr-2 h-4 w-4" />
-              Submit Job
+              Submit Job (GitOps only)
             </Button>
-          </Link>
+          ) : (
+            <Link href={`/clusters/${clusterId}/jobs/new`}>
+              <Button>
+                <Plus className="mr-2 h-4 w-4" />
+                Submit Job
+              </Button>
+            </Link>
+          )}
         </div>
       </div>
 

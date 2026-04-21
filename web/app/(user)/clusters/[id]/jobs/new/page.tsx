@@ -430,6 +430,14 @@ export default function NewJobPage() {
   const [storageMounts, setStorageMounts] = useState<Array<{ id: string; mountPath: string; type: string }>>([]);
   const [pythonVenvPath, setPythonVenvPath] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
+  const [gitopsOnly, setGitopsOnly] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/clusters/${clusterId}/gitops-only`)
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .then((d) => setGitopsOnly(!!d.enabled))
+      .catch(() => {});
+  }, [clusterId]);
 
   useEffect(() => {
     fetch(`/api/clusters/${clusterId}`)
@@ -615,6 +623,20 @@ export default function NewJobPage() {
         <h1 className="text-3xl font-bold">Submit Job</h1>
         <p className="text-muted-foreground">Submit a Slurm batch job</p>
       </div>
+
+      {gitopsOnly && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+          <p className="font-medium text-amber-700 dark:text-amber-400">
+            This cluster is GitOps-only
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            Jobs can only be submitted via the <b>Git Jobs</b> reconciler. Commit a manifest
+            under <code>jobs/**/*.yaml</code> with <code>metadata.cluster</code> set to this
+            cluster's name and the reconciler will pick it up on the next tick. An admin
+            can flip this off in <b>Cluster → Configuration → GitOps-only jobs</b>.
+          </p>
+        </div>
+      )}
 
       <Card>
         <CardContent className="space-y-6 pt-6">
@@ -966,7 +988,7 @@ export default function NewJobPage() {
 
           <Button
             onClick={handleSubmit}
-            disabled={submitting || !partition || (mode === "form" ? !command.trim() : !rawScript.trim())}
+            disabled={gitopsOnly || submitting || !partition || (mode === "form" ? !command.trim() : !rawScript.trim())}
             className="w-full"
           >
             <Send className="mr-2 h-4 w-4" />

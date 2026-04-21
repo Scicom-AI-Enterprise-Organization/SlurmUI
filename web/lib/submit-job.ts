@@ -37,6 +37,14 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
     throw new Error("Cluster is not accepting jobs");
   }
 
+  // Per-cluster "GitOps only" switch. When on, the only legitimate caller is
+  // the reconciler (which passes a sourceRef from the manifest's sha256).
+  // REST / UI submissions come through without a sourceRef — reject those.
+  const clusterCfg = (cluster.config ?? {}) as Record<string, unknown>;
+  if (clusterCfg.gitops_only_jobs === true && !sourceRef) {
+    throw new Error("This cluster only accepts jobs submitted via Git Jobs. Commit a manifest to the configured repo instead.");
+  }
+
   const dbUser = await prisma.user.findUnique({ where: { id: userId } });
   if (!dbUser) throw new Error("User not found");
 

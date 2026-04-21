@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { GitCommit, Loader2, RefreshCw, Upload } from "lucide-react";
+import { GitCommit, Loader2, RefreshCw, Upload, History } from "lucide-react";
 
 interface Config {
   enabled: boolean;
@@ -33,8 +33,17 @@ const DEFAULT: Config = {
   path: "",
   deployKey: "",
   httpsToken: "",
-  intervalSec: 30,
+  intervalSec: 60,
 };
+
+interface LastRun {
+  id: string;
+  status: "running" | "success" | "failed";
+  createdAt: string;
+  completedAt: string | null;
+  logs: string;
+  truncated: boolean;
+}
 
 export function GitopsJobsSettings() {
   const [cfg, setCfg] = useState<Config>(DEFAULT);
@@ -48,11 +57,30 @@ export function GitopsJobsSettings() {
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
   const logRef = useRef<HTMLDivElement>(null);
 
+  const [lastReconcile, setLastReconcile] = useState<LastRun | null>(null);
+  const [lastMirror, setLastMirror] = useState<LastRun | null>(null);
+
+  const fetchLastRuns = () => {
+    fetch("/api/sync/jobs/last-runs")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        setLastReconcile(d.reconcile ?? null);
+        setLastMirror(d.exportRunning ?? null);
+      })
+      .catch(() => {});
+  };
+
   useEffect(() => {
     fetch("/api/sync/jobs/config")
       .then((r) => r.json())
       .then((d) => setCfg({ ...DEFAULT, ...d }))
       .finally(() => setLoading(false));
+    fetchLastRuns();
+    // Poll so a cron tick that runs in the background shows up without a
+    // manual refresh. 10s keeps the DB load trivial.
+    const h = setInterval(fetchLastRuns, 10_000);
+    return () => clearInterval(h);
   }, []);
 
   useEffect(() => {
@@ -102,6 +130,7 @@ export function GitopsJobsSettings() {
           clearInterval(poll);
           setRunning(false);
           fetch("/api/sync/jobs/config").then((r) => r.json()).then((d) => setCfg({ ...DEFAULT, ...d }));
+          fetchLastRuns();
         }
       } catch {}
     }, 1500);
@@ -145,7 +174,7 @@ export function GitopsJobsSettings() {
           <div>
             <Label htmlFor="gj-enabled" className="font-medium">Enabled</Label>
             <p className="text-xs text-muted-foreground">
-              When on, the server ticks every <code>{Math.max(30, cfg.intervalSec)}s</code> and reconciles.
+              When on, the server ticks every <code>{Math.max(60, cfg.intervalSec)}s</code> and reconciles.
             </p>
           </div>
           <Switch
@@ -178,9 +207,9 @@ export function GitopsJobsSettings() {
             <Input
               id="gj-interval"
               type="number"
-              min={30}
+              min={60}
               value={cfg.intervalSec}
-              onChange={(e) => setCfg({ ...cfg, intervalSec: parseInt(e.target.value || "30", 10) })}
+              onChange={(e) => setCfg({ ...cfg, intervalSec: parseInt(e.target.value || "60", 10) })}
             />
           </div>
         </div>
@@ -241,7 +270,7 @@ https://x-token-auth:<app-password>@bitbucket.org/your-org/aura-jobs.git`}</pre>
             <p>
               First-time setup: create an empty repo with a <code>jobs/</code> folder and at least
               one manifest, point this settings page at it, save, and flip <b>Enabled</b> on — the cron
-              runs within 30s.
+              runs within 60s.
             </p>
           </div>
         </details>
@@ -326,6 +355,19 @@ spec:
             </Button>
           </div>
         </div>
+
+        <div className="space-y-3 pt-4 border-t">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <History className="h-4 w-4" /> Last runs
+            </div>
+            <Button variant="ghost" size="sm" onClick={fetchLastRuns}>
+              <RefreshCw className="h-3 w-3" />
+            </Button>
+          </div>
+          <LastRunBlock label="Reconcile" run={lastReconcile} />
+          <LastRunBlock label="Mirror running jobs" run={lastMirror} />
+        </div>
       </CardContent>
 
       <Dialog open={logOpen} onOpenChange={setLogOpen}>
@@ -368,5 +410,52 @@ spec:
         </DialogContent>
       </Dialog>
     </Card>
+  );
+}
+
+function LastRunBlock({ label, run }: { label: string; run: LastRun | null }) {
+  if (!run) {
+    return (
+      <div className="rounded-md border p-3 text-xs text-muted-foreground">
+        <div className="font-medium text-foreground">{label}</div>
+        <div className="mt-1">No runs yet.</div>
+      </div>
+    );
+  }
+  const lines = (run.logs ?? "").split("\n");
+  return (
+    <div className="rounded-md border p-3 text-xs">
+      <div className="flex items-center justify-between">
+        <div className="font-medium text-foreground">{label}</div>
+        <div className="flex items-center gap-2">
+          <Badge className={
+            run.status === "running" ? "bg-blue-100 text-blue-800" :
+            run.status === "success" ? "bg-green-100 text-green-800" :
+            "bg-red-100 text-red-800"
+          }>
+            {run.status}
+          </Badge>
+          <span className="text-muted-foreground">
+            {new Date(run.completedAt ?? run.createdAt).toLocaleString()}
+          </span>
+        </div>
+      </div>
+      <div className="mt-2 max-h-64 overflow-y-auto rounded-md border bg-black p-2 font-mono text-[11px] text-green-400">
+        {run.truncated && (
+          <div className="mb-1 text-muted-foreground">… (truncated, showing tail)</div>
+        )}
+        {lines.map((line, i) => (
+          <div
+            key={i}
+            className={`whitespace-pre-wrap leading-4 ${
+              line.startsWith("[error]") ? "text-red-400" :
+              line.startsWith("[gitops]") || line.startsWith("[export]") ? "text-cyan-400" : ""
+            }`}
+          >
+            {line || "\u00A0"}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { sshKeyId, host, user, port, jumpHost, jumpUser, jumpPort, jumpKeyId } = await req.json();
+  const { sshKeyId, host, user, port, jumpHost, jumpUser, jumpPort, jumpKeyId, proxyCommand, jumpProxyCommand } = await req.json();
 
   if (!sshKeyId || !host) {
     return NextResponse.json({ error: "sshKeyId and host are required" }, { status: 400 });
@@ -38,6 +38,8 @@ export async function POST(req: NextRequest) {
       jumpUser: jumpUser || null,
       jumpPort: jumpPort || null,
       jumpPrivateKey,
+      proxyCommand: proxyCommand || null,
+      jumpProxyCommand: jumpProxyCommand || null,
     },
     "hostname && echo '__SSH_OK__'"
   );

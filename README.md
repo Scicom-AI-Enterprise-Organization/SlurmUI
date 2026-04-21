@@ -40,7 +40,7 @@ wraps the day-to-day operations in a single web UI:
   (`jobs/**/*.yaml`) and the reconciler submits new jobs, cancel-and-resubmits
   on content change, and cancels jobs whose manifest was deleted. Optional
   one-way mirror of live PENDING/RUNNING jobs back into `running/` in the
-  same repo. Off by default; enable + schedule (min 30 s) from settings.
+  same repo. Off by default; enable + schedule (min 60 s) from settings.
 
 Two connection modes, pick whichever fits your network:
 
@@ -200,7 +200,7 @@ Under **/admin/settings** (sub-sidebar):
 | **SSH Keys** | Generate or import SSH key pairs, see which clusters use each, delete unused. |
 | **Alerts** | Webhook channels for Slack, Teams, or generic JSON. Per-channel event filter (glob like `cluster.*` or specific actions), optional cluster scoping, and a **pre-create test** that has to succeed before the channel can be saved. Fed by `logAudit` and by the health monitor for transitions (`cluster.unreachable/recovered`, `node.unhealthy/recovered`, `storage.disconnected/reconnected`, `job.stuck`, `job.held`). |
 | **Git Sync** | Configure a backing git repo; one-way export of state, and **Restore from git** for migrating to a new SlurmUI. |
-| **Git Jobs** | Separate GitOps loop for *job submission* — clone a repo, scan `jobs/**/*.yaml`, and reconcile against the Job table (submit new, cancel-and-resubmit on content change, cancel-and-drop on deletion). Also **Mirror running jobs**, a one-way push of every live PENDING/RUNNING job into `running/<cluster>/<slurmId>.yaml`. Off by default; interval clamped to ≥ 30 s. |
+| **Git Jobs** | Separate GitOps loop for *job submission* — clone a repo, scan `jobs/**/*.yaml`, and reconcile against the Job table (submit new, cancel-and-resubmit on content change, cancel-and-drop on deletion). Also **Mirror running jobs**, a one-way push of every live PENDING/RUNNING job into `running/<cluster>/<slurmId>.yaml`. Off by default; interval clamped to ≥ 60 s. |
 
 The admin sidebar also has a dedicated **/admin/organization** page (below)
 for user / invite management.
@@ -269,7 +269,7 @@ spec:
     srun python train.py
 ```
 
-Reconciler loop (off by default; interval ≥ 30 s):
+Reconciler loop (off by default; interval ≥ 60 s):
 
 - New manifest → submit via the same internal helper as the REST
   `POST /api/clusters/[id]/jobs` route (`lib/submit-job.ts`).

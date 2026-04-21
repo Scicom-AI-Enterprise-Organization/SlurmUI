@@ -38,6 +38,8 @@ function sshPing(args: {
   jumpUser?: string | null;
   jumpPort?: number | null;
   jumpPrivateKey?: string | null;
+  proxyCommand?: string | null;
+  jumpProxyCommand?: string | null;
 }): Promise<boolean> {
   return new Promise((resolve) => {
     const tmp = mkdtempSync(join(tmpdir(), "aura-hp-"));
@@ -47,10 +49,14 @@ function sshPing(args: {
 
     const cleanup = () => { try { rmSync(tmp, { recursive: true, force: true }); } catch {} };
 
-    // Build jump args using ProxyCommand (not -J) so StrictHostKeyChecking +
-    // IdentityFile propagate to the jump hop — matches lib/ssh-exec.ts.
+    // Matches lib/ssh-exec.ts: host ProxyCommand wins outright; jump
+    // ProxyCommand (when set) nests inside the jump-W ssh.
     const jumpArgs: string[] = [];
-    if (args.jumpHost) {
+    const hostProxy = args.proxyCommand?.trim() || "";
+    const jumpProxy = args.jumpProxyCommand?.trim() || "";
+    if (hostProxy) {
+      jumpArgs.push("-o", `ProxyCommand=${hostProxy}`);
+    } else if (args.jumpHost) {
       let jumpKeyPath = keyPath;
       if (args.jumpPrivateKey && args.jumpPrivateKey !== args.privateKey) {
         jumpKeyPath = join(tmp, "jk");
@@ -59,8 +65,13 @@ function sshPing(args: {
       }
       const u = args.jumpUser || "root";
       const p = args.jumpPort || 22;
-      const proxy = `ssh -i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -W %h:%p ${u}@${args.jumpHost}`;
-      jumpArgs.push("-o", `ProxyCommand=${proxy}`);
+      const jumpOpts = `-i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR`;
+      if (jumpProxy) {
+        const inner = jumpProxy.replace(/'/g, "'\\''");
+        jumpArgs.push("-o", `ProxyCommand=ssh ${jumpOpts} -o 'ProxyCommand=${inner}' -W %h:%p ${u}@${args.jumpHost}`);
+      } else {
+        jumpArgs.push("-o", `ProxyCommand=ssh ${jumpOpts} -W %h:%p ${u}@${args.jumpHost}`);
+      }
     }
 
     const proc = spawn("ssh", [
@@ -132,6 +143,8 @@ export function probeClusterHealth(clusterId: string): void {
         jumpUser: cluster.sshJumpUser,
         jumpPort: cluster.sshJumpPort,
         jumpPrivateKey,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
       });
 
       if (alive) {

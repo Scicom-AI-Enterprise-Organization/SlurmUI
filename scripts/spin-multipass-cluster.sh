@@ -31,6 +31,15 @@ WORKER_DISK="${WORKER_DISK:-20G}"
 JUMP_CPUS="${JUMP_CPUS:-1}"
 JUMP_MEM="${JUMP_MEM:-1G}"
 JUMP_DISK="${JUMP_DISK:-10G}"
+# Host port forwarded to aura-jump:22 so other machines on the LAN can ssh
+# into the bastion via <host-lan-ip>:$JUMP_FORWARD_PORT. Requires sudo the
+# first time to install the iptables rules. Set JUMP_FORWARD=0 to skip.
+JUMP_FORWARD="${JUMP_FORWARD:-1}"
+JUMP_FORWARD_PORT="${JUMP_FORWARD_PORT:-2222}"
+# When set to 1, spawn a cloudflared quick-tunnel that exposes localhost
+# :$JUMP_FORWARD_PORT on a *.trycloudflare.com TCP endpoint — reachable from
+# the internet without router port-forwarding. Requires `cloudflared` on PATH.
+JUMP_TUNNEL_CLOUDFLARED="${JUMP_TUNNEL_CLOUDFLARED:-0}"
 IMAGE="${IMAGE:-24.04}"
 KEY_OUT="${KEY_OUT:-./id_rsa}"
 
@@ -161,6 +170,96 @@ else
   die "ProxyJump via $JUMP to $MASTER_IP failed"
 fi
 
+# ── Host port-forward: <host-lan-ip>:$JUMP_FORWARD_PORT → aura-jump:22 ──
+# Lets another machine on the LAN reach the multipass bastion (multipass
+# VMs normally live on a host-only bridge, so their IPs aren't LAN-routable).
+setup_jump_forward() {
+  [ "$JUMP_FORWARD" = "1" ] || { log "Jump port-forward disabled (JUMP_FORWARD=0)"; return; }
+  command -v iptables >/dev/null || { log "iptables not installed — skipping port-forward"; return; }
+  command -v sudo     >/dev/null || { log "sudo not installed — skipping port-forward"; return; }
+
+  log "Port-forwarding host:$JUMP_FORWARD_PORT → $JUMP ($JUMP_IP:22) (sudo required)"
+  # -C checks if the rule exists; only add when missing so re-runs are idempotent.
+  sudo iptables -t nat -C PREROUTING  -p tcp --dport "$JUMP_FORWARD_PORT" -j DNAT --to-destination "$JUMP_IP:22" 2>/dev/null \
+    || sudo iptables -t nat -A PREROUTING  -p tcp --dport "$JUMP_FORWARD_PORT" -j DNAT --to-destination "$JUMP_IP:22"
+  # OUTPUT chain so connections from the host itself (e.g. this script's ssh
+  # tests) also traverse the DNAT. Some setups require this; harmless if not.
+  sudo iptables -t nat -C OUTPUT      -p tcp --dport "$JUMP_FORWARD_PORT" -j DNAT --to-destination "$JUMP_IP:22" 2>/dev/null \
+    || sudo iptables -t nat -A OUTPUT      -p tcp --dport "$JUMP_FORWARD_PORT" -j DNAT --to-destination "$JUMP_IP:22"
+  sudo iptables -t nat -C POSTROUTING -d "$JUMP_IP" -p tcp --dport 22 -j MASQUERADE 2>/dev/null \
+    || sudo iptables -t nat -A POSTROUTING -d "$JUMP_IP" -p tcp --dport 22 -j MASQUERADE
+  # Accept inbound on 0.0.0.0:$JUMP_FORWARD_PORT on every interface. Without
+  # this a host firewall (ufw/iptables default-drop) rejects the SYN before
+  # DNAT runs — the port would only work when the host has no firewall.
+  sudo iptables -C INPUT -p tcp --dport "$JUMP_FORWARD_PORT" -j ACCEPT 2>/dev/null \
+    || sudo iptables -I INPUT 1 -p tcp --dport "$JUMP_FORWARD_PORT" -j ACCEPT
+  # Same for forwarded traffic destined for the multipass bridge.
+  sudo iptables -C FORWARD -d "$JUMP_IP" -p tcp --dport 22 -j ACCEPT 2>/dev/null \
+    || sudo iptables -I FORWARD 1 -d "$JUMP_IP" -p tcp --dport 22 -j ACCEPT
+  sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+  # DNAT on OUTPUT chain is ignored for localhost by default. Without this,
+  # `ssh ubuntu@localhost -p $JUMP_FORWARD_PORT` on the host itself fails —
+  # only other LAN machines can reach the forward. Kernels silently drop
+  # loopback traffic that would be rerouted to a non-loopback address unless
+  # route_localnet is set.
+  sudo sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
+
+  HOST_LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$HOST_LAN_IP" ] || HOST_LAN_IP="<host-lan-ip>"
+  log "  from another machine: ssh -p $JUMP_FORWARD_PORT ubuntu@$HOST_LAN_IP"
+}
+setup_jump_forward
+
+# ── Cloudflare quick tunnel (optional) ───────────────────────────────────
+# Exposes localhost:$JUMP_FORWARD_PORT on a random *.trycloudflare.com TCP
+# URL — reachable from the internet without router/firewall changes. Quick
+# tunnels don't need a Cloudflare account or domain; the URL lives until
+# this cloudflared process exits. Install cloudflared from:
+#   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+CF_TUNNEL_URL=""
+CF_TUNNEL_LOG=""
+CF_TUNNEL_PID=""
+setup_cloudflared_tunnel() {
+  [ "$JUMP_TUNNEL_CLOUDFLARED" = "1" ] || return
+  if ! command -v cloudflared >/dev/null; then
+    log "cloudflared not found on PATH — skipping internet tunnel"
+    log "  install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+    return
+  fi
+
+  # Kill any stale cloudflared quick-tunnel pointed at our forward port
+  # (leftovers from a previous run of this script). pkill -f matches the
+  # full command line — specific enough to leave unrelated cloudflared
+  # processes alone.
+  local pattern="cloudflared tunnel.*--url.*tcp://localhost:$JUMP_FORWARD_PORT"
+  if pgrep -f "$pattern" >/dev/null 2>&1; then
+    log "Killing existing cloudflared quick-tunnel for :$JUMP_FORWARD_PORT"
+    pkill -f "$pattern" 2>/dev/null || true
+    sleep 1
+  fi
+
+  CF_TUNNEL_LOG="$(mktemp -t aura-cloudflared.XXXXXX.log)"
+  log "Starting cloudflared quick-tunnel → localhost:$JUMP_FORWARD_PORT"
+  nohup cloudflared tunnel --no-autoupdate --url "tcp://localhost:$JUMP_FORWARD_PORT" \
+    > "$CF_TUNNEL_LOG" 2>&1 &
+  CF_TUNNEL_PID=$!
+  disown "$CF_TUNNEL_PID" 2>/dev/null || true
+
+  # Poll cloudflared's log for the trycloudflare URL (appears within seconds).
+  for _ in $(seq 1 40); do
+    sleep 0.5
+    CF_TUNNEL_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CF_TUNNEL_LOG" | head -1 || true)"
+    [ -n "$CF_TUNNEL_URL" ] && break
+  done
+
+  if [ -n "$CF_TUNNEL_URL" ]; then
+    log "  tunnel URL: $CF_TUNNEL_URL  (pid $CF_TUNNEL_PID)"
+  else
+    log "  cloudflared didn't print a URL in 20s — inspect: $CF_TUNNEL_LOG"
+  fi
+}
+setup_cloudflared_tunnel
+
 # ── Save master's private key to ./id_rsa so SlurmUI can pick it up ──────
 log "Saving master's private key to $KEY_OUT"
 # Tilde inside `bash -lc '…'` expands inside the VM — not on the host.
@@ -169,38 +268,73 @@ chmod 600 "$KEY_OUT"
 
 # ── Summary ──────────────────────────────────────────────────────────────
 echo
-echo "╭─────────────────────────────────────────────────────────────────╮"
-echo "│ Cluster ready.                                                  │"
-echo "├─────────────────────────────────────────────────────────────────┤"
-printf "│ %-15s %-20s\n" "Master:" "$MASTER ($MASTER_IP)"
+echo "======== Cluster ready ========"
+echo
+echo "Master:       $MASTER ($MASTER_IP)"
 for i in "${!WORKERS[@]}"; do
-  printf "│ %-15s %-20s\n" "Worker $((i+1)):" "${WORKERS[$i]} (${WORKER_IPS[$i]})"
+  echo "Worker $((i+1)):     ${WORKERS[$i]} (${WORKER_IPS[$i]})"
 done
-printf "│ %-15s %-20s\n" "Jumphost:" "$JUMP ($JUMP_IP)"
-printf "│ %-15s %s\n" "SSH user:" "ubuntu"
-printf "│ %-15s %s\n" "Private key:" "$KEY_OUT"
-echo "├─────────────────────────────────────────────────────────────────┤"
-echo "│ Paste into SlurmUI's New Cluster dialog:                        │"
-printf "│   host:    %-52s │\n" "$MASTER_IP"
-printf "│   user:    %-52s │\n" "ubuntu"
-printf "│   port:    %-52s │\n" "22"
-printf "│   key:     %-52s │\n" "contents of $KEY_OUT"
-echo "├─────────────────────────────────────────────────────────────────┤"
-echo "│ For bastion mode, add these fields:                             │"
-printf "│   bastion host:    %-44s │\n" "$JUMP_IP"
-printf "│   bastion user:    %-44s │\n" "ubuntu"
-printf "│   bastion port:    %-44s │\n" "22"
-printf "│   bastion key:     %-44s │\n" "same $KEY_OUT"
-echo "╰─────────────────────────────────────────────────────────────────╯"
+echo "Jumphost:     $JUMP ($JUMP_IP)"
+echo "SSH user:     ubuntu"
+echo "Private key:  $KEY_OUT"
+echo
+echo "-- Paste into SlurmUI's New Cluster dialog --"
+echo "  host: $MASTER_IP"
+echo "  user: ubuntu"
+echo "  port: 22"
+echo "  key:  contents of $KEY_OUT"
+echo
+echo "-- For bastion mode, add these fields --"
+echo "  bastion host: $JUMP_IP"
+echo "  bastion user: ubuntu"
+echo "  bastion port: 22"
+echo "  bastion key:  same $KEY_OUT"
+
+if [ "$JUMP_FORWARD" = "1" ] && [ -n "${HOST_LAN_IP:-}" ]; then
+  echo
+  echo "-- Via host port-forward (listens on 0.0.0.0:$JUMP_FORWARD_PORT) --"
+  echo "  bastion host: $HOST_LAN_IP (or any IP bound to this host)"
+  echo "  bastion port: $JUMP_FORWARD_PORT"
+fi
+
+if [ -n "$CF_TUNNEL_URL" ]; then
+  CF_HOST="${CF_TUNNEL_URL#https://}"
+  echo
+  echo "-- From the internet (cloudflared quick tunnel) --"
+  echo "tunnel URL: $CF_TUNNEL_URL"
+  echo
+  echo "One-shot ssh (ProxyCommand spawns cloudflared per-connection):"
+  echo
+  echo "ssh -i $KEY_OUT \\"
+  echo "-o ProxyCommand='cloudflared access tcp --hostname $CF_HOST' \\"
+  echo "ubuntu@ssh"
+  echo
+  echo "(The 'ubuntu@ssh' host part is ignored — ProxyCommand is the real"
+  echo "transport. Requires cloudflared on the client too.)"
+fi
 echo
 echo "Test the bastion from your host:"
-echo "  ssh -i $KEY_OUT -o IdentitiesOnly=yes \\"
-echo "    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\"
-echo "    -o 'ProxyCommand=ssh -i $KEY_OUT -o IdentitiesOnly=yes -W %h:%p ubuntu@$JUMP_IP' \\"
-echo "    ubuntu@$MASTER_IP hostname"
+echo "ssh -i $KEY_OUT -o IdentitiesOnly=yes \\"
+echo "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\"
+echo "-o 'ProxyCommand=ssh -i $KEY_OUT -o IdentitiesOnly=yes -W %h:%p ubuntu@$JUMP_IP' \\"
+echo "ubuntu@$MASTER_IP hostname"
 echo
-echo "  # Using explicit ProxyCommand so -i applies to the jump hop too"
-echo "  # (ssh -J doesn't propagate -i to the jump hop on OpenSSH < 8.9)."
+echo "# Using explicit ProxyCommand so -i applies to the jump hop too"
+echo "# (ssh -J doesn't propagate -i to the jump hop on OpenSSH < 8.9)."
 echo
 echo "To tear everything down:"
-echo "  multipass delete --purge $MASTER ${WORKERS[*]} $JUMP"
+echo "multipass delete --purge $MASTER ${WORKERS[*]} $JUMP"
+if [ "$JUMP_FORWARD" = "1" ]; then
+  echo
+  echo "To remove the port-forward rules:"
+  echo "sudo iptables -t nat -D PREROUTING -p tcp --dport $JUMP_FORWARD_PORT -j DNAT --to-destination $JUMP_IP:22"
+  echo "sudo iptables -t nat -D OUTPUT -p tcp --dport $JUMP_FORWARD_PORT -j DNAT --to-destination $JUMP_IP:22"
+  echo "sudo iptables -t nat -D POSTROUTING -d $JUMP_IP -p tcp --dport 22 -j MASQUERADE"
+  echo "sudo iptables -D INPUT -p tcp --dport $JUMP_FORWARD_PORT -j ACCEPT"
+  echo "sudo iptables -D FORWARD -d $JUMP_IP -p tcp --dport 22 -j ACCEPT"
+fi
+if [ -n "$CF_TUNNEL_PID" ]; then
+  echo
+  echo "To stop the cloudflared tunnel:"
+  echo "kill $CF_TUNNEL_PID"
+fi

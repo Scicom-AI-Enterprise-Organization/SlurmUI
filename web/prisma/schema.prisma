@@ -37,6 +37,14 @@ model Cluster {
   // the main `sshKey` include-path unchanged across dozens of call sites;
   // we fetch this key by ID on demand inside ssh-exec helpers.
   sshJumpKeyId    String?
+  // Raw -o ProxyCommand override for the primary ssh hop (to controller).
+  // When set, ssh reaches the controller via this command — the jump
+  // fields are ignored.
+  sshProxyCommand     String?    @db.Text
+  // Raw -o ProxyCommand override for the jumphost hop. Used when the
+  // jumphost itself is reached via a non-ssh transport (e.g. cloudflared
+  // access tcp). Nested inside the jump-W ssh.
+  sshJumpProxyCommand String?    @db.Text
   status          ClusterStatus  @default(PROVISIONING)
   config          Json           // full cluster-config.json
   sshKeyId              String?

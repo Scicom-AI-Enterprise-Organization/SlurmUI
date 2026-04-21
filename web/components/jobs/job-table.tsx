@@ -2,8 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { toast } from "sonner";
-import { Repeat2, Loader2 } from "lucide-react";
+import { Repeat2, Loader2, XCircle } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -13,6 +12,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
 import { JobStatusBadge } from "./job-status-badge";
 
 interface Job {
@@ -33,29 +35,43 @@ interface JobTableProps {
 }
 
 export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps) {
-  const [restartingId, setRestartingId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // API errors surface in a dialog so the table itself stays quiet.
+  const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
 
-  const restart = async (job: Job) => {
-    if (!job.slurmJobId) return;
-    setRestartingId(job.id);
+  // Fresh sbatch of the stored script — works regardless of the original job's
+  // status, so there's one "rerun" code path for every row.
+  const rerun = async (job: Job) => {
+    setBusyId(job.id);
     try {
-      const res = await fetch(`/api/clusters/${job.clusterId}/slurm-control`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slurmJobId: String(job.slurmJobId), action: "requeue" }),
-      });
+      const res = await fetch(`/api/clusters/${job.clusterId}/jobs/${job.id}/resubmit`, { method: "POST" });
       const d = await res.json().catch(() => ({}));
-      const ok = res.ok && d.success !== false;
-      if (ok) {
-        toast.success(`Requeued job ${job.slurmJobId}`);
+      if (res.ok) {
         onChange?.();
       } else {
-        toast.error("Restart failed", { description: d.error || d.output || `HTTP ${res.status}` });
+        setErrorDialog({ title: "Rerun failed", message: d.error || `HTTP ${res.status}` });
       }
     } catch (e) {
-      toast.error("Restart failed", { description: e instanceof Error ? e.message : "Network error" });
+      setErrorDialog({ title: "Rerun failed", message: e instanceof Error ? e.message : "Network error" });
     } finally {
-      setRestartingId(null);
+      setBusyId(null);
+    }
+  };
+
+  const cancel = async (job: Job) => {
+    setBusyId(job.id);
+    try {
+      const res = await fetch(`/api/clusters/${job.clusterId}/jobs/${job.id}`, { method: "DELETE" });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        onChange?.();
+      } else {
+        setErrorDialog({ title: "Cancel failed", message: d.error || `HTTP ${res.status}` });
+      }
+    } catch (e) {
+      setErrorDialog({ title: "Cancel failed", message: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -65,66 +81,93 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
     );
   }
 
+  const isActive = (s: Job["status"]) => s === "PENDING" || s === "RUNNING";
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Job ID</TableHead>
-          <TableHead>Name</TableHead>
-          <TableHead>Slurm ID</TableHead>
-          {showCluster && <TableHead>Cluster</TableHead>}
-          <TableHead>Partition</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Created</TableHead>
-          <TableHead className="text-right">Actions</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {jobs.map((job) => (
-          <TableRow key={job.id}>
-            <TableCell>
-              <Link
-                href={`/clusters/${job.clusterId}/jobs/${job.id}`}
-                className="font-medium text-primary underline-offset-4 hover:underline"
-              >
-                {job.id.slice(0, 8)}...
-              </Link>
-            </TableCell>
-            <TableCell className="font-mono text-sm">{job.name ?? <span className="text-muted-foreground">-</span>}</TableCell>
-            <TableCell>{job.slurmJobId ?? "-"}</TableCell>
-            {showCluster && (
-              <TableCell>{job.cluster?.name ?? job.clusterId.slice(0, 8)}</TableCell>
-            )}
-            <TableCell>{job.partition}</TableCell>
-            <TableCell>
-              <JobStatusBadge status={job.status} />
-            </TableCell>
-            <TableCell>
-              {new Date(job.createdAt).toLocaleString()}
-            </TableCell>
-            <TableCell className="text-right">
-              {job.status === "FAILED" && job.slurmJobId ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => restart(job)}
-                  disabled={restartingId === job.id}
-                  title="Requeue this failed job (scontrol requeue)"
-                >
-                  {restartingId === job.id ? (
-                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                  ) : (
-                    <Repeat2 className="mr-1 h-3 w-3" />
-                  )}
-                  Restart
-                </Button>
-              ) : (
-                <span className="text-muted-foreground">-</span>
-              )}
-            </TableCell>
+    <>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Job ID</TableHead>
+            <TableHead>Name</TableHead>
+            <TableHead>Slurm ID</TableHead>
+            {showCluster && <TableHead>Cluster</TableHead>}
+            <TableHead>Partition</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Created</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
+        </TableHeader>
+        <TableBody>
+          {jobs.map((job) => (
+            <TableRow key={job.id}>
+              <TableCell>
+                <Link
+                  href={`/clusters/${job.clusterId}/jobs/${job.id}`}
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  {job.id.slice(0, 8)}...
+                </Link>
+              </TableCell>
+              <TableCell className="font-mono text-sm">{job.name ?? <span className="text-muted-foreground">-</span>}</TableCell>
+              <TableCell>{job.slurmJobId ?? "-"}</TableCell>
+              {showCluster && (
+                <TableCell>{job.cluster?.name ?? job.clusterId.slice(0, 8)}</TableCell>
+              )}
+              <TableCell>{job.partition}</TableCell>
+              <TableCell>
+                <JobStatusBadge status={job.status} />
+              </TableCell>
+              <TableCell>
+                {new Date(job.createdAt).toLocaleString()}
+              </TableCell>
+              <TableCell className="text-right">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => rerun(job)}
+                  disabled={busyId === job.id}
+                  title="Rerun this job (fresh sbatch of the same script)"
+                >
+                  {busyId === job.id ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Repeat2 className="h-3 w-3" />
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => cancel(job)}
+                  disabled={busyId === job.id || !isActive(job.status)}
+                  title={
+                    isActive(job.status)
+                      ? "Cancel this running or pending job (scancel)"
+                      : "Already terminal — nothing to cancel"
+                  }
+                  className="text-destructive hover:text-destructive"
+                >
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+
+      <Dialog open={!!errorDialog} onOpenChange={(o) => { if (!o) setErrorDialog(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-destructive">{errorDialog?.title}</DialogTitle>
+          </DialogHeader>
+          <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap">
+            {errorDialog?.message}
+          </pre>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setErrorDialog(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

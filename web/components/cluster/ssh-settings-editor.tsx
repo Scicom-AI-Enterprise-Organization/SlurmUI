@@ -32,6 +32,8 @@ interface SshSettingsEditorProps {
   initialJumpUser: string | null;
   initialJumpPort: number | null;
   initialJumpKeyId: string | null;
+  initialProxyCommand: string | null;
+  initialJumpProxyCommand: string | null;
   sshKeys: SshKeyOption[];
 }
 
@@ -46,6 +48,8 @@ export function SshSettingsEditor({
   initialJumpUser,
   initialJumpPort,
   initialJumpKeyId,
+  initialProxyCommand,
+  initialJumpProxyCommand,
   sshKeys,
 }: SshSettingsEditorProps) {
   const router = useRouter();
@@ -58,7 +62,9 @@ export function SshSettingsEditor({
   const [jumpUser, setJumpUser] = useState(initialJumpUser ?? "root");
   const [jumpPort, setJumpPort] = useState(String(initialJumpPort ?? 22));
   const [jumpKeyId, setJumpKeyId] = useState(initialJumpKeyId ?? "");
-  const [jumpOpen, setJumpOpen] = useState<boolean>(!!initialJumpHost);
+  const [proxyCommand, setProxyCommand] = useState(initialProxyCommand ?? "");
+  const [jumpProxyCommand, setJumpProxyCommand] = useState(initialJumpProxyCommand ?? "");
+  const [jumpOpen, setJumpOpen] = useState<boolean>(!!initialJumpHost || !!initialProxyCommand || !!initialJumpProxyCommand);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -76,7 +82,9 @@ export function SshSettingsEditor({
     jumpHost !== (initialJumpHost ?? "") ||
     jumpUser !== (initialJumpUser ?? "root") ||
     jumpPort !== String(initialJumpPort ?? 22) ||
-    jumpKeyId !== (initialJumpKeyId ?? "");
+    jumpKeyId !== (initialJumpKeyId ?? "") ||
+    proxyCommand !== (initialProxyCommand ?? "") ||
+    jumpProxyCommand !== (initialJumpProxyCommand ?? "");
 
   const canTest = !!(host && sshKeyId);
 
@@ -96,6 +104,8 @@ export function SshSettingsEditor({
           jumpUser: jumpHost ? (jumpUser || "root") : undefined,
           jumpPort: jumpHost ? parseInt(jumpPort) || 22 : undefined,
           jumpKeyId: jumpHost && jumpKeyId ? jumpKeyId : undefined,
+          proxyCommand: proxyCommand.trim() || undefined,
+          jumpProxyCommand: jumpProxyCommand.trim() || undefined,
         }),
       });
       const result = await res.json();
@@ -132,6 +142,8 @@ export function SshSettingsEditor({
           sshJumpUser: jumpHost ? (jumpUser || "root") : undefined,
           sshJumpPort: jumpHost ? (parseInt(jumpPort) || 22) : undefined,
           sshJumpKeyId: jumpHost && jumpKeyId ? jumpKeyId : "",
+          sshProxyCommand: proxyCommand,
+          sshJumpProxyCommand: jumpProxyCommand,
         }),
       });
       if (!res.ok) {
@@ -237,7 +249,7 @@ export function SshSettingsEditor({
             className="flex w-full items-center gap-2 p-3 text-left text-sm font-medium hover:bg-accent/40"
           >
             {jumpOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            Jumphost (optional)
+            Extra settings
             {jumpHost && !jumpOpen && (
               <span className="ml-2 text-xs font-normal text-muted-foreground">
                 {(jumpUser || "root")}@{jumpHost}
@@ -246,6 +258,18 @@ export function SshSettingsEditor({
           </button>
           {jumpOpen && (
             <div className="space-y-3 border-t p-3">
+              <div className="space-y-2">
+                <Label>Host ProxyCommand (advanced)</Label>
+                <Input
+                  placeholder="cloudflared access tcp --hostname controller.trycloudflare.com"
+                  value={proxyCommand}
+                  onChange={(e) => { setProxyCommand(e.target.value); setTestStatus("idle"); }}
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Transport to reach the controller directly. When set, the jump fields below are ignored.
+                </p>
+              </div>
               <div className="space-y-2">
                 <Label>Jump SSH Key</Label>
                 <Select
@@ -295,6 +319,18 @@ export function SshSettingsEditor({
                     onChange={(e) => { setJumpPort(e.target.value); setTestStatus("idle"); }}
                   />
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Jump ProxyCommand (advanced)</Label>
+                <Input
+                  placeholder="cloudflared access tcp --hostname bastion.trycloudflare.com"
+                  value={jumpProxyCommand}
+                  onChange={(e) => { setJumpProxyCommand(e.target.value); setTestStatus("idle"); }}
+                  className="font-mono text-xs"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Transport used to reach the jumphost (nested inside the <code>-W</code> ssh). Leave empty for a plain TCP connection to Jump Host.
+                </p>
               </div>
             </div>
           )}

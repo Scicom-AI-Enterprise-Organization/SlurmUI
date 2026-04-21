@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId } = body;
+  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
   if (!name || !controllerHost) {
     return NextResponse.json(
       { error: "Missing required fields: name, controllerHost" },
@@ -90,6 +90,8 @@ export async function POST(req: NextRequest) {
         sshJumpUser: sshJumpHost ? (sshJumpUser || "root") : null,
         sshJumpPort: sshJumpHost ? (sshJumpPort || 22) : null,
         sshJumpKeyId: sshJumpHost && sshJumpKeyId ? sshJumpKeyId : null,
+        sshProxyCommand: sshProxyCommand || null,
+        sshJumpProxyCommand: sshJumpProxyCommand || null,
         status: "PROVISIONING",
         config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
         installToken,
