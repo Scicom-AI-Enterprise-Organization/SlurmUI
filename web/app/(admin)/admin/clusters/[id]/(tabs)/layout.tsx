@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
+import { ClusterStatusCard } from "@/components/cluster/cluster-status-card";
 import { DeleteClusterButton } from "@/components/cluster/delete-cluster-button";
 import { BootstrapButton } from "@/components/cluster/bootstrap-button";
 import { TerminalButton } from "@/components/cluster/terminal-button";
@@ -54,15 +55,12 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Status</CardTitle>
-            <Server className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <ClusterStatusBadge status={cluster.status} />
-          </CardContent>
-        </Card>
+        <ClusterStatusCard
+          clusterId={id}
+          initialStatus={cluster.status}
+          initialHealth={((cluster.config as Record<string, unknown> | null)?.health as never) ?? null}
+        />
+
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Total Jobs</CardTitle>

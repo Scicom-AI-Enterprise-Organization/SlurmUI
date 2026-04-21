@@ -49,6 +49,18 @@ interface InviteRow {
   tokenPreview: string;
 }
 
+// Renders a date/datetime in the viewer's locale. Deferred to post-mount so
+// SSR output ("") matches the first client render — avoids hydration
+// mismatches when the server is in UTC and the browser is elsewhere.
+function ClientDate({ iso, mode = "datetime" }: { iso: string; mode?: "datetime" | "date" }) {
+  const [s, setS] = useState("");
+  useEffect(() => {
+    const d = new Date(iso);
+    setS(mode === "date" ? d.toLocaleDateString() : d.toLocaleString());
+  }, [iso, mode]);
+  return <span suppressHydrationWarning>{s}</span>;
+}
+
 export default function OrganizationPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
@@ -299,7 +311,7 @@ export default function OrganizationPage() {
                     <TableCell className="text-sm text-muted-foreground">
                       {i.createdBy.name ?? i.createdBy.email}
                     </TableCell>
-                    <TableCell>{new Date(i.expiresAt).toLocaleString()}</TableCell>
+                    <TableCell><ClientDate iso={i.expiresAt} /></TableCell>
                     <TableCell className="font-mono text-xs">{i.tokenPreview}</TableCell>
                     <TableCell className="text-right">
                       <Button size="sm" variant="ghost" onClick={() => revokeInvite(i.id)}>
@@ -359,7 +371,7 @@ export default function OrganizationPage() {
                     </TableCell>
                     <TableCell>{u.clusterCount}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {new Date(u.createdAt).toLocaleDateString()}
+                      <ClientDate iso={u.createdAt} mode="date" />
                     </TableCell>
                     <TableCell className="text-right">
                       {u.provider === "local" && (

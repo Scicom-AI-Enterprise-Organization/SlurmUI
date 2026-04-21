@@ -12,98 +12,61 @@
  * Leaves PROVISIONING untouched (bootstrap in flight).
  */
 
-import { spawn } from "child_process";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
 import { prisma } from "./prisma";
+import { sshExecSimple } from "./ssh-exec";
 
 const DEBOUNCE_MS = 30_000;
-// 15s matches the `ConnectTimeout` we use for real ssh-exec calls. Cold
-// TCP handshakes and bastion auth sometimes exceed 5s under load — the
-// previous 5s default was flipping clusters to OFFLINE spuriously.
-const PROBE_TIMEOUT_MS = 15_000;
 
 const lastProbeAt = new Map<string, number>();
 // Count of consecutive failures per cluster. Reset to 0 on success. An
 // ACTIVE → OFFLINE transition requires this to reach 2.
 const failStreak = new Map<string, number>();
 
-function sshPing(args: {
-  host: string;
-  user: string;
-  port: number;
-  privateKey: string;
-  jumpHost?: string | null;
-  jumpUser?: string | null;
-  jumpPort?: number | null;
-  jumpPrivateKey?: string | null;
-  proxyCommand?: string | null;
-  jumpProxyCommand?: string | null;
-}): Promise<boolean> {
-  return new Promise((resolve) => {
-    const tmp = mkdtempSync(join(tmpdir(), "aura-hp-"));
-    const keyPath = join(tmp, "k");
-    writeFileSync(keyPath, args.privateKey, { mode: 0o600 });
-    chmodSync(keyPath, 0o600);
+interface PingResult { ok: boolean; message: string }
 
-    const cleanup = () => { try { rmSync(tmp, { recursive: true, force: true }); } catch {} };
+// Route the probe through sshExecSimple so it respects bastion mode, jump
+// hops, separate jump keys, and ProxyCommand overrides — identical to what
+// Test-SSH uses. The previous hand-rolled spawn failed on shell-only
+// bastions with "ssh exited with code 255".
+async function sshPing(cluster: {
+  controllerHost: string;
+  sshUser: string;
+  sshPort: number;
+  sshBastion: boolean;
+  sshJumpHost: string | null;
+  sshJumpUser: string | null;
+  sshJumpPort: number | null;
+  sshProxyCommand: string | null;
+  sshJumpProxyCommand: string | null;
+  sshKey: { privateKey: string };
+  _jumpPrivateKey: string | null;
+}): Promise<PingResult> {
+  const result = await sshExecSimple(
+    {
+      host: cluster.controllerHost,
+      user: cluster.sshUser,
+      port: cluster.sshPort,
+      privateKey: cluster.sshKey.privateKey,
+      bastion: cluster.sshBastion,
+      jumpHost: cluster.sshJumpHost,
+      jumpUser: cluster.sshJumpUser,
+      jumpPort: cluster.sshJumpPort,
+      jumpPrivateKey: cluster._jumpPrivateKey,
+      proxyCommand: cluster.sshProxyCommand,
+      jumpProxyCommand: cluster.sshJumpProxyCommand,
+    },
+    "echo __aura_ping__",
+  );
+  const stdout = (result.stdout ?? "").trim();
+  const ok = !!result.success && stdout.includes("__aura_ping__");
+  if (ok) return { ok: true, message: "alive" };
 
-    // Matches lib/ssh-exec.ts: host ProxyCommand wins outright; jump
-    // ProxyCommand (when set) nests inside the jump-W ssh.
-    const jumpArgs: string[] = [];
-    const hostProxy = args.proxyCommand?.trim() || "";
-    const jumpProxy = args.jumpProxyCommand?.trim() || "";
-    if (hostProxy) {
-      jumpArgs.push("-o", `ProxyCommand=${hostProxy}`);
-    } else if (args.jumpHost) {
-      let jumpKeyPath = keyPath;
-      if (args.jumpPrivateKey && args.jumpPrivateKey !== args.privateKey) {
-        jumpKeyPath = join(tmp, "jk");
-        writeFileSync(jumpKeyPath, args.jumpPrivateKey, { mode: 0o600 });
-        chmodSync(jumpKeyPath, 0o600);
-      }
-      const u = args.jumpUser || "root";
-      const p = args.jumpPort || 22;
-      const jumpOpts = `-i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR`;
-      if (jumpProxy) {
-        const inner = jumpProxy.replace(/'/g, "'\\''");
-        jumpArgs.push("-o", `ProxyCommand=ssh ${jumpOpts} -o 'ProxyCommand=${inner}' -W %h:%p ${u}@${args.jumpHost}`);
-      } else {
-        jumpArgs.push("-o", `ProxyCommand=ssh ${jumpOpts} -W %h:%p ${u}@${args.jumpHost}`);
-      }
-    }
-
-    const proc = spawn("ssh", [
-      "-i", keyPath,
-      "-p", String(args.port),
-      "-o", "IdentitiesOnly=yes",
-      "-o", "StrictHostKeyChecking=no",
-      "-o", "UserKnownHostsFile=/dev/null",
-      "-o", "BatchMode=yes",
-      "-o", "LogLevel=ERROR",
-      "-o", `ConnectTimeout=${Math.ceil(PROBE_TIMEOUT_MS / 1000)}`,
-      ...jumpArgs,
-      `${args.user}@${args.host}`,
-      "echo __aura_ping__",
-    ], { stdio: ["ignore", "pipe", "pipe"] });
-
-    let out = "";
-    proc.stdout.on("data", (c: Buffer) => { out += c.toString(); });
-
-    const timer = setTimeout(() => { proc.kill("SIGKILL"); }, PROBE_TIMEOUT_MS);
-
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      cleanup();
-      resolve(code === 0 && out.includes("__aura_ping__"));
-    });
-    proc.on("error", () => {
-      clearTimeout(timer);
-      cleanup();
-      resolve(false);
-    });
-  });
+  const errLine =
+    (result.stderr ?? "").trim().split("\n").filter(Boolean).slice(-1)[0] ||
+    stdout.split("\n").filter(Boolean).slice(-1)[0] ||
+    `ssh exited with code ${result.exitCode}`;
+  const message = errLine.length > 160 ? errLine.slice(0, 160) + "…" : errLine;
+  return { ok: false, message };
 }
 
 /**
@@ -128,47 +91,39 @@ export function probeClusterHealth(clusterId: string): void {
 
       // Fetch a separate jump key if configured, so the probe's bastion hop
       // uses the correct identity (matches getClusterSshTarget).
-      let jumpPrivateKey: string | null = null;
+      let _jumpPrivateKey: string | null = null;
       if (cluster.sshJumpKeyId && cluster.sshJumpKeyId !== cluster.sshKeyId) {
         const jk = await prisma.sshKey.findUnique({ where: { id: cluster.sshJumpKeyId } });
-        jumpPrivateKey = jk?.privateKey ?? null;
+        _jumpPrivateKey = jk?.privateKey ?? null;
       }
 
-      const alive = await sshPing({
-        host: cluster.controllerHost,
-        user: cluster.sshUser,
-        port: cluster.sshPort,
-        privateKey: cluster.sshKey.privateKey,
-        jumpHost: cluster.sshJumpHost,
-        jumpUser: cluster.sshJumpUser,
-        jumpPort: cluster.sshJumpPort,
-        jumpPrivateKey,
-        proxyCommand: cluster.sshProxyCommand,
-        jumpProxyCommand: cluster.sshJumpProxyCommand,
+      const result = await sshPing({ ...cluster, _jumpPrivateKey });
+
+      // Persist probe outcome into cluster.config.health so the UI can show
+      // why status flipped (timestamp + last error + consecutive-fail count).
+      const streakAfter = result.ok ? 0 : (failStreak.get(clusterId) ?? 0) + 1;
+      failStreak.set(clusterId, streakAfter);
+
+      const cfg = (cluster.config ?? {}) as Record<string, unknown>;
+      cfg.health = {
+        lastProbeAt: new Date().toISOString(),
+        alive: result.ok,
+        message: result.message,
+        failStreak: streakAfter,
+      };
+
+      const desired: "ACTIVE" | "OFFLINE" | null =
+        result.ok && cluster.status !== "ACTIVE" ? "ACTIVE"
+        : !result.ok && streakAfter >= 2 && cluster.status !== "OFFLINE" ? "OFFLINE"
+        : null;
+
+      await prisma.cluster.update({
+        where: { id: clusterId },
+        data: {
+          config: cfg as never,
+          ...(desired ? { status: desired } : {}),
+        },
       });
-
-      if (alive) {
-        failStreak.set(clusterId, 0);
-        if (cluster.status !== "ACTIVE") {
-          await prisma.cluster.update({
-            where: { id: clusterId },
-            data: { status: "ACTIVE" },
-          });
-        }
-        return;
-      }
-
-      // Failure. Only flip to OFFLINE after two consecutive failures so a
-      // single spurious probe timeout doesn't alarm users whose cluster is
-      // actually reachable.
-      const streak = (failStreak.get(clusterId) ?? 0) + 1;
-      failStreak.set(clusterId, streak);
-      if (streak >= 2 && cluster.status !== "OFFLINE") {
-        await prisma.cluster.update({
-          where: { id: clusterId },
-          data: { status: "OFFLINE" },
-        });
-      }
     } catch {}
   })();
 }

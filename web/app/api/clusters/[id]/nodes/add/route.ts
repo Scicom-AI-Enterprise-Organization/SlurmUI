@@ -273,7 +273,7 @@ echo "  worker uids before install: slurm=$(id -u slurm 2>/dev/null || echo miss
 # get Connection refused).
 $S sed -i "/^127\\.0\\.1\\.1[[:space:]]/d" /etc/hosts || true
 
-$S apt-get install -y -qq slurmd munge 2>/dev/null || $S yum install -y -q slurm-slurmd munge 2>/dev/null || true
+$S apt-get install -y -qq slurmd slurm-client munge 2>/dev/null || $S yum install -y -q slurm-slurmd slurm munge 2>/dev/null || true
 
 # Post-install UID check — apt might have "repaired" our pre-created user
 # or picked its own UID if ours clashed with something. If the UIDs still

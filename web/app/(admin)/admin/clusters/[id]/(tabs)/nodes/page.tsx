@@ -63,6 +63,12 @@ export default function NodesPage() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [clusterStatus, setClusterStatus] = useState<string>("");
+  const [clusterHealth, setClusterHealth] = useState<{
+    lastProbeAt?: string;
+    alive?: boolean;
+    message?: string;
+    failStreak?: number;
+  } | null>(null);
 
   // Activate node state
   const [activatingNode, setActivatingNode] = useState<string | null>(null);
@@ -141,6 +147,7 @@ export default function NodesPage() {
   // A sentinel "" value means "deploy starting" (no taskId yet from server).
   const [deployTasks, setDeployTasks] = useState<Record<string, string>>({});
   const isDeploying = (name: string) => name in deployTasks;
+  const [deployError, setDeployError] = useState<{ nodeName: string; message: string } | null>(null);
   const [fixingNode, setFixingNode] = useState<string | null>(null);
   const [diagnosingNode, setDiagnosingNode] = useState<string | null>(null);
   const [syncingHosts, setSyncingHosts] = useState(false);
@@ -241,10 +248,18 @@ export default function NodesPage() {
 
   useEffect(() => {
     fetchNodes();
-    fetch(`/api/clusters/${clusterId}`)
-      .then((r) => r.json())
-      .then((d) => setClusterStatus(d.status ?? ""))
-      .catch(() => {});
+    const loadCluster = () =>
+      fetch(`/api/clusters/${clusterId}`)
+        .then((r) => r.json())
+        .then((d) => {
+          setClusterStatus(d.status ?? "");
+          setClusterHealth((d.config?.health as typeof clusterHealth) ?? null);
+        })
+        .catch(() => {});
+    loadCluster();
+    // Poll so the banner reflects the latest probe result without a refresh.
+    const h = setInterval(loadCluster, 15_000);
+    return () => clearInterval(h);
   }, [clusterId]);
 
   const handleActivate = async (nodeName: string) => {
@@ -397,9 +412,27 @@ export default function NodesPage() {
       const c = await cRes.json();
       const cfg = (c.config ?? {}) as Record<string, unknown>;
       const slurmNodes = ((cfg.slurm_nodes ?? []) as Array<Record<string, any>>);
-      const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName);
-      if (!n) {
-        toast.error(`No config entry for ${nodeName}`);
+      const hostsEntries = ((cfg.slurm_hosts_entries ?? []) as Array<Record<string, any>>);
+      const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName) || {};
+      const h = hostsEntries.find((x) => x.hostname === nodeName) || {};
+
+      // Merge slurm_hosts_entries as a fallback — older Add-Node runs only
+      // populated that entry for ip/user/port, leaving slurm_nodes thin.
+      const ip = (n.ip as string) || (h.ip as string) || "";
+      const sshUser = (n.ssh_user as string) || (h.user as string) || "root";
+      const sshPort = (n.ssh_port as number) || (h.port as number) || 22;
+      const cpus = (n.cpus as number) || 0;
+      const memoryMb = (n.memory_mb as number) || 0;
+      if (!ip || !cpus || !memoryMb) {
+        setDeployError({
+          nodeName,
+          message:
+            `Missing required fields for ${nodeName}:` +
+            `\n  ip        = ${ip || "<missing>"}` +
+            `\n  cpus      = ${cpus || "<missing>"}` +
+            `\n  memoryMb  = ${memoryMb || "<missing>"}` +
+            `\n\nOpen Edit on this row and fill in CPUs / Memory (and IP if blank), then click Deploy again.`,
+        });
         clearDeploy();
         return;
       }
@@ -409,20 +442,20 @@ export default function NodesPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           nodeName,
-          ip: n.ip,
-          sshUser: n.ssh_user || "root",
-          sshPort: n.ssh_port || 22,
-          cpus: n.cpus || 1,
-          gpus: n.gpus || 0,
-          memoryMb: n.memory_mb || 1024,
-          sockets: n.sockets || 1,
-          coresPerSocket: n.cores_per_socket || n.cpus || 1,
-          threadsPerCore: n.threads_per_core || 1,
+          ip,
+          sshUser,
+          sshPort,
+          cpus,
+          gpus: (n.gpus as number) || 0,
+          memoryMb,
+          sockets: (n.sockets as number) || 1,
+          coresPerSocket: (n.cores_per_socket as number) || cpus || 1,
+          threadsPerCore: (n.threads_per_core as number) || 1,
         }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        toast.error(`Deploy ${nodeName}: ${err.error ?? `HTTP ${res.status}`}`);
+        setDeployError({ nodeName, message: err.error ?? `HTTP ${res.status}` });
         clearDeploy();
         return;
       }
@@ -440,14 +473,19 @@ export default function NodesPage() {
           const t = await tRes.json();
           if (t.status === "success" || t.status === "failed") {
             clearInterval(poll);
-            if (t.status === "failed") toast.error(`Deploy ${nodeName} failed — click the spinner icon to view log`);
+            if (t.status === "failed") {
+              setDeployError({
+                nodeName,
+                message: "Deploy task exited with status=failed. Click the ⚡ spinner to view the full log.",
+              });
+            }
             clearDeploy();
             fetchNodes();
           }
         } catch {}
       }, 2000);
     } catch (e) {
-      toast.error(`Deploy ${nodeName}: ${e instanceof Error ? e.message : "Error"}`);
+      setDeployError({ nodeName, message: e instanceof Error ? e.message : "Error" });
       clearDeploy();
     }
   };
@@ -1223,8 +1261,21 @@ export default function NodesPage() {
         </div>
       )}
       {clusterStatus === "OFFLINE" && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-400">
-          Controller is unreachable over SSH right now. Adding nodes will still write config, but deploys will fail until the controller is back online.
+        <div className="rounded-lg border border-red-500/40 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-400 space-y-1">
+          <div className="font-medium">Controller is unreachable over SSH right now.</div>
+          <div className="text-xs">
+            Adding nodes will still write config, but deploys will fail until the controller is back online.
+          </div>
+          {clusterHealth?.lastProbeAt && (
+            <div className="mt-2 space-y-0.5 rounded-md border border-red-500/20 bg-red-500/10 p-2 font-mono text-[11px]">
+              <div>last probe: {new Date(clusterHealth.lastProbeAt).toLocaleString()}</div>
+              <div>result:     {clusterHealth.alive ? "alive" : "failed"}</div>
+              {clusterHealth.message && <div>message:    {clusterHealth.message}</div>}
+              {typeof clusterHealth.failStreak === "number" && clusterHealth.failStreak > 0 && (
+                <div>fail streak: {clusterHealth.failStreak}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1287,21 +1338,25 @@ export default function NodesPage() {
                     <TableCell>{node.partitions?.join(", ") ?? "-"}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
-                        {node.deployed === false && (
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="text-amber-700 dark:text-amber-400"
-                            title={isDeploying(node.name) ? "Deploying — click to view log" : "Deploy (install slurmd)"}
-                            onClick={() => isDeploying(node.name)
-                              ? reopenDeployLog(node.name)
-                              : handleDeployNode(node.name)}
-                          >
-                            {isDeploying(node.name)
-                              ? <Loader2 className="h-4 w-4 animate-spin" />
-                              : <Zap className="h-4 w-4" />}
-                          </Button>
-                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className={node.deployed === false ? "text-amber-700 dark:text-amber-400" : ""}
+                          title={
+                            isDeploying(node.name)
+                              ? "Deploying — click to view log"
+                              : node.deployed === false
+                                ? "Deploy (install slurmd + slurm-client)"
+                                : "Redeploy (re-run install, picks up new packages / config)"
+                          }
+                          onClick={() => isDeploying(node.name)
+                            ? reopenDeployLog(node.name)
+                            : handleDeployNode(node.name)}
+                        >
+                          {isDeploying(node.name)
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <Zap className="h-4 w-4" />}
+                        </Button>
                         {node.state.toLowerCase().includes("future") && (
                           <Button
                             variant="ghost"
@@ -1659,6 +1714,29 @@ export default function NodesPage() {
                 </Button>
               );
             })()}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Deploy error dialog */}
+      <Dialog open={!!deployError} onOpenChange={(o) => { if (!o) setDeployError(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-destructive">
+              Deploy failed: {deployError?.nodeName}
+            </DialogTitle>
+          </DialogHeader>
+          <pre className="max-h-64 overflow-auto rounded-md border border-destructive/40 bg-destructive/5 p-3 font-mono text-xs whitespace-pre-wrap break-all text-destructive">
+            {deployError?.message}
+          </pre>
+          <DialogFooter>
+            {deployError && (
+              <Button variant="outline" onClick={() => { const n = deployError.nodeName; setDeployError(null); openEditNode(n); }}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit node
+              </Button>
+            )}
+            <Button onClick={() => setDeployError(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

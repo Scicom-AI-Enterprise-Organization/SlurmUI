@@ -24,7 +24,7 @@ import { JobTable } from "@/components/jobs/job-table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TemplatesPanel } from "@/components/jobs/templates-panel";
 import { toast } from "sonner";
-import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2, Cpu, MemoryStick, Gpu, RefreshCw } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2, Cpu, MemoryStick, Gpu, RefreshCw, Download } from "lucide-react";
 import Link from "next/link";
 
 interface NodeResource {
@@ -330,6 +330,33 @@ export default function JobListPage() {
 
   const pendingCount = jobs.filter((j) => j.status === "PENDING").length;
 
+  // Admin-only: import jobs from Slurm's live queue into the DB. Handy when
+  // the DB is empty vs Slurm (fresh install, migration, CLI-submitted jobs).
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ ok: boolean; summary: string; details?: string } | null>(null);
+  const handleImport = async () => {
+    setImporting(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/jobs/import-from-slurm`, { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setImportResult({ ok: false, summary: d.error ?? `HTTP ${res.status}` });
+        return;
+      }
+      const summary = `imported ${d.imported}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} live jobs)`;
+      const orphans = (d.orphans ?? []) as Array<{ slurmJobId: number; user: string }>;
+      const details = orphans.length > 0
+        ? `Unmatched (no local user with that unixUsername):\n${orphans.map((o) => `  ${o.slurmJobId}  ${o.user}`).join("\n")}`
+        : undefined;
+      setImportResult({ ok: true, summary, details });
+      fetchJobs();
+    } catch (e) {
+      setImportResult({ ok: false, summary: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -338,6 +365,15 @@ export default function JobListPage() {
           <p className="text-muted-foreground">Manage cluster jobs</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={handleImport}
+            disabled={importing}
+            title="Import Slurm's live queue into the SlurmUI DB (admin)"
+          >
+            {importing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+            Sync from Slurm
+          </Button>
           <Button
             variant="outline"
             onClick={() => setConfirmReset(true)}
@@ -535,6 +571,30 @@ export default function JobListPage() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setResetResult(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!importResult} onOpenChange={(o) => { if (!o) setImportResult(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className={importResult?.ok ? "" : "text-destructive"}>
+              {importResult?.ok ? "Synced from Slurm" : "Sync failed"}
+            </DialogTitle>
+            {importResult?.ok && (
+              <DialogDescription>{importResult.summary}</DialogDescription>
+            )}
+          </DialogHeader>
+          {!importResult?.ok && (
+            <p className="text-sm text-destructive">{importResult?.summary}</p>
+          )}
+          {importResult?.details && (
+            <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap">
+              {importResult.details}
+            </pre>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setImportResult(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
