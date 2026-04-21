@@ -89,9 +89,21 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
       const scriptPath = `${submitDir}/${scriptName}`;
       const scriptB64 = Buffer.from(script).toString("base64");
 
+      // `-n` on sudo throws "a password is required" instantly instead of
+      // hanging on a TTY prompt. Without it, an unresolvable target user
+      // (provisioning drift) makes the whole submit block until the 60s SSH
+      // timeout — UI spinner just sits there.
       const wrapper = `#!/bin/bash
 set +e
-S=""; [ "$(id -u)" != "0" ] && S="sudo"
+S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
+
+# Fail fast if the target Linux user doesn't exist — otherwise the sudo
+# call below spends seconds on audit-plugin init before erroring.
+if ! id ${username} >/dev/null 2>&1; then
+  echo "__AURA_SBATCH_OUT__=Linux user '${username}' does not exist on the controller. Re-provision the user from the admin Users tab."
+  echo "__AURA_SBATCH_EXIT__=127"
+  exit 127
+fi
 
 $S mkdir -p ${submitDir}
 $S chown ${username}:${username} ${submitDir} 2>/dev/null || true
@@ -100,7 +112,7 @@ echo "${scriptB64}" | base64 -d | $S tee ${scriptPath} > /dev/null
 $S chown ${username}:${username} ${scriptPath}
 $S chmod 755 ${scriptPath}
 
-OUT=$(sudo -u ${username} -H bash -c "cd ${submitDir} && sbatch --parsable ${scriptPath}" 2>&1)
+OUT=$(sudo -n -u ${username} -H bash -c "cd ${submitDir} && sbatch --parsable ${scriptPath}" 2>&1)
 RC=$?
 echo "__AURA_SBATCH_EXIT__=$RC"
 echo "__AURA_SBATCH_OUT__=$OUT"
@@ -204,7 +216,16 @@ exit $RC
 
     return updated;
   } catch (err) {
-    await prisma.job.update({ where: { id: job.id }, data: { status: "FAILED" } }).catch(() => {});
+    // Persist the submission error onto the Job row so the detail page has
+    // something to render. Without this, slurmJobId=null + output=null leaves
+    // the user with a FAILED row and no idea why.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const stamp = new Date().toISOString();
+    const outputBody = `[aura] job submission failed @ ${stamp}\n${errMsg}\n`;
+    await prisma.job.update({
+      where: { id: job.id },
+      data: { status: "FAILED", output: outputBody },
+    }).catch(() => {});
 
     await logAudit({
       action: "job.submit_failed",
@@ -214,7 +235,7 @@ exit $RC
         clusterId,
         clusterName: cluster.name,
         partition,
-        error: err instanceof Error ? err.message : "Unknown",
+        error: errMsg,
         submittedBy: dbUser.email,
         ...auditExtra,
       },

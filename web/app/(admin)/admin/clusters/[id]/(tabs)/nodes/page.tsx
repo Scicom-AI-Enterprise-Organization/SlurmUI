@@ -247,19 +247,16 @@ export default function NodesPage() {
   };
 
   useEffect(() => {
+    // One-shot loads. No polling — nodes list and cluster status refresh
+    // only on page reload or when the user clicks the Refresh button.
     fetchNodes();
-    const loadCluster = () =>
-      fetch(`/api/clusters/${clusterId}`)
-        .then((r) => r.json())
-        .then((d) => {
-          setClusterStatus(d.status ?? "");
-          setClusterHealth((d.config?.health as typeof clusterHealth) ?? null);
-        })
-        .catch(() => {});
-    loadCluster();
-    // Poll so the banner reflects the latest probe result without a refresh.
-    const h = setInterval(loadCluster, 15_000);
-    return () => clearInterval(h);
+    fetch(`/api/clusters/${clusterId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        setClusterStatus(d.status ?? "");
+        setClusterHealth((d.config?.health as typeof clusterHealth) ?? null);
+      })
+      .catch(() => {});
   }, [clusterId]);
 
   const handleActivate = async (nodeName: string) => {
@@ -289,9 +286,16 @@ export default function NodesPage() {
     setSseCancelling(true);
     try {
       await fetch(`/api/tasks/${sseTaskId}/cancel`, { method: "POST" });
-    } catch {
-      setSseCancelling(false);
-    }
+    } catch {}
+    // Always clear the local "Cancelling…" spinner. The server flips the
+    // task to failed synchronously, and the poll loop closes the dialog
+    // on the next tick — but without this reset the button text stays
+    // "Cancelling…" forever if the dialog is still open.
+    setSseCancelling(false);
+    // Flip the visible status right away so the user doesn't wait for
+    // the next task-poll tick (up to 2s) for the dialog to update.
+    setSseLogStatus("error");
+    setSseTaskId(null);
   };
 
   const handleAddNode = async () => {
@@ -473,12 +477,9 @@ export default function NodesPage() {
           const t = await tRes.json();
           if (t.status === "success" || t.status === "failed") {
             clearInterval(poll);
-            if (t.status === "failed") {
-              setDeployError({
-                nodeName,
-                message: "Deploy task exited with status=failed. Click the ⚡ spinner to view the full log.",
-              });
-            }
+            // Don't pop a secondary dialog on failure — the deploy log
+            // dialog itself already shows the final state. The user can
+            // close it or click the ⚡ spinner later to re-open the log.
             clearDeploy();
             fetchNodes();
           }
@@ -505,15 +506,20 @@ export default function NodesPage() {
     setSseLogStatus("streaming");
     setSseTaskId(taskId);
     setSseLogOpen(true);
-    try {
-      const res = await fetch(`/api/tasks/${taskId}`);
-      if (res.ok) {
-        const t = await res.json();
+    // Poll every 2s — mirrors handleFixNode / handleDiagnoseNode. The
+    // one-shot fetch we used to do here left the dialog frozen on the
+    // snapshot from when the user clicked the ⚡ spinner, even though the
+    // task kept streaming logs into the DB.
+    const poll = setInterval(async () => {
+      try {
+        const taskRes = await fetch(`/api/tasks/${taskId}`);
+        if (!taskRes.ok) return;
+        const t = await taskRes.json();
         setSseLogLines(t.logs ? t.logs.split("\n") : []);
-        if (t.status === "success") setSseLogStatus("complete");
-        else if (t.status === "failed") setSseLogStatus("error");
-      }
-    } catch {}
+        if (t.status === "success") { setSseLogStatus("complete"); clearInterval(poll); }
+        else if (t.status === "failed") { setSseLogStatus("error"); clearInterval(poll); }
+      } catch {}
+    }, 2000);
   };
 
   const handleFixNode = async (nodeName: string) => {

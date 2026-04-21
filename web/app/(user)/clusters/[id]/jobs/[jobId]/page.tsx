@@ -62,20 +62,22 @@ export default function JobDetailPage() {
   const [restartResult, setRestartResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const handleRestart = async () => {
-    if (!job?.slurmJobId) return;
+    if (!job) return;
     setConfirmRestart(false);
     setRestarting(true);
+    // Always fresh sbatch of the stored script — works whether or not Slurm
+    // ever saw the original job. Matches the row-level rerun in the list.
     try {
-      const res = await fetch(`/api/clusters/${clusterId}/slurm-control`, {
+      const res = await fetch(`/api/clusters/${clusterId}/jobs/${job.id}/resubmit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slurmJobId: String(job.slurmJobId), action: "requeue" }),
       });
-      const d = await res.json();
-      const ok = res.ok && d.success !== false;
+      const d = await res.json().catch(() => ({}));
+      const ok = res.ok;
       setRestartResult({
         ok,
-        message: d.output || d.error || (ok ? "Job requeued." : `HTTP ${res.status}`),
+        message: ok
+          ? `Resubmitted as job ${d.id?.slice(0, 8) ?? "?"}${d.slurmJobId ? ` (slurm ${d.slurmJobId})` : ""}.`
+          : (d.error || `HTTP ${res.status}`),
       });
       if (ok) fetchJob();
     } catch (e) {
@@ -261,18 +263,16 @@ export default function JobDetailPage() {
               {resyncing ? "Resyncing..." : "Resync state"}
             </Button>
           )}
-          {job.slurmJobId && (job.status === "RUNNING" || job.status === "COMPLETED" || job.status === "FAILED" || job.status === "CANCELLED") && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmRestart(true)}
-              disabled={restarting}
-              title="Requeue the job — Slurm kills any running processes and puts it back in the queue"
-            >
-              <Repeat2 className={`mr-2 h-3 w-3 ${restarting ? "animate-spin" : ""}`} />
-              {restarting ? "Restarting..." : "Restart"}
-            </Button>
-          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmRestart(true)}
+            disabled={restarting}
+            title="Rerun this job — fresh sbatch of the stored script"
+          >
+            <Repeat2 className={`mr-2 h-3 w-3 ${restarting ? "animate-spin" : ""}`} />
+            {restarting ? "Restarting..." : "Restart"}
+          </Button>
           {isRunning && (
             <Button
               variant="destructive"
@@ -465,12 +465,11 @@ export default function JobDetailPage() {
       <Dialog open={confirmRestart} onOpenChange={setConfirmRestart}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Restart this job?</DialogTitle>
+            <DialogTitle>Rerun this job?</DialogTitle>
             <DialogDescription>
-              Runs <code>scontrol requeue {job.slurmJobId}</code>. Slurm kills any currently-running
-              processes and puts the job back in the queue with the same ID. Output file gets
-              truncated unless the script uses <code>#SBATCH --open-mode=append</code>. Requires
-              the job to be requeueable (default for most partitions).
+              Submits a fresh <code>sbatch</code> of the stored script. Creates a new Job row
+              with a new Slurm ID; the original row stays as history. Any currently-running
+              job for this row is <em>not</em> cancelled — cancel it first if that's what you want.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -488,7 +487,7 @@ export default function JobDetailPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle className={restartResult?.ok ? "" : "text-destructive"}>
-              {restartResult?.ok ? "Job requeued" : "Restart failed"}
+              {restartResult?.ok ? "Job resubmitted" : "Rerun failed"}
             </DialogTitle>
           </DialogHeader>
           <pre className="max-h-64 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all">

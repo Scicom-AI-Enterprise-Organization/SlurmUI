@@ -128,15 +128,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const workerBlock = workers.map((w) => {
       const u = w.user || "root";
       const p = w.port || 22;
+      // $AURA_UID is expanded by the outer controller bash (injects the
+      // actual numeric UID); $S and $(id -u) stay literal so they expand
+      // on the worker side via the \$ escapes.
       return `
 echo "  Replicating to ${w.hostname} (${w.ip})..."
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} bash -s <<'NODE_EOF'
-set +e
-S=""; [ "$(id -u)" != "0" ] && S="sudo"
-$S getent group ${username} >/dev/null 2>&1 || $S groupadd -g ${unixGid} ${username}
-$S id -u ${username} >/dev/null 2>&1 || $S useradd -u ${unixUid} -g ${unixGid} -d ${nfsHome} -M -s /bin/bash ${username}
-echo "  done on ${w.hostname}"
-NODE_EOF`;
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} "AURA_UID=$AURA_UID; S=''; [ \\"\\$(id -u)\\" != '0' ] && S='sudo'; if \\$S getent group ${username} >/dev/null 2>&1; then \\$S groupmod -g \\$AURA_UID ${username} 2>/dev/null || true; else \\$S groupadd -g \\$AURA_UID ${username}; fi; if \\$S id -u ${username} >/dev/null 2>&1; then \\$S usermod -u \\$AURA_UID -g \\$AURA_UID ${username} 2>/dev/null || true; else \\$S useradd -u \\$AURA_UID -g \\$AURA_UID -d ${nfsHome} -M -s /bin/bash ${username}; fi; echo '  done on ${w.hostname}'" 2>&1 | sed 's/^/    /'`;
     }).join("\n");
 
     const script = `#!/bin/bash
@@ -144,7 +141,7 @@ set +e
 
 echo "============================================"
 echo "  Provisioning user: ${username}"
-echo "  UID/GID: ${unixUid}/${unixGid}"
+echo "  Proposed UID/GID: ${unixUid}/${unixGid}"
 echo "  NFS home: ${nfsHome}"
 echo "  Workers: ${workers.length}"
 echo "============================================"
@@ -152,11 +149,37 @@ echo ""
 
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
 
+# Step 0: decide the actual UID. If the proposed UID is already held by a
+# DIFFERENT user (ghost from a failed deprovision, or just a collision),
+# probe for the next free UID in 10000-20000 and use that. The final UID
+# is exported as AURA_UID for every useradd call below AND surfaced to
+# the API via the AURA_ACTUAL_UID marker so the DB can be updated.
+AURA_UID=${unixUid}
+EXISTING_OWNER=\$($S getent passwd \$AURA_UID 2>/dev/null | cut -d: -f1)
+if [ -n "\$EXISTING_OWNER" ] && [ "\$EXISTING_OWNER" != "${username}" ]; then
+  echo "  [warn] UID \$AURA_UID already owned by '\$EXISTING_OWNER' — picking next free UID"
+  NEXT_UID=\$($S awk -F: 'BEGIN{m=10000}{if(\$3>m && \$3<20000)m=\$3}END{print m+1}' /etc/passwd)
+  while $S getent passwd \$NEXT_UID >/dev/null 2>&1; do NEXT_UID=\$((NEXT_UID+1)); done
+  AURA_UID=\$NEXT_UID
+  echo "  [info] Using UID/GID \$AURA_UID instead"
+fi
+# Emit marker for the route handler to parse and update user.unixUid in DB
+echo "__AURA_ACTUAL_UID__=\$AURA_UID"
+export AURA_UID
+
 echo "[aura] Creating group on controller"
-$S getent group ${username} >/dev/null 2>&1 || $S groupadd -g ${unixGid} ${username}
+if $S getent group ${username} >/dev/null 2>&1; then
+  $S groupmod -g \$AURA_UID ${username} 2>/dev/null || true
+else
+  $S groupadd -g \$AURA_UID ${username}
+fi
 
 echo "[aura] Creating user on controller"
-$S id -u ${username} >/dev/null 2>&1 || $S useradd -u ${unixUid} -g ${unixGid} -d ${nfsHome} -M -s /bin/bash ${username}
+if $S id -u ${username} >/dev/null 2>&1; then
+  $S usermod -u \$AURA_UID -g \$AURA_UID ${username} 2>/dev/null || true
+else
+  $S useradd -u \$AURA_UID -g \$AURA_UID -d ${nfsHome} -M -s /bin/bash ${username}
+fi
 
 echo "[aura] Creating NFS home dir: ${nfsHome}"
 $S mkdir -p ${nfsHome}
@@ -193,21 +216,42 @@ echo "[aura] User ${username} provisioned (uid=${unixUid})"
 
     (async () => {
       await appendLog(task.id, `[aura] Provisioning user ${username} (uid=${unixUid})`);
+      // If the controller rejected the proposed UID (ghost from a failed
+      // deprovision, or collision with another user), the script picks a
+      // fresh UID and emits __AURA_ACTUAL_UID__=<n>. Capture it so the DB
+      // ends up in sync with what actually got created on the hosts.
+      let actualUid: number | null = null;
+      const uidMarkerRe = /^__AURA_ACTUAL_UID__=(\d+)$/;
       sshExecScript(target, script, {
         onStream: (line) => {
           const trimmed = line.replace(/\r/g, "").trim();
+          const m = trimmed.match(uidMarkerRe);
+          if (m) {
+            actualUid = parseInt(m[1], 10);
+            return; // don't pollute the log with the marker itself
+          }
           if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
             appendLog(task.id, trimmed);
           }
         },
         onComplete: async (success) => {
           if (success) {
+            if (actualUid !== null && actualUid !== unixUid) {
+              // UID collision — the script used `actualUid` on all hosts.
+              // Sync the DB so future flows (job submit, deprovision, NFS
+              // home permissions) use the right numbers.
+              await prisma.user.update({
+                where: { id: userId },
+                data: { unixUid: actualUid, unixGid: actualUid },
+              });
+              await appendLog(task.id, `[aura] Note: UID ${unixUid} was in use — assigned ${actualUid} instead (DB updated).`);
+            }
             await prisma.clusterUser.update({
               where: { userId_clusterId: { userId, clusterId: id } },
               data: { status: "ACTIVE", provisionedAt: new Date() },
             });
             await appendLog(task.id, `\n[aura] User ${username} provisioned successfully.`);
-            await logAudit({ action: "user.provision", entity: "Cluster", entityId: id, metadata: { userId, username, mode: "ssh" } });
+            await logAudit({ action: "user.provision", entity: "Cluster", entityId: id, metadata: { userId, username, mode: "ssh", unixUid: actualUid ?? unixUid } });
           } else {
             await prisma.clusterUser.update({
               where: { userId_clusterId: { userId, clusterId: id } },

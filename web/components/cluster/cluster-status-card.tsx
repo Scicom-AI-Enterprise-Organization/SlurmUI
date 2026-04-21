@@ -36,9 +36,8 @@ export function ClusterStatusCard({ clusterId, initialStatus, initialHealth }: P
           if (h) setHealth(h);
         })
         .catch(() => {});
+    // One-shot load. No polling — status refreshes only on full page reload.
     load();
-    const h = setInterval(load, 15_000);
-    return () => clearInterval(h);
   }, [clusterId]);
 
   return (

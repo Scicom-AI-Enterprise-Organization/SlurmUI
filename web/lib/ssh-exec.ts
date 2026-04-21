@@ -333,6 +333,34 @@ export function sshExecScript(
   chmodSync(keyPath, 0o600);
 
   let seq = 0;
+  // Bastion mode sandwich — only forward output lines between these markers
+  // to the caller. Strips the login MOTD, PS1/PS2 echoes, and any other
+  // shell noise that leaks through the PTY.
+  const BASTION_START = "__AURA_BASTION_OUT_START__";
+  const BASTION_END = "__AURA_BASTION_OUT_END__";
+  let bastionForwarding = !target.bastion; // non-bastion: always forward
+  // When we see the END marker the script has fully run. Record that
+  // *before* we tear down the ssh proc so proc.on("close") can report
+  // success(true) even though we SIGKILL'd it — some bastions won't hang
+  // up on a clean `exit` alone.
+  let bastionScriptSucceeded = false;
+  // Idle-timeout safety net: if we saw real script output and then nothing
+  // for N seconds, assume the script finished but the bastion is holding
+  // the ssh channel open. Force-kill so the UI doesn't sit on "Running"
+  // until the overall watchdog. 30s covers legitimate silent stretches
+  // during add-node (apt install, slurmd restart) without forcing the
+  // user to wait the full 60s ssh watchdog.
+  let bastionIdleTimer: NodeJS.Timeout | null = null;
+  const bastionIdleMs = parseInt(process.env.AURA_BASTION_IDLE_MS ?? "30000", 10);
+  const armBastionIdleKill = () => {
+    if (!target.bastion) return;
+    if (bastionIdleTimer) clearTimeout(bastionIdleTimer);
+    bastionIdleTimer = setTimeout(() => {
+      bastionScriptSucceeded = true; // we had real output, treat as success
+      try { proc.stdin.end(); } catch {}
+      try { proc.kill("SIGKILL"); } catch {}
+    }, bastionIdleMs);
+  };
 
   const sshArgs = [
     "-i", keyPath,
@@ -364,34 +392,106 @@ export function sshExecScript(
   });
 
   if (target.bastion) {
-    // Bastion mode: encode script as base64, decode on remote, execute.
-    // Can't pipe large scripts through bastion stdin reliably.
+    // Bastion mode: encode script as base64, upload via ONE heredoc, decode,
+    // execute.
+    //
+    // Why not hundreds of `echo` commands:
+    //   The bastion runs over a pseudo-TTY with canonical mode + local echo.
+    //   Writing hundreds of short `echo "..."` commands causes (a) the TTY
+    //   to echo every line back into the log (massive noise), and (b)
+    //   characters to get dropped when we outpace the line discipline —
+    //   e.g. "chmod" arrives as "<hmod", the decoded script is corrupt,
+    //   and bash dies with "unexpected EOF while looking for matching '".
+    //
+    //   `cat > FILE <<'AURA_B64_EOF'` tells the shell to accept every line
+    //   that follows verbatim into FILE until it sees the delimiter on a
+    //   line by itself — no per-line parsing. `stty -echo -icanon` before
+    //   it turns off the PTY echo + cooked-mode buffering that causes the
+    //   noise and the truncation.
     const b64 = Buffer.from(script).toString("base64");
-    // Split base64 into 76-char lines for echo compatibility
     const b64Lines = b64.match(/.{1,76}/g) ?? [b64];
-    const catBlock = b64Lines.map((l) => `echo "${l}"`).join("; ");
+    const remoteB64 = "/tmp/.aura-run.b64";
     const remoteFile = "/tmp/.aura-run.sh";
 
-    const fullCmd = `(${catBlock}) | base64 -d > ${remoteFile} && chmod +x ${remoteFile} && bash ${remoteFile}; rm -f ${remoteFile}; exit\n`;
+    const fullCmd = [
+      // stty -echo silences the TTY echoing our input back into the log.
+      // Do NOT also disable -icanon — some bastion PTYs read input
+      // byte-by-byte in non-canonical mode and end up waiting forever
+      // for input that already arrived, stalling the `exit` command and
+      // stranding the ssh session open. Canonical mode is needed for
+      // line-oriented shell input to work normally.
+      `stty -echo 2>/dev/null || true`,
+      `PS1='' PS2=''`,
+      `cat > ${remoteB64} <<'AURA_B64_EOF'`,
+      ...b64Lines,
+      `AURA_B64_EOF`,
+      // Markers bracket the actual script output so the onStream loop can
+      // drop the welcome banner / PS1 / stty-echo before START and any
+      // post-exit noise after END.
+      `echo ${BASTION_START}`,
+      `base64 -d < ${remoteB64} > ${remoteFile} && rm -f ${remoteB64} && chmod +x ${remoteFile} && bash ${remoteFile}`,
+      `echo ${BASTION_END}`,
+      `rm -f ${remoteFile} ${remoteB64}`,
+      `exit`,
+      ``,
+    ].join("\n");
 
     setTimeout(() => {
       proc.stdin.write(fullCmd);
+      // Do NOT close stdin here — the remote PTY sees EOF before it has
+      // time to execute the script. We end stdin when we see the END
+      // marker come back through stdout (see maybeForward below), and
+      // as a safety net 5s after ssh reports exit via proc.on("close").
     }, 2000);
   } else {
     proc.stdin.write(script);
     proc.stdin.end();
   }
 
-  proc.stdout.on("data", (chunk: Buffer) => {
-    for (const line of chunk.toString().split("\n")) {
-      if (line) callbacks.onStream(line, seq++);
+  // Bastion mode inserts markers around the real script output. Flip
+  // forwarding on when we see START, off when we see END, and drop the
+  // marker lines themselves. Non-bastion short-circuits (bastionForwarding
+  // was initialized true above).
+  const maybeForward = (line: string, prefix = "") => {
+    if (target.bastion) {
+      // Trim whitespace AND CR — we need to compare the line exactly
+      // against the marker so that TTY echoes of the input commands
+      // (`echo __AURA_BASTION_OUT_START__`) do NOT trigger toggling.
+      // Only the shell's actual echo output (`__AURA_BASTION_OUT_START__`
+      // alone on a line) should count.
+      const clean = line.replace(/\r/g, "").trim();
+      if (clean === BASTION_START) { bastionForwarding = true; return; }
+      if (clean === BASTION_END) {
+        bastionForwarding = false;
+        bastionScriptSucceeded = true;
+        // Script finished. Close stdin AND schedule a SIGKILL if ssh
+        // still hasn't closed after 5s. Some bastions keep the channel
+        // open even after the shell runs `exit` — without this the UI
+        // sits on "Running" until the 60s watchdog. proc.on("close")
+        // below will prefer bastionScriptSucceeded over exit code when
+        // deciding success, so the SIGKILL still reports success=true.
+        try { proc.stdin.end(); } catch {}
+        setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
+        return;
+      }
+      // Drop any line containing "echo __AURA_BASTION_..." — that's the
+      // TTY echoing our own input commands back at us.
+      if (clean.startsWith("echo " + BASTION_START) || clean.startsWith("echo " + BASTION_END)) return;
+      if (!bastionForwarding) return;
+      // Real script output — reset the idle-kill timer.
+      armBastionIdleKill();
     }
+    if (line) callbacks.onStream(prefix + line, seq++);
+  };
+
+  proc.stdout.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split("\n")) maybeForward(line);
   });
 
   proc.stderr.on("data", (chunk: Buffer) => {
     for (const line of chunk.toString().split("\n")) {
       if (line && !line.startsWith("Warning: Permanently added")) {
-        callbacks.onStream(`[stderr] ${line}`, seq++);
+        maybeForward(line, "[stderr] ");
       }
     }
   });
@@ -414,7 +514,11 @@ export function sshExecScript(
     if (completed) return;
     completed = true;
     clearTimeout(timer);
-    callbacks.onComplete(code === 0 && !timedOut, { exitCode: code, timedOut });
+    // Bastion path: if we already saw the END marker the script ran to
+    // completion — the SIGKILL we sent to force the hung ssh channel
+    // closed returns a non-zero code, but the task itself succeeded.
+    const success = bastionScriptSucceeded || (code === 0 && !timedOut);
+    callbacks.onComplete(success, { exitCode: code, timedOut });
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

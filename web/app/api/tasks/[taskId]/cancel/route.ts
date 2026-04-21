@@ -23,17 +23,18 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
 
   const killed = cancelTask(taskId);
 
-  // Append a note to the log. Status will be flipped to "failed" by the
-  // process's onComplete handler once it exits; if the registry had no entry
-  // (e.g. server restarted after task started), force-mark it failed here.
+  // Append the cancel note and flip the DB row to "failed" immediately.
+  // Waiting for the proc's onComplete to update status leaves the UI stuck
+  // on "Running…" for minutes when the remote is deep in an apt-get /
+  // dpkg unpack (dpkg ignores SIGHUP until a quiescent point). Setting
+  // status here makes the log-dialog poll see the terminal state next tick;
+  // the SSH process still gets SIGTERM/SIGKILL via cancelTask so local
+  // resources are reclaimed whenever it eventually exits.
   await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${"[aura] Cancel requested by user.\n"} WHERE id = ${taskId}`.catch(() => {});
-
-  if (!killed) {
-    await prisma.backgroundTask.update({
-      where: { id: taskId },
-      data: { status: "failed", completedAt: new Date() },
-    }).catch(() => {});
-  }
+  await prisma.backgroundTask.update({
+    where: { id: taskId },
+    data: { status: "failed", completedAt: new Date() },
+  }).catch(() => {});
 
   return NextResponse.json({ cancelled: true, killed });
 }
