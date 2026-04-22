@@ -344,6 +344,11 @@ export function sshExecScript(
   // success(true) even though we SIGKILL'd it — some bastions won't hang
   // up on a clean `exit` alone.
   let bastionScriptSucceeded = false;
+  // Set when we see `[trace] bash exiting (status=N)`. null = never seen
+  // (fall back to ssh exit code). 0 = script exited clean. Non-zero =
+  // script failed, override ssh's 0 exit so the BackgroundTask doesn't
+  // flip to "success" when the inner bash actually errored.
+  let bastionTraceStatus: number | null = null;
   // Idle-timeout safety net: if we saw real script output and then nothing
   // for N seconds, assume the script finished but the bastion is holding
   // the ssh channel open. Force-kill so the UI doesn't sit on "Running"
@@ -497,7 +502,8 @@ export function sshExecScript(
       const clean = line.replace(/\r/g, "").trim();
       const m = clean.match(/\[trace\] bash exiting \(status=(\d+)\)/);
       if (m) {
-        bastionScriptSucceeded = m[1] === "0";
+        bastionTraceStatus = parseInt(m[1], 10);
+        bastionScriptSucceeded = bastionTraceStatus === 0;
         try { proc.stdin.end(); } catch {}
         // Brief grace period so any final stdout the script emitted after
         // the trap flushes through before we SIGKILL.
@@ -536,10 +542,17 @@ export function sshExecScript(
     if (completed) return;
     completed = true;
     clearTimeout(timer);
-    // Bastion path: if we already saw the END marker the script ran to
-    // completion — the SIGKILL we sent to force the hung ssh channel
-    // closed returns a non-zero code, but the task itself succeeded.
-    const success = bastionScriptSucceeded || (code === 0 && !timedOut);
+    // Bastion path priority:
+    //   1. If we saw the `[trace] bash exiting (status=N)` line, trust N
+    //      absolutely — ssh's own exit code is misleading because the
+    //      outer bastion shell's `exit` runs AFTER the inner bash traps,
+    //      so ssh always reports 0 even when the script errored.
+    //   2. Else, if we saw the END marker, treat as success.
+    //   3. Else fall back to ssh exit code / watchdog.
+    const success =
+      bastionTraceStatus !== null ? bastionTraceStatus === 0
+      : bastionScriptSucceeded ? true
+      : (code === 0 && !timedOut);
     callbacks.onComplete(success, { exitCode: code, timedOut });
     rmSync(tmpDir, { recursive: true, force: true });
   });
