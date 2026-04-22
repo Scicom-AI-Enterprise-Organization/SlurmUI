@@ -23,10 +23,19 @@ interface NodeUsage {
   gpus: GpuInfo[];
 }
 
+const REFRESH_OPTIONS = [30, 60, 90, 120] as const;
+type RefreshSec = (typeof REFRESH_OPTIONS)[number];
+
 export function JobUsagePanel({ clusterId, jobId }: { clusterId: string; jobId: string }) {
   const [data, setData] = useState<{ nodes: NodeUsage[]; sampledAt?: string; note?: string; debug?: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Persist the user's pick across tab switches within the same browser.
+  const [refreshSec, setRefreshSec] = useState<RefreshSec>(() => {
+    if (typeof window === "undefined") return 30;
+    const stored = parseInt(window.localStorage.getItem("aura.usage.refresh") ?? "", 10);
+    return (REFRESH_OPTIONS as readonly number[]).includes(stored) ? (stored as RefreshSec) : 30;
+  });
 
   const fetchData = async () => {
     setLoading(true);
@@ -47,9 +56,15 @@ export function JobUsagePanel({ clusterId, jobId }: { clusterId: string; jobId: 
 
   useEffect(() => {
     fetchData();
-    const t = setInterval(fetchData, 30000);
+    const t = setInterval(fetchData, refreshSec * 1000);
     return () => clearInterval(t);
-  }, [clusterId, jobId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusterId, jobId, refreshSec]);
+
+  const changeRefresh = (sec: RefreshSec) => {
+    setRefreshSec(sec);
+    try { window.localStorage.setItem("aura.usage.refresh", String(sec)); } catch {}
+  };
 
   if (!data && loading) return <p className="text-sm text-muted-foreground">Sampling...</p>;
   if (error) return <p className="text-sm text-destructive">{error}</p>;
@@ -69,17 +84,31 @@ export function JobUsagePanel({ clusterId, jobId }: { clusterId: string; jobId: 
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          Sampled {data.sampledAt ? new Date(data.sampledAt).toLocaleTimeString() : "—"}. Auto-refresh 30s.
+          Sampled {data.sampledAt ? new Date(data.sampledAt).toLocaleTimeString() : "—"}.
         </p>
-        <button
-          onClick={fetchData}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            Auto-refresh
+            <select
+              value={refreshSec}
+              onChange={(e) => changeRefresh(parseInt(e.target.value, 10) as RefreshSec)}
+              className="rounded border bg-background px-1.5 py-0.5 text-xs font-mono"
+            >
+              {REFRESH_OPTIONS.map((n) => (
+                <option key={n} value={n}>{n}s</option>
+              ))}
+            </select>
+          </label>
+          <button
+            onClick={fetchData}
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {data.nodes.map((node) => (

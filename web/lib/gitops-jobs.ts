@@ -201,6 +201,17 @@ async function cancelSlurmJob(jobId: string, onLog: (l: string) => void): Promis
         // fall back to sudo -n so root can cancel any job.
         `
 set +e
+# "Invalid job id specified" means Slurm doesn't know the job anymore —
+# it already completed / was cancelled elsewhere / the controller was
+# restarted. That's effectively the same as a successful cancel for our
+# purposes (the allocation isn't held any longer), so report ok.
+classify() {
+  if echo "$1" | grep -q "Invalid job id specified"; then
+    echo "[scancel-ok] job ${job.slurmJobId} already gone from Slurm"
+    exit 0
+  fi
+}
+
 SCANCEL_OUT=$(scancel --signal=KILL --full ${job.slurmJobId} 2>&1)
 SCANCEL_RC=$?
 if [ $SCANCEL_RC -eq 0 ] && ! echo "$SCANCEL_OUT" | grep -q "Kill job error"; then
@@ -209,13 +220,16 @@ if [ $SCANCEL_RC -eq 0 ] && ! echo "$SCANCEL_OUT" | grep -q "Kill job error"; th
   exit 0
 fi
 echo "$SCANCEL_OUT"
+classify "$SCANCEL_OUT"
 echo "[scancel-retry] retrying with sudo -n"
-sudo -n scancel --signal=KILL --full ${job.slurmJobId} 2>&1
+SUDO_OUT=$(sudo -n scancel --signal=KILL --full ${job.slurmJobId} 2>&1)
 SUDO_RC=$?
-if [ $SUDO_RC -eq 0 ]; then
+echo "$SUDO_OUT"
+if [ $SUDO_RC -eq 0 ] && ! echo "$SUDO_OUT" | grep -q "Kill job error"; then
   echo "[scancel-ok] job ${job.slurmJobId} cancelled via sudo"
   exit 0
 fi
+classify "$SUDO_OUT"
 echo "[scancel-fail] scancel rc=$SCANCEL_RC sudo rc=$SUDO_RC"
 exit 2
 `.trim(),
@@ -224,7 +238,12 @@ exit 2
             if (l.includes("[scancel-ok]")) cancelOk = true;
             onLog(`[scancel] ${l}`);
           },
-          onComplete: (success) => { if (success) cancelOk = true; resolve(); },
+          // Do NOT treat ssh `success` as "cancel succeeded". Under bastion
+          // mode, sshExecScript reports success as soon as the END marker
+          // comes back from the outer shell, even when the inner script's
+          // `exit 2` said scancel failed. The only reliable signal is the
+          // `[scancel-ok]` line we emit explicitly on a clean cancel.
+          onComplete: () => resolve(),
         },
       );
     });

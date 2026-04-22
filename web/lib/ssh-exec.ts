@@ -11,6 +11,7 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { prisma } from "./prisma";
+import { getMux, muxArgs, muxEnabled } from "./ssh-mux";
 
 interface SshTarget {
   host: string;
@@ -127,11 +128,16 @@ export function sshExec(
   command: string,
   callbacks: SshExecCallbacks,
 ): { proc: ChildProcess; cleanup: () => void } {
-  const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
-  const keyPath = join(tmpDir, "ssh_key");
+  const useMux = muxEnabled() && !target.bastion;
+  const mux = useMux ? getMux(target) : null;
+  const tmpDir = mux ? mux.tmpDir : mkdtempSync(join(tmpdir(), "aura-ssh-"));
+  const keyPath = mux ? mux.keyPath : join(tmpDir, "ssh_key");
+  const ownTmpDir = !mux;
 
-  writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
-  chmodSync(keyPath, 0o600);
+  if (!mux) {
+    writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+  }
 
   let seq = 0;
 
@@ -143,6 +149,7 @@ export function sshExec(
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=15",
     "-o", "BatchMode=yes",
+    ...(mux ? muxArgs(mux) : []),
     ...buildJumpArgs(target, tmpDir, keyPath),
     `${target.user}@${target.host}`,
     command,
@@ -166,17 +173,19 @@ export function sshExec(
 
   proc.on("close", (code) => {
     callbacks.onComplete(code === 0, { exitCode: code });
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   proc.on("error", (err) => {
     callbacks.onComplete(false, { error: err.message });
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   const cleanup = () => {
     try { proc.kill(); } catch {}
-    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    if (ownTmpDir) {
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
   };
 
   return { proc, cleanup };
@@ -192,11 +201,16 @@ export function sshExecSimple(
   command: string,
 ): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve) => {
-    const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
-    const keyPath = join(tmpDir, "ssh_key");
+    const useMux = muxEnabled() && !target.bastion;
+    const mux = useMux ? getMux(target) : null;
+    const tmpDir = mux ? mux.tmpDir : mkdtempSync(join(tmpdir(), "aura-ssh-"));
+    const keyPath = mux ? mux.keyPath : join(tmpDir, "ssh_key");
+    const ownTmpDir = !mux;
 
-    writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
-    chmodSync(keyPath, 0o600);
+    if (!mux) {
+      writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+      chmodSync(keyPath, 0o600);
+    }
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
@@ -284,6 +298,7 @@ export function sshExecSimple(
       "-o", "LogLevel=ERROR",
       "-o", "ConnectTimeout=15",
       "-o", "BatchMode=yes",
+      ...(mux ? muxArgs(mux) : []),
       ...buildJumpArgs(target, tmpDir, keyPath),
       `${target.user}@${target.host}`,
       command,
@@ -295,7 +310,7 @@ export function sshExecSimple(
     proc.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
 
     proc.on("close", (code) => {
-      rmSync(tmpDir, { recursive: true, force: true });
+      if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
       resolve({
         success: code === 0,
         stdout: stdoutChunks.join(""),
@@ -305,7 +320,7 @@ export function sshExecSimple(
     });
 
     proc.on("error", (err) => {
-      rmSync(tmpDir, { recursive: true, force: true });
+      if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
       resolve({
         success: false,
         stdout: "",
@@ -326,11 +341,19 @@ export function sshExecScript(
   script: string,
   callbacks: SshExecCallbacks,
 ): { proc: ChildProcess; cleanup: () => void } {
-  const tmpDir = mkdtempSync(join(tmpdir(), "aura-ssh-"));
-  const keyPath = join(tmpDir, "ssh_key");
+  // Multiplex only for non-bastion paths. Bastion mode uses -tt with a shared
+  // interactive shell; layering ControlMaster on top adds risk we don't need
+  // here and the slowness in bastion mode is elsewhere (stdin throttling).
+  const useMux = muxEnabled() && !target.bastion;
+  const mux = useMux ? getMux(target) : null;
+  const tmpDir = mux ? mux.tmpDir : mkdtempSync(join(tmpdir(), "aura-ssh-"));
+  const keyPath = mux ? mux.keyPath : join(tmpDir, "ssh_key");
+  const ownTmpDir = !mux; // whether this call is responsible for rm'ing it
 
-  writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
-  chmodSync(keyPath, 0o600);
+  if (!mux) {
+    writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
+    chmodSync(keyPath, 0o600);
+  }
 
   let seq = 0;
   // Bastion mode sandwich — only forward output lines between these markers
@@ -380,6 +403,10 @@ export function sshExecScript(
     sshArgs.push("-tt");
   } else {
     sshArgs.push("-o", "BatchMode=yes");
+  }
+
+  if (mux) {
+    for (const a of muxArgs(mux)) sshArgs.push(a);
   }
 
   // ProxyJump hop (if configured on the cluster). Pushed *before* the
@@ -554,7 +581,7 @@ export function sshExecScript(
       : bastionScriptSucceeded ? true
       : (code === 0 && !timedOut);
     callbacks.onComplete(success, { exitCode: code, timedOut });
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   proc.on("error", (err) => {
@@ -562,13 +589,15 @@ export function sshExecScript(
     completed = true;
     clearTimeout(timer);
     callbacks.onComplete(false, { error: err.message });
-    rmSync(tmpDir, { recursive: true, force: true });
+    if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   const cleanup = () => {
     clearTimeout(timer);
     try { proc.kill(); } catch {}
-    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    if (ownTmpDir) {
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }
   };
 
   return { proc, cleanup };

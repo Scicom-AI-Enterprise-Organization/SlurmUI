@@ -101,8 +101,16 @@ for NODE in $EXPANDED; do
     SU="${defaultUser}"; SI="$NODE"; SP="22"
   fi
   echo "__SSH_TARGET__=$SU@$SI:$SP"
-  timeout 8 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \\
-    -p "$SP" "$SU@$SI" "bash -s" << 'REMOTE_EOF' 2>&1
+  # Capture outer-ssh stderr separately so we can surface exact reason
+  # (permission denied / timeout / host key) when the inner command never
+  # gets to run. The inner heredoc's own stdout/stderr is caught via the
+  # tee+2>&1 below.
+  SSH_ERR_FILE=$(mktemp /tmp/.aura-usage-ssherr.XXXXXX)
+  # NOTE: no -n here. ssh -n redirects stdin from /dev/null, which would
+  # silently discard the REMOTE_EOF heredoc and make bash -s exit with rc=0
+  # and zero output — identical to a "no job pids, 0 mem, unreachable" row.
+  timeout 8 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \\
+    -p "$SP" "$SU@$SI" "bash -s" 2> "$SSH_ERR_FILE" << 'REMOTE_EOF'
 set +e
 JOBID=__JOBID_PLACEHOLDER__
 # Collect pids for this job (cgroup-scoped via slurm). Fallback to scanning /proc.
@@ -138,6 +146,24 @@ fi
 echo "__GPU_END__"
 REMOTE_EOF
   RC=$?
+  # Always emit the stderr block when the ssh failed, even if empty — lets
+  # the caller distinguish "ssh printed nothing" from "we didn't capture
+  # the file at all". rc=124 usually means the timeout binary killed a hung connect.
+  if [ $RC -ne 0 ]; then
+    echo "__SSH_STDERR_START__"
+    if [ -s "$SSH_ERR_FILE" ]; then
+      head -c 2000 "$SSH_ERR_FILE"
+      echo ""
+    else
+      case "$RC" in
+        124) echo "ssh timed out after 8s connecting to $SU@$SI:$SP (no stderr captured — usually means unreachable host, firewall drop, or wrong IP)";;
+        255) echo "ssh returned 255 with no stderr (connection closed by peer before banner; check whether sshd is up on $SI:$SP)";;
+        *)   echo "ssh exited with rc=$RC (no stderr captured)";;
+      esac
+    fi
+    echo "__SSH_STDERR_END__"
+  fi
+  rm -f "$SSH_ERR_FILE"
   echo "__NODE_RC__=$RC"
 done
 echo "__AURA_USAGE_END__"
@@ -218,7 +244,23 @@ echo "__AURA_USAGE_END__"
     }
 
     const sshTarget = /__SSH_TARGET__=([^\n]+)/.exec(rest)?.[1]?.trim();
-    const error = reachable ? undefined : `SSH to ${sshTarget ?? hostname} failed: ${rest.replace(/__SSH_TARGET__=[^\n]+\n?/, "").split("__NODE_RC__")[0].trim().slice(0, 400)}`;
+    const nodeRc = /__NODE_RC__=(-?\d+)/.exec(rest)?.[1] ?? "?";
+    // Prefer the dedicated outer-ssh stderr block — that's where "Permission
+    // denied (publickey)" / "Connection timed out" / "Host key verification"
+    // land. Falls back to the raw rest block if the marker isn't present.
+    const sshStderr = rest.split("__SSH_STDERR_START__")[1]?.split("__SSH_STDERR_END__")[0]?.trim() ?? "";
+    const fallbackBody = rest
+      .replace(/__SSH_TARGET__=[^\n]+\n?/, "")
+      .replace(/__SSH_STDERR_START__[\s\S]*?__SSH_STDERR_END__\n?/, "")
+      .replace(/__NODE_RC__=[^\n]+\n?/, "")
+      .trim();
+    // When we truly have nothing, dump the entire raw block — no info is
+    // worse than showing control markers. Capped so the card stays readable.
+    const rawDump = rest.trim();
+    const detail = sshStderr
+      || fallbackBody
+      || `rc=${nodeRc}, nothing on stdout/stderr. Raw block:\n${rawDump.slice(0, 800)}`;
+    const error = reachable ? undefined : `SSH to ${sshTarget ?? hostname} (rc=${nodeRc}): ${detail.slice(0, 900)}`;
 
     nodes.push({
       hostname,

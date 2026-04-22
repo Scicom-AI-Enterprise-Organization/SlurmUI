@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
@@ -22,6 +22,14 @@ import { toast } from "sonner";
 import { XCircle, RefreshCw, RotateCw, Repeat2 } from "lucide-react";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "0 B";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 interface JobDetail {
   id: string;
   slurmJobId: number | null;
@@ -38,16 +46,49 @@ interface JobDetail {
   user?: { email: string; name: string | null; unixUsername: string | null };
 }
 
+const TAB_VALUES = ["output", "stderr", "usage", "info"] as const;
+type TabValue = (typeof TAB_VALUES)[number];
+
 export default function JobDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const clusterId = params.id as string;
   const jobId = params.jobId as string;
+
+  // Tab state is URL-synced via ?tab=… so the URL is shareable / reloadable.
+  // Invalid or missing values default to "output".
+  const urlTab = searchParams.get("tab");
+  const initialTab: TabValue =
+    TAB_VALUES.includes(urlTab as TabValue) ? (urlTab as TabValue) : "output";
+  const [tab, setTab] = useState<TabValue>(initialTab);
+  const changeTab = (v: string) => {
+    if (!TAB_VALUES.includes(v as TabValue)) return;
+    setTab(v as TabValue);
+    if (typeof window === "undefined") return;
+    // Use history.replaceState directly instead of router.replace — Next's
+    // App Router treats router.replace as a soft nav that refetches server
+    // components, which in this nested layout was silently dropping the
+    // query change. window.history works unconditionally and doesn't cost
+    // a server round-trip.
+    const qs = new URLSearchParams(window.location.search);
+    if (v === "output") qs.delete("tab"); else qs.set("tab", v);
+    const q = qs.toString();
+    const url = q ? `${window.location.pathname}?${q}` : window.location.pathname;
+    window.history.replaceState(window.history.state, "", url);
+  };
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   const [fetchedOutput, setFetchedOutput] = useState<string | null>(null);
   const [fetchingOutput, setFetchingOutput] = useState(false);
+  // Total file size on disk (0 when unknown, e.g. DB-cached response) and
+  // how many bytes of it the current `fetchedOutput` covers, counted from
+  // the END of the file (the initial fetch returns the tail). Used to drive
+  // the "Load earlier" button on logs longer than 5 MB.
+  const [outputSize, setOutputSize] = useState<number>(0);
+  const [outputTailOffset, setOutputTailOffset] = useState<number>(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelResult, setCancelResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [infoSections, setInfoSections] = useState<Record<string, string> | null>(null);
@@ -195,6 +236,22 @@ export default function JobDetailPage() {
     fetchJob();
   }, [clusterId, jobId]);
 
+  // Kick off the lazy fetches when landing on /…?tab=info or ?tab=stderr
+  // directly — otherwise the tab renders empty until the user clicks it.
+  useEffect(() => {
+    if (tab === "info" && !infoSections && !infoLoading) fetchInfo();
+    if (tab === "stderr" && stderrBody === null && !stderrLoading) fetchStderr();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  // If the URL asked for ?tab=usage but the job isn't running, fall back
+  // silently to the output tab so the user isn't stuck on an empty panel.
+  useEffect(() => {
+    if (!job) return;
+    if (tab === "usage" && job.status !== "RUNNING") changeTab("output");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status]);
+
   // Auto-refresh while the job is in flight. 5s is tight enough that the UI
   // updates "right after" termination without hammering the API.
   useEffect(() => {
@@ -208,14 +265,81 @@ export default function JobDetailPage() {
   useEffect(() => {
     if (!job) return;
     const terminal = job.status === "COMPLETED" || job.status === "FAILED" || job.status === "CANCELLED";
-    if (!terminal || job.output || fetchedOutput !== null || fetchingOutput) return;
+    // Always fetch — even if job.output is cached — so we get the real
+    // on-disk size and can surface truncation / "load earlier" affordances.
+    if (!terminal || fetchedOutput !== null || fetchingOutput) return;
     setFetchingOutput(true);
     fetch(`/api/clusters/${clusterId}/jobs/${jobId}/output`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((d) => setFetchedOutput(d.output ?? ""))
+      .then((d) => {
+        setFetchedOutput(d.output ?? "");
+        setOutputSize(Number(d.size ?? 0));
+        setOutputTailOffset(Number(d.offset ?? 0));
+      })
       .catch(() => setFetchedOutput(""))
       .finally(() => setFetchingOutput(false));
   }, [job, clusterId, jobId, fetchedOutput, fetchingOutput]);
+
+  // Pull the chunk immediately preceding what we already have. The server
+  // returns bytes [offset, offset+limit); we want [0, current tail offset).
+  const loadEarlier = async () => {
+    if (loadingMore || outputTailOffset <= 0) return;
+    setLoadingMore(true);
+    try {
+      const limit = outputTailOffset;
+      const res = await fetch(
+        `/api/clusters/${clusterId}/jobs/${jobId}/output?offset=0&limit=${limit}`,
+      );
+      if (!res.ok) return;
+      const d = await res.json();
+      const chunk: string = d.output ?? "";
+      setFetchedOutput((prev) => (chunk + (prev ?? "")));
+      setOutputTailOffset(0);
+      if (d.size) setOutputSize(Number(d.size));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // Re-fetch the tail from disk, bypassing any DB-cached value. Useful when
+  // the file has grown (or was written post-completion) and the stored
+  // Job.output is shorter than what's on disk.
+  const refetchFromDisk = async () => {
+    if (fetchingOutput || loadingMore) return;
+    setFetchingOutput(true);
+    try {
+      // Using offset=0 with a default cap forces range mode → SSH + no DB cache.
+      const res = await fetch(
+        `/api/clusters/${clusterId}/jobs/${jobId}/output?offset=0&limit=5242880`,
+      );
+      if (!res.ok) return;
+      const d = await res.json();
+      const size = Number(d.size ?? 0);
+      const returned: string = d.output ?? "";
+      // If the file is larger than the 5 MB we just pulled, the chunk is the
+      // HEAD of the file — set tailOffset so "Load earlier" vanishes and a
+      // follow-up fetch of the tail would be an explicit user action. Simpler
+      // path: if file fits, show it as-is; otherwise pull the tail so it
+      // matches the usual "last 5 MB" presentation.
+      if (size > returned.length) {
+        const tailRes = await fetch(
+          `/api/clusters/${clusterId}/jobs/${jobId}/output?offset=${size - 5242880}&limit=5242880`,
+        );
+        if (tailRes.ok) {
+          const td = await tailRes.json();
+          setFetchedOutput(td.output ?? "");
+          setOutputSize(Number(td.size ?? size));
+          setOutputTailOffset(Number(td.offset ?? 0));
+          return;
+        }
+      }
+      setFetchedOutput(returned);
+      setOutputSize(size);
+      setOutputTailOffset(0);
+    } finally {
+      setFetchingOutput(false);
+    }
+  };
 
   const handleCancel = async () => {
     setConfirmCancel(false);
@@ -345,7 +469,8 @@ export default function JobDetailPage() {
 
       <Separator />
 
-      <Tabs defaultValue="output" onValueChange={(v) => {
+      <Tabs value={tab} onValueChange={(v) => {
+        changeTab(v);
         if (v === "info" && !infoSections && !infoLoading) fetchInfo();
         if (v === "stderr" && stderrBody === null && !stderrLoading) fetchStderr();
       }}>
@@ -361,14 +486,53 @@ export default function JobDetailPage() {
             <LiveOutput clusterId={clusterId} jobId={jobId} isRunning={true} />
           ) : (
             <div className="space-y-2">
-              <h3 className="font-medium">Output</h3>
+              <div className="flex items-center justify-between">
+                <h3 className="font-medium">Output</h3>
+                <div className="flex items-center gap-2">
+                  {outputSize > 0 && fetchedOutput !== null && (
+                    <span className="text-xs text-muted-foreground">
+                      {fmtBytes(fetchedOutput.length)} of {fmtBytes(outputSize)}
+                      {outputTailOffset > 0 && ` — ${fmtBytes(outputTailOffset)} earlier not shown`}
+                    </span>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={refetchFromDisk}
+                    disabled={fetchingOutput || loadingMore}
+                    title="Re-read from disk, bypassing the stored snapshot"
+                  >
+                    <RefreshCw className={`mr-2 h-3 w-3 ${fetchingOutput ? "animate-spin" : ""}`} />
+                    Refresh from disk
+                  </Button>
+                </div>
+              </div>
               <ScrollArea className="h-96 rounded-md border bg-black p-4">
-                {job.output ? (
-                  <pre className="font-mono text-xs text-green-400">{job.output}</pre>
-                ) : fetchingOutput ? (
+                {fetchingOutput && fetchedOutput === null ? (
                   <p className="font-mono text-xs text-gray-500">Loading output from cluster...</p>
-                ) : fetchedOutput ? (
-                  <pre className="font-mono text-xs text-green-400">{fetchedOutput}</pre>
+                ) : fetchedOutput !== null ? (
+                  <>
+                    {outputTailOffset > 0 && (
+                      <div className="mb-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={loadEarlier}
+                          disabled={loadingMore}
+                          className="text-xs"
+                        >
+                          {loadingMore ? "Loading..." : `Load earlier (${fmtBytes(outputTailOffset)})`}
+                        </Button>
+                      </div>
+                    )}
+                    {fetchedOutput ? (
+                      <pre className="font-mono text-xs text-green-400">{fetchedOutput}</pre>
+                    ) : (
+                      <p className="font-mono text-xs text-gray-500">No output captured.</p>
+                    )}
+                  </>
+                ) : job.output ? (
+                  <pre className="font-mono text-xs text-green-400">{job.output}</pre>
                 ) : (
                   <p className="font-mono text-xs text-gray-500">No output captured.</p>
                 )}
