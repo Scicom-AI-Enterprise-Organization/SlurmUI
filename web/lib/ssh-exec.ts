@@ -436,13 +436,26 @@ export function sshExecScript(
       ``,
     ].join("\n");
 
-    // Write immediately — Node buffers on our side and streams bytes to the
-    // PTY as the remote shell drains them, so a pre-delay just adds 2s of
-    // wall time on every bastion call for no benefit.
-    // Do NOT close stdin here — the remote PTY would see EOF before it has
-    // time to execute the script. We end stdin when we see the END marker
-    // come back through stdout (see maybeForward below).
-    proc.stdin.write(fullCmd);
+    // Throttle the stdin write: some bastion PTYs silently drop bytes when
+    // we push several KB of base64 into them in one shot, producing a
+    // truncated /tmp/.aura-run.sh and the classic "unexpected EOF while
+    // looking for matching `"'" parse error at random lines. Writing in
+    // small chunks with a brief gap lets the remote kernel tty buffer
+    // drain between pushes. ~256 bytes every 10ms = ~25 KB/s, plenty for
+    // our scripts.
+    // Do NOT close stdin here — the remote PTY would see EOF before it
+    // has time to execute the script.
+    const CHUNK = parseInt(process.env.AURA_BASTION_CHUNK_BYTES ?? "256", 10);
+    const GAP_MS = parseInt(process.env.AURA_BASTION_CHUNK_GAP_MS ?? "10", 10);
+    let offset = 0;
+    const pump = () => {
+      if (offset >= fullCmd.length || proc.exitCode !== null) return;
+      const end = Math.min(offset + CHUNK, fullCmd.length);
+      try { proc.stdin.write(fullCmd.slice(offset, end)); } catch { return; }
+      offset = end;
+      if (offset < fullCmd.length) setTimeout(pump, GAP_MS);
+    };
+    pump();
   } else {
     proc.stdin.write(script);
     proc.stdin.end();

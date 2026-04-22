@@ -44,6 +44,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
   const [logDialog, setLogDialog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
+  const [logAction, setLogAction] = useState<"install" | "remove">("install");
   const logRef = useRef<HTMLDivElement>(null);
 
   // Install status per package across nodes
@@ -89,7 +90,10 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId]);
 
-  const attachToTask = (taskId: string) => {
+  const attachToTask = (
+    taskId: string,
+    opts?: { onSuccess?: () => void; onFailure?: () => void },
+  ) => {
     setInstalling(true);
     setCurrentTaskId(taskId);
     setLogLines([]);
@@ -107,6 +111,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
           setInstalling(false);
           setCurrentTaskId(null);
           setCancelling(false);
+          opts?.onSuccess?.();
           fetchStatuses();
         } else if (task.status === "failed") {
           setLogStatus("failed");
@@ -114,6 +119,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
           setInstalling(false);
           setCurrentTaskId(null);
           setCancelling(false);
+          opts?.onFailure?.();
           fetchStatuses();
         }
       } catch {}
@@ -153,9 +159,42 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
   };
 
   const handleRemove = async (pkg: string) => {
-    const updated = packages.filter((p) => p !== pkg);
-    setPackages(updated);
-    await persistPackages(updated);
+    // No optimistic drop — we only remove the package from the list AFTER
+    // apt-get remove actually succeeds on every node. Previously we were
+    // clearing the chip up front; when the SSH script failed (e.g. bastion
+    // truncated script, network blip, half-removed package), the UI
+    // pretended the package was gone while it was still installed.
+    setLogAction("remove");
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/packages`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packages: [pkg] }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        setLogStatus("failed");
+        setLogLines([`[error] ${err.error ?? "Failed to start removal"}`]);
+        setLogDialog(true);
+        return;
+      }
+
+      const data = await res.json();
+      if (data.taskId) {
+        // attachToTask already polls the BackgroundTask and updates status.
+        // When it flips to "success" we'll re-fetch the package list from
+        // the server (the DELETE endpoint strips it from config on task
+        // success via the background handler, so this reflects truth).
+        attachToTask(data.taskId, { onSuccess: () => {
+          setPackages((prev) => prev.filter((p) => p !== pkg));
+        } });
+      }
+    } catch (e) {
+      setLogStatus("failed");
+      setLogLines([`[error] ${e instanceof Error ? e.message : "Network error"}`]);
+      setLogDialog(true);
+    }
   };
 
   const handleInstallAll = async () => {
@@ -165,6 +204,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
       return;
     }
     if (packages.length === 0) return;
+    setLogAction("install");
 
     try {
       const res = await fetch(`/api/clusters/${clusterId}/packages`, {
@@ -353,7 +393,7 @@ export function PackagesTab({ clusterId }: PackagesTabProps) {
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
-              Installing Packages
+              {logAction === "remove" ? "Removing Packages" : "Installing Packages"}
               <Badge className={
                 logStatus === "running" ? "bg-blue-100 text-blue-800" :
                 logStatus === "success" ? "bg-green-100 text-green-800" :

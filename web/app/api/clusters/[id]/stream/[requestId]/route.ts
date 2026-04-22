@@ -135,22 +135,34 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 // Stream a job's output by polling the DB. The actual tailing is done by a
 // detached background watcher (see lib/job-watcher.ts) so closing the tab
 // doesn't stop output capture. Sends only *new* lines since the last poll.
+//
+// Polls every 3 s — the watcher writes to `output` at roughly the same
+// cadence, so anything faster just hammers the DB without buying the user
+// new content. Bails early on client disconnect via stream.cancel() →
+// `disconnected` flag.
 function buildDbPollStream(jobId: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
+  const POLL_MS = Math.max(1000, parseInt(process.env.AURA_JOB_STREAM_POLL_MS ?? "3000", 10));
+
+  let disconnected = false;
 
   return new ReadableStream({
     async start(controller) {
       const send = (obj: object) => {
+        if (disconnected) return;
         try {
           controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
-        } catch {}
+        } catch {
+          // Any throw from enqueue means the client is gone.
+          disconnected = true;
+        }
       };
 
       let sent = 0; // count of lines already sent
       let seq = 0;
       const start = Date.now();
 
-      while (true) {
+      while (!disconnected) {
         const j = await prisma.job.findUnique({
           where: { id: jobId },
           select: { status: true, output: true, exitCode: true },
@@ -165,6 +177,7 @@ function buildDbPollStream(jobId: string): ReadableStream<Uint8Array> {
         const lines = j.output ? j.output.split("\n") : [];
         for (let i = sent; i < lines.length; i++) {
           send({ type: "stream", line: lines[i], seq: seq++ });
+          if (disconnected) return;
         }
         sent = lines.length;
 
@@ -186,8 +199,15 @@ function buildDbPollStream(jobId: string): ReadableStream<Uint8Array> {
           return;
         }
 
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, POLL_MS));
       }
+    },
+
+    // Flag-set when the browser closes the EventSource — the loop above
+    // checks on each iteration and exits immediately instead of polling
+    // until the job terminates.
+    cancel() {
+      disconnected = true;
     },
   });
 }

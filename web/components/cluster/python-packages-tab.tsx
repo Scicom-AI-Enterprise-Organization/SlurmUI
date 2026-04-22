@@ -80,6 +80,7 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
   const [logDialog, setLogDialog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
+  const [logAction, setLogAction] = useState<"install" | "uninstall">("install");
   const logRef = useRef<HTMLDivElement>(null);
 
   const fetchData = async () => {
@@ -102,7 +103,10 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
     setLoaded(true);
   };
 
-  const attachToTask = (taskId: string) => {
+  const attachToTask = (
+    taskId: string,
+    opts?: { onSuccess?: () => void },
+  ) => {
     setApplying(true);
     setCurrentTaskId(taskId);
     setLogLines([]);
@@ -120,6 +124,7 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
           setApplying(false);
           setCurrentTaskId(null);
           setCancelling(false);
+          opts?.onSuccess?.();
           fetchStatuses();
         } else if (t.status === "failed") {
           setLogStatus("failed");
@@ -319,9 +324,40 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
   };
 
   const handleRemove = async (name: string) => {
-    const updated = packages.filter((p) => p.name !== name);
-    setPackages(updated);
-    await persist(updated, venvLocation);
+    // Open the log dialog up front so the user sees *something* the moment
+    // they click, regardless of how fast the DELETE endpoint responds.
+    // We intentionally DO NOT drop the chip from the table here — that
+    // only happens in attachToTask's onSuccess, i.e. after `pip uninstall`
+    // actually ran on the cluster.
+    setLogAction("uninstall");
+    setLogLines([`[aura] Requesting uninstall of ${name}…`]);
+    setLogStatus("running");
+    setLogDialog(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/python-packages`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packages: [name] }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        setLogLines((prev) => [...prev, `[error] ${err.error ?? `HTTP ${res.status}`}`]);
+        setLogStatus("failed");
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!data.taskId) {
+        setLogLines((prev) => [...prev, `[error] Server did not return a taskId`]);
+        setLogStatus("failed");
+        return;
+      }
+      attachToTask(data.taskId, {
+        onSuccess: () => setPackages((prev) => prev.filter((p) => p.name !== name)),
+      });
+    } catch (e) {
+      setLogLines((prev) => [...prev, `[error] ${e instanceof Error ? e.message : "Network error"}`]);
+      setLogStatus("failed");
+    }
   };
 
   const handleLocationChange = async (value: string) => {
@@ -361,6 +397,7 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
       toast.error("Select a storage location for the venv");
       return;
     }
+    setLogAction("install");
 
     const res = await fetch(`/api/clusters/${clusterId}/python-packages/apply`, { method: "POST" });
     if (!res.ok) {
@@ -733,7 +770,7 @@ export function PythonPackagesTab({ clusterId }: PythonPackagesTabProps) {
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-between pr-8">
-              Installing Python Packages
+              {logAction === "uninstall" ? "Uninstalling Python Packages" : "Installing Python Packages"}
               <Badge className={
                 logStatus === "running" ? "bg-blue-100 text-blue-800" :
                 logStatus === "success" ? "bg-green-100 text-green-800" :
