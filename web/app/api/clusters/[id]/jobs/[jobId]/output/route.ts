@@ -74,6 +74,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 
   const remoteScript = `#!/bin/bash
 set +e
+# Emit the trace line on exit so the bastion-mode ssh layer closes the
+# session immediately instead of waiting on its 30s idle fallback. Every
+# poll would otherwise take 30+ seconds.
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 JOBID=${job.slurmJobId}
 RANGE_MODE=${rangeMode ? 1 : 0}
 OFFSET=${offset}
@@ -143,11 +147,28 @@ fi
 echo "__AURA_OUT_END__"
 `;
 
+  // Timing instrumentation — emits per-stage durations into the response
+  // so the UI can render a collapsible "debug" panel. Also console.log'd
+  // when AURA_OUTPUT_DEBUG=1 is set for server-side inspection.
+  const serverDebug = process.env.AURA_OUTPUT_DEBUG === "1";
+  const t0 = Date.now();
+  const marks: Array<{ stage: string; ms: number }> = [];
+  const mark = (stage: string) => {
+    const ms = Date.now() - t0;
+    marks.push({ stage, ms });
+    if (serverDebug) console.log(`[output job=${jobId.slice(0, 8)} slurm=${job.slurmJobId}] +${ms}ms ${stage}`);
+  };
+  mark(`begin (range=${rangeMode} off=${offset} lim=${limit} bastion=${!!target.bastion})`);
+
   const chunks: string[] = [];
+  let firstChunkAt: number | null = null;
   await new Promise<void>((resolve) => {
     sshExecScript(target, remoteScript, {
-      onStream: (line) => chunks.push(line),
-      onComplete: () => resolve(),
+      onStream: (line) => {
+        if (firstChunkAt === null) { firstChunkAt = Date.now() - t0; mark("first stdout line"); }
+        chunks.push(line);
+      },
+      onComplete: () => { mark("ssh complete"); resolve(); },
     });
   });
 
@@ -160,6 +181,7 @@ echo "__AURA_OUT_END__"
   const sizeMatch = full.match(/__AURA_SIZE__=(\d+)/);
   const size = sizeMatch ? Number.parseInt(sizeMatch[1], 10) : 0;
   const returned = Buffer.byteLength(output, "utf8");
+  mark(`parsed (size=${size} returned=${returned} chunks=${chunks.length} rawBytes=${Buffer.byteLength(full, "utf8")})`);
 
   // Only cache in the DB when we know we have the full file (legacy path,
   // and returned length covers the whole size). Range requests never cache
@@ -167,13 +189,16 @@ echo "__AURA_OUT_END__"
   const terminal = job.status === "COMPLETED" || job.status === "FAILED" || job.status === "CANCELLED";
   if (!rangeMode && output && terminal && size > 0 && returned >= size) {
     await prisma.job.update({ where: { id: jobId }, data: { output } }).catch(() => {});
+    mark("cached to db");
   }
 
+  mark("done");
   return NextResponse.json({
     output,
     source: "ssh",
     size,
     offset: rangeMode ? offset : Math.max(0, size - returned),
     returned,
+    debug: marks,
   });
 }

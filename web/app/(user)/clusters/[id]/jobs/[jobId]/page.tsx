@@ -89,6 +89,12 @@ export default function JobDetailPage() {
   const [outputSize, setOutputSize] = useState<number>(0);
   const [outputTailOffset, setOutputTailOffset] = useState<number>(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Per-stage timings from the last /output response. Rendered in a
+  // collapsible panel so users can see where time is spent when the log
+  // tab feels slow (usually bastion ssh handshake or a huge remote tail).
+  const [outputDebug, setOutputDebug] = useState<Array<{ stage: string; ms: number }>>([]);
+  const [outputDebugOpen, setOutputDebugOpen] = useState(false);
+  const [lastFetchMs, setLastFetchMs] = useState<number | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelResult, setCancelResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [infoSections, setInfoSections] = useState<Record<string, string> | null>(null);
@@ -269,12 +275,15 @@ export default function JobDetailPage() {
     // on-disk size and can surface truncation / "load earlier" affordances.
     if (!terminal || fetchedOutput !== null || fetchingOutput) return;
     setFetchingOutput(true);
+    const t0 = Date.now();
     fetch(`/api/clusters/${clusterId}/jobs/${jobId}/output`)
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((d) => {
         setFetchedOutput(d.output ?? "");
         setOutputSize(Number(d.size ?? 0));
         setOutputTailOffset(Number(d.offset ?? 0));
+        if (Array.isArray(d.debug)) setOutputDebug(d.debug);
+        setLastFetchMs(Date.now() - t0);
       })
       .catch(() => setFetchedOutput(""))
       .finally(() => setFetchingOutput(false));
@@ -285,6 +294,7 @@ export default function JobDetailPage() {
   const loadEarlier = async () => {
     if (loadingMore || outputTailOffset <= 0) return;
     setLoadingMore(true);
+    const t0 = Date.now();
     try {
       const limit = outputTailOffset;
       const res = await fetch(
@@ -296,6 +306,8 @@ export default function JobDetailPage() {
       setFetchedOutput((prev) => (chunk + (prev ?? "")));
       setOutputTailOffset(0);
       if (d.size) setOutputSize(Number(d.size));
+      if (Array.isArray(d.debug)) setOutputDebug(d.debug);
+      setLastFetchMs(Date.now() - t0);
     } finally {
       setLoadingMore(false);
     }
@@ -307,6 +319,7 @@ export default function JobDetailPage() {
   const refetchFromDisk = async () => {
     if (fetchingOutput || loadingMore) return;
     setFetchingOutput(true);
+    const t0 = Date.now();
     try {
       // Using offset=0 with a default cap forces range mode → SSH + no DB cache.
       const res = await fetch(
@@ -316,6 +329,7 @@ export default function JobDetailPage() {
       const d = await res.json();
       const size = Number(d.size ?? 0);
       const returned: string = d.output ?? "";
+      if (Array.isArray(d.debug)) setOutputDebug(d.debug);
       // If the file is larger than the 5 MB we just pulled, the chunk is the
       // HEAD of the file — set tailOffset so "Load earlier" vanishes and a
       // follow-up fetch of the tail would be an explicit user action. Simpler
@@ -330,11 +344,14 @@ export default function JobDetailPage() {
           setFetchedOutput(td.output ?? "");
           setOutputSize(Number(td.size ?? size));
           setOutputTailOffset(Number(td.offset ?? 0));
+          if (Array.isArray(td.debug)) setOutputDebug(td.debug);
+          setLastFetchMs(Date.now() - t0);
           return;
         }
       }
       setFetchedOutput(returned);
       setOutputSize(size);
+      setLastFetchMs(Date.now() - t0);
       setOutputTailOffset(0);
     } finally {
       setFetchingOutput(false);
@@ -537,6 +554,55 @@ export default function JobDetailPage() {
                   <p className="font-mono text-xs text-gray-500">No output captured.</p>
                 )}
               </ScrollArea>
+
+              {(outputDebug.length > 0 || lastFetchMs !== null) && (
+                <div className="rounded-md border bg-muted/40 text-xs">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between px-3 py-2 text-left font-mono hover:bg-muted"
+                    onClick={() => setOutputDebugOpen((o) => !o)}
+                  >
+                    <span>
+                      <span className="mr-2 text-muted-foreground">{outputDebugOpen ? "▾" : "▸"}</span>
+                      debug
+                      {lastFetchMs !== null && (
+                        <span className="ml-2 text-muted-foreground">
+                          (total {lastFetchMs} ms{outputDebug.length > 0 ? `, ${outputDebug.length} stages` : ""})
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                  {outputDebugOpen && (
+                    <div className="space-y-1 border-t px-3 py-2 font-mono">
+                      {outputDebug.map((m, i) => {
+                        const prev = i === 0 ? 0 : outputDebug[i - 1].ms;
+                        const delta = m.ms - prev;
+                        return (
+                          <div key={i} className="flex gap-3">
+                            <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">
+                              +{m.ms}ms
+                            </span>
+                            <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">
+                              Δ{delta}ms
+                            </span>
+                            <span className="text-foreground/80">{m.stage}</span>
+                          </div>
+                        );
+                      })}
+                      {lastFetchMs !== null && outputDebug.length > 0 && (
+                        <div className="flex gap-3 border-t pt-1 text-muted-foreground">
+                          <span className="w-14 shrink-0 text-right tabular-nums">
+                            {lastFetchMs}ms
+                          </span>
+                          <span>
+                            client round-trip (network + handler)
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </TabsContent>
