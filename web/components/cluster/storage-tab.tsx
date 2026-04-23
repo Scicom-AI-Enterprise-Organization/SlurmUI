@@ -135,9 +135,20 @@ export function StorageTab({ clusterId, initialMounts }: StorageTabProps) {
     }
   };
 
+  // `crypto.randomUUID` is only exposed in secure contexts (HTTPS / localhost).
+  // On plain-HTTP admin deployments the browser leaves it undefined, which
+  // 500'd the Add-Storage flow. Fallback builds a random-enough id without
+  // needing WebCrypto.
+  const genId = () => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `mnt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
   const handleAdd = async () => {
     const mount: StorageMount = {
-      id: crypto.randomUUID(),
+      id: genId(),
       type: newType,
       mountPath: newMountPath,
       ...(newType === "nfs" ? {

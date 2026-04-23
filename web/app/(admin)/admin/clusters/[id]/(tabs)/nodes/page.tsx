@@ -63,6 +63,7 @@ export default function NodesPage() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [clusterStatus, setClusterStatus] = useState<string>("");
+  const [clusterBastion, setClusterBastion] = useState<boolean>(false);
   const [clusterHealth, setClusterHealth] = useState<{
     lastProbeAt?: string;
     alive?: boolean;
@@ -255,6 +256,7 @@ export default function NodesPage() {
       .then((d) => {
         setClusterStatus(d.status ?? "");
         setClusterHealth((d.config?.health as typeof clusterHealth) ?? null);
+        setClusterBastion(!!d.sshBastion);
       })
       .catch(() => {});
   }, [clusterId]);
@@ -1268,6 +1270,14 @@ export default function NodesPage() {
       {clusterStatus === "PROVISIONING" && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">
           Cluster must be bootstrapped before adding nodes. Click the <strong>Bootstrap</strong> button above to set up the controller first.
+        </div>
+      )}
+      {clusterBastion && (
+        <div className="rounded-lg border border-sky-500/40 bg-sky-500/5 px-4 py-3 text-sm text-sky-700 dark:text-sky-400 space-y-1">
+          <div className="font-medium">Bastion cluster</div>
+          <div className="text-xs">
+            The controller node is auto-seeded during <strong>Bootstrap</strong> so slurmctld has a valid single-node partition on first start. You can safely <strong>delete</strong> it if you don&apos;t want to submit jobs against the bastion host itself — it&apos;s included by default, not required.
+          </div>
         </div>
       )}
       {clusterStatus === "OFFLINE" && (

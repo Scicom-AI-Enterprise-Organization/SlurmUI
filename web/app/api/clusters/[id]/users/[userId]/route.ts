@@ -121,6 +121,9 @@ NODE_EOF`;
 
     const script = `#!/bin/bash
 set +e
+# Trace line lets the bastion-mode ssh layer close the session as soon as
+# the script finishes, instead of waiting on the 30 s idle fallback.
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 
 echo "============================================"
 echo "  Deprovisioning user: ${username}"
