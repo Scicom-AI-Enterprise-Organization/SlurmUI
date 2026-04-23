@@ -141,8 +141,11 @@ class BastionSession {
     args.push(`${target.user}@${target.host}`);
 
     this.proc = spawn("ssh", args, { stdio: ["pipe", "pipe", "pipe"] });
-    this.proc.stdout.on("data", (c: Buffer) => this.onData(c.toString()));
-    this.proc.stderr.on("data", (c: Buffer) => this.onData(c.toString()));
+    // With stdio: ["pipe","pipe","pipe"] Node always hands us live streams,
+    // but the ChildProcess type marks them nullable because *other* stdio
+    // settings ("inherit", "ignore") null them out. Assert non-null.
+    this.proc.stdout!.on("data", (c: Buffer) => this.onData(c.toString()));
+    this.proc.stderr!.on("data", (c: Buffer) => this.onData(c.toString()));
     this.proc.on("close", () => this.onClose("ssh closed"));
     this.proc.on("error", (e) => this.onClose(`ssh error: ${e.message}`));
 
@@ -157,7 +160,7 @@ class BastionSession {
     // the per-call 1.5s in the legacy path because we only pay it once.
     setTimeout(() => {
       try {
-        this.proc.stdin.write(
+        this.proc.stdin!.write(
           `stty -echo 2>/dev/null; PS1='' PS2='' PROMPT_COMMAND=''; echo ${READY_MARKER}\n`,
         );
       } catch {}
@@ -290,7 +293,7 @@ class BastionSession {
     ].join("\n");
 
     try {
-      this.proc.stdin.write(cmd);
+      this.proc.stdin!.write(cmd);
     } catch (e) {
       this.finishCurrent(-1, false, e instanceof Error ? e.message : "stdin write failed");
       return;
