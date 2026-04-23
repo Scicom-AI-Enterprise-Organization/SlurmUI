@@ -12,6 +12,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { prisma } from "./prisma";
 import { getMux, muxArgs, muxEnabled } from "./ssh-mux";
+import { bastionMuxEnabled, getBastionSession } from "./ssh-bastion-mux";
 
 interface SshTarget {
   host: string;
@@ -84,6 +85,11 @@ function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: string): 
 interface SshExecCallbacks {
   onStream: (line: string, seq: number) => void;
   onComplete: (success: boolean, payload?: any) => void;
+  // Per-call override for the overall ssh watchdog (in milliseconds).
+  // Long-running admin flows (bootstrap, package install, node deploy)
+  // should set this well beyond the default 60s; that default is for
+  // short commands like squeue / sinfo / file reads.
+  timeoutMs?: number;
 }
 
 /**
@@ -216,9 +222,22 @@ export function sshExecSimple(
     const stderrChunks: string[] = [];
 
     if (target.bastion) {
-      // Bastion mode: use -tt and pipe commands via stdin with markers
+      // Bastion mode: use -tt and pipe commands via stdin with markers.
+      // Turn off PTY echo and bash prompts first so the input command and
+      // welcome MOTD don't leak into stdout — otherwise the marker parser
+      // returns a garbled raw blob (typed command text, `>` continuations,
+      // login banner) back to the caller.
       const marker = `__AURA_${Date.now()}__`;
-      const wrappedCmd = `echo ${marker}_START; ${command}; echo ${marker}_EXIT_$?; exit\n`;
+      const wrappedCmd = [
+        `stty -echo 2>/dev/null || true`,
+        `PS1='' PS2=''`,
+        `printf '%s\\n' ${marker}_START`,
+        command,
+        `__rc=$?`,
+        `printf '%s\\n' ${marker}_EXIT_$__rc`,
+        `exit $__rc`,
+        ``,
+      ].join("\n");
 
       const proc = spawn("ssh", [
         "-i", keyPath,
@@ -232,16 +251,30 @@ export function sshExecSimple(
         `${target.user}@${target.host}`,
       ], { stdio: ["pipe", "pipe", "pipe"] });
 
-      // Delay sending command to let the shell initialize
-      setTimeout(() => {
-        proc.stdin.write(wrappedCmd);
-        proc.stdin.end();
-      }, 1500);
+      // Write immediately — pipe buffers on our side until the remote shell
+      // drains it. Do NOT close stdin: under -tt the bastion PTY can see
+      // EOF before it has time to run `exit`, tearing down the channel with
+      // a signal instead of a clean 0.
+      proc.stdin.write(wrappedCmd);
 
-      proc.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk.toString()));
+      // Watch for EXIT_ marker in stdout — once it arrives the command has
+      // finished, so we can SIGKILL the ssh channel instead of waiting for
+      // the bastion's `exit` to tear it down (some bastions keep -tt PTYs
+      // open for seconds after remote exit).
+      const exitLineRe = new RegExp(`${marker}_EXIT_\\d+`);
+      let earlyClosed = false;
+      proc.stdout.on("data", (chunk: Buffer) => {
+        const s = chunk.toString();
+        stdoutChunks.push(s);
+        if (!earlyClosed && exitLineRe.test(s)) {
+          earlyClosed = true;
+          try { proc.stdin.end(); } catch {}
+          setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 200);
+        }
+      });
       proc.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
 
-      // Timeout after 30s
+      // Hard timeout after 30s
       const timeout = setTimeout(() => {
         proc.kill();
         rmSync(tmpDir, { recursive: true, force: true });
@@ -341,9 +374,38 @@ export function sshExecScript(
   script: string,
   callbacks: SshExecCallbacks,
 ): { proc: ChildProcess; cleanup: () => void } {
-  // Multiplex only for non-bastion paths. Bastion mode uses -tt with a shared
-  // interactive shell; layering ControlMaster on top adds risk we don't need
-  // here and the slowness in bastion mode is elsewhere (stdin throttling).
+  // Bastion multiplex path: reuse a long-lived `ssh -tt` shell and frame each
+  // script with start/end markers. Opt-in via AURA_BASTION_MUX=1. Handshake
+  // + warm-up cost is paid once per target instead of per call, which is the
+  // main bottleneck on polled endpoints (/jobs/:id/output every 5s).
+  if (target.bastion && bastionMuxEnabled()) {
+    const session = getBastionSession(target);
+    let seq = 0;
+    let cancelled = false;
+    session.enqueue({
+      script,
+      onStream: (line) => {
+        if (cancelled) return;
+        if (line) callbacks.onStream(line, seq++);
+      },
+      onComplete: (success, exitCode, error) => {
+        if (cancelled) return;
+        if (error) callbacks.onStream(`[stderr] ${error}`, seq++);
+        callbacks.onComplete(success, { exitCode });
+      },
+    });
+    // There is no per-call child process when multiplexing — the session
+    // owns the ssh proc. Return dummies so callers that stash `proc` /
+    // `cleanup` get a well-defined shape. `cleanup` flags the call as
+    // cancelled so late output is dropped; it does NOT tear down the
+    // shared session.
+    return {
+      proc: {} as ChildProcess,
+      cleanup: () => { cancelled = true; },
+    };
+  }
+
+  // Non-bastion ControlMaster path.
   const useMux = muxEnabled() && !target.bastion;
   const mux = useMux ? getMux(target) : null;
   const tmpDir = mux ? mux.tmpDir : mkdtempSync(join(tmpdir(), "aura-ssh-"));
@@ -555,7 +617,7 @@ export function sshExecScript(
   // dnsmasq blackhole) doesn't hang an API request forever. Long-running
   // tasks (bootstrap, package installs) own their own task system and don't
   // await this directly, so 60s is fine as a default for short commands.
-  const timeoutMs = parseInt(process.env.AURA_SSH_SCRIPT_TIMEOUT_MS ?? "60000", 10);
+  const timeoutMs = callbacks.timeoutMs ?? parseInt(process.env.AURA_SSH_SCRIPT_TIMEOUT_MS ?? "60000", 10);
   let timedOut = false;
   let completed = false;
   const timer = setTimeout(() => {

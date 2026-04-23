@@ -54,7 +54,32 @@ function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>)
   return `[slurm_controllers]\n${controllerLine}\n\n[slurm_workers]\n${workerLines}\n`;
 }
 
-function buildBootstrapScript(): string {
+function buildBootstrapScript(seed?: {
+  hostname: string;
+  cpus: number;
+  sockets: number;
+  cores: number;
+  threads: number;
+  memMb: number;
+  gpus: number;
+  ip: string;
+}): string {
+  // When a pre-probed node is supplied (bastion mode preflight), render the
+  // NodeName + PartitionName=main lines into slurm.conf so slurmctld starts
+  // with a valid single-node cluster on its first launch. Without this the
+  // controller ends up with an empty cluster and the user has to manually
+  // deploy itself as a node, which bastion mode can't easily do.
+  const nodeLines = seed
+    ? `\nGresTypes=gpu\n\n# --- auto-seeded by bootstrap preflight ---\nNodeName=${seed.hostname} NodeAddr=${seed.ip} CPUs=${seed.cpus} Sockets=${seed.sockets} CoresPerSocket=${seed.cores} ThreadsPerCore=${seed.threads} RealMemory=${seed.memMb}${seed.gpus > 0 ? ` Gres=gpu:${seed.gpus}` : ""} State=UNKNOWN\nPartitionName=main Default=YES Nodes=${seed.hostname} MaxTime=INFINITE State=UP\n`
+    : "\nGresTypes=gpu\n";
+  const gresConfBlock = seed && seed.gpus > 0
+    ? `
+# Render gres.conf for GPU-equipped controller (required when NodeName declares Gres=gpu:N).
+$S bash -c "cat > /etc/slurm/gres.conf << 'GRES_CONF'
+${Array.from({ length: seed.gpus }, (_, i) => `Name=gpu File=/dev/nvidia${i}`).join("\n")}
+GRES_CONF"
+`
+    : "";
   return `#!/bin/bash
 set -euo pipefail
 
@@ -141,14 +166,13 @@ SwitchType=switch/none
 TaskPlugin=task/none
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
-GresTypes=gpu
 SlurmctldLogFile=/var/log/slurm/slurmctld.log
-SlurmdLogFile=/var/log/slurm/slurmd.log
-SLURM_CONF"
+SlurmdLogFile=/var/log/slurm/slurmd.log${nodeLines}SLURM_CONF"
   echo "  Generated minimal slurm.conf"
 else
   echo "  slurm.conf already exists"
 fi
+${gresConfBlock}
 echo ""
 
 echo "[7/8] Starting Slurm services..."
@@ -185,7 +209,7 @@ async function finishTask(taskId: string, success: boolean) {
 }
 
 // Run bastion bootstrap in background
-function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
+async function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
   const target = {
     host: cluster.controllerHost,
     user: cluster.sshUser,
@@ -194,13 +218,39 @@ function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
     bastion: true,
   };
 
-  const script = buildBootstrapScript();
-
   appendLog(taskId, `[aura] Bootstrapping cluster: ${cluster.name} (bastion mode)`);
   appendLog(taskId, `[aura] Connecting to ${target.user}@${target.host}...`);
   appendLog(taskId, "");
 
+  // Pre-probe the controller so the generated slurm.conf already contains
+  // the NodeName + PartitionName=main lines on first start. In bastion mode
+  // there's no reachable second host to "seed-after" like the ansible path
+  // does, so we have to render the single-node cluster up front.
+  let seed;
+  try {
+    seed = await seedControllerAsNode({
+      clusterId,
+      taskId,
+      sshTarget: {
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: cluster.sshKey?.privateKey ?? "",
+        bastion: true,
+      },
+    });
+  } catch (e) {
+    await appendLog(taskId, `[aura] Pre-probe failed: ${e instanceof Error ? e.message : "unknown"} — continuing with empty slurm.conf`);
+  }
+
+  const script = buildBootstrapScript(seed);
+
   const handle = sshExecScript(target, script, {
+    // 30 minute watchdog — slurm install + mariadb setup + apt-get steps
+    // routinely take 5-10 minutes on fresh controllers; the default 60 s
+    // would SIGKILL the session mid-install. 30 min is comfortably above
+    // worst-case and well below "something's truly hung, give up".
+    timeoutMs: 30 * 60 * 1000,
     onStream: (line) => {
       const trimmed = line.replace(/\r/g, "").trim();
       if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
@@ -212,21 +262,9 @@ function runBastionBootstrap(taskId: string, clusterId: string, cluster: any) {
         await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "bastion" } });
-        try {
-          await seedControllerAsNode({
-            clusterId,
-            taskId,
-            sshTarget: {
-              host: cluster.controllerHost,
-              user: cluster.sshUser,
-              port: cluster.sshPort,
-              privateKey: cluster.sshKey?.privateKey ?? "",
-              bastion: cluster.sshBastion,
-            },
-          });
-        } catch (e) {
-          await appendLog(taskId, `[aura] Controller auto-seed skipped: ${e instanceof Error ? e.message : "unknown"}`);
-        }
+        // Note: seedControllerAsNode already ran as a preflight above,
+        // before the bootstrap script, so the DB + slurm.conf are already
+        // in sync. No second seed call needed here.
         try {
           await autoEnableAccounting({
             clusterId,
@@ -406,9 +444,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     data: { clusterId: id, type: "bootstrap" },
   });
 
-  // Start in background (don't await)
+  // Start in background (don't await). `runBastionBootstrap` is async now
+  // (awaits the preflight probe before kicking off the bootstrap script);
+  // fire-and-forget, but surface any synchronous throw to the task log.
   if (cluster.sshBastion) {
-    runBastionBootstrap(task.id, id, cluster);
+    runBastionBootstrap(task.id, id, cluster).catch(async (e) => {
+      await appendLog(task.id, `[aura] Bootstrap error: ${e instanceof Error ? e.message : "unknown"}`);
+      await finishTask(task.id, false);
+    });
   } else {
     runAnsibleBootstrap(task.id, id, cluster, config);
   }
@@ -482,7 +525,16 @@ echo "${MARKER}_END"
   const sockets = parseInt(kv.sockets, 10) || 1;
   const cores = parseInt(kv.cores_per_socket, 10) || cpus;
   const threads = parseInt(kv.threads_per_core, 10) || 1;
-  const memMb = parseInt(kv.memory_mb, 10) || 1024;
+  const rawMemMb = parseInt(kv.memory_mb, 10) || 1024;
+  // Subtract a small safety margin from MemTotal before writing it to
+  // slurm.conf. slurmd will later report `reported = MemTotal/1024` on
+  // registration, and slurmctld rejects with INVAL if reported < configured
+  // (default MemSpecLimit=100%). /proc/meminfo can drift a few MB between
+  // our probe and slurmd's registration because of kernel reclaim / slab.
+  // 1% or 256 MB (whichever is smaller) keeps the configured value safely
+  // under the realistic floor without wasting visible RAM on small VMs.
+  const memMargin = Math.max(64, Math.min(256, Math.floor(rawMemMb * 0.01)));
+  const memMb = Math.max(512, rawMemMb - memMargin);
   const gpus = parseInt(kv.gpus, 10) || 0;
 
   hosts.push({
@@ -520,6 +572,19 @@ echo "${MARKER}_END"
     taskId,
     `[aura] Controller auto-seeded as node "${hostname}": ${cpus} CPU / ${sockets}S${cores}C${threads}T / ${memMb} MB / ${gpus} GPU`,
   );
+
+  return { hostname, cpus, sockets, cores, threads, memMb, gpus, ip: sshTarget.host };
+}
+
+export interface BootstrapNodeSeed {
+  hostname: string;
+  cpus: number;
+  sockets: number;
+  cores: number;
+  threads: number;
+  memMb: number;
+  gpus: number;
+  ip: string;
 }
 
 // Enable slurmdbd accounting as the final step of bootstrap. Installs MariaDB
@@ -557,6 +622,9 @@ async function autoEnableAccounting(args: {
 
   const success: boolean = await new Promise((resolve) => {
     sshExecScript(sshTarget, script, {
+      // Same rationale as the main bootstrap call: slurmdbd enable can
+      // trigger apt installs + service restarts that easily exceed 60 s.
+      timeoutMs: 15 * 60 * 1000,
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {

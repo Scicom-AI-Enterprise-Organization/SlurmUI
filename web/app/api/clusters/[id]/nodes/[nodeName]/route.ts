@@ -290,6 +290,11 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     };
     const script = `#!/bin/bash
 set +e
+# Emit [trace] bash exiting (status=N) on exit so the bastion ssh layer
+# can tear down the session immediately when we're done, instead of
+# sitting on the 30 s idle fallback or 60 s watchdog. Saves ~30–60 s on
+# every Edit save over bastion.
+trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 S=""; if [ "$(id -u)" != "0" ]; then S="sudo"; fi
 # Remove any existing NodeName line for this node, then append the rebuilt
 # one. Ensures we don't end up with duplicates or a partial merge.
@@ -311,6 +316,10 @@ ${ip ? `$S scontrol update NodeName=${nodeName} State=RESUME 2>&1 | grep -v "Inv
 `;
     await new Promise<void>((resolve) => {
       sshExecScript(target, script, {
+        // 3-minute watchdog — slurmctld restart + slurmd restart can each
+        // stall for 30 s on a slow VM; the default 60 s was timing out
+        // mid-restart and reporting failure even on a clean edit.
+        timeoutMs: 3 * 60 * 1000,
         onStream: (line) => {
           const t = line.replace(/\r/g, "").trim();
           if (t && !t.startsWith("[stderr]")) output.push(t);

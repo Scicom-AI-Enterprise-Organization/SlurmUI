@@ -349,7 +349,7 @@ export default function NodesPage() {
       const res = await fetch(`/api/clusters/${clusterId}`);
       const c = await res.json();
       const cfg = (c.config ?? {}) as Record<string, unknown>;
-      const hosts = ((cfg.slurm_hosts_entries ?? []) as Array<{ hostname: string; ip?: string }>);
+      const hosts = ((cfg.slurm_hosts_entries ?? []) as Array<{ hostname: string; ip?: string; user?: string; port?: number }>);
       const slurmNodes = ((cfg.slurm_nodes ?? []) as Array<{
         expression?: string; name?: string; ip?: string; ssh_user?: string; ssh_port?: number;
         cpus?: number; gpus?: number; memory_mb?: number;
@@ -358,8 +358,12 @@ export default function NodesPage() {
       const h = hosts.find((x) => x.hostname === nodeName);
       const n = slurmNodes.find((x) => x.expression === nodeName || x.name === nodeName);
       const ip = h?.ip ?? n?.ip ?? "";
-      const sshUser = n?.ssh_user ?? c.sshUser ?? "ubuntu";
-      const sshPort = n?.ssh_port ?? c.sshPort ?? 22;
+      // Prefer the per-host entry in slurm_hosts_entries — that's where
+      // add-node writes `user` / `port`. slurm_nodes only carries
+      // `ssh_user` / `ssh_port` when a Deploy has run. Cluster defaults
+      // are the last resort.
+      const sshUser = h?.user ?? n?.ssh_user ?? c.sshUser ?? "ubuntu";
+      const sshPort = h?.port ?? n?.ssh_port ?? c.sshPort ?? 22;
       setEditTarget({ name: nodeName, ip, sshUser, sshPort });
       setEditIp(ip);
       setEditSshUser(sshUser);

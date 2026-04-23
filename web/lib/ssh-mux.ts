@@ -52,12 +52,19 @@ export function muxEnabled(): boolean {
   return process.env.AURA_SSH_MUX === "1";
 }
 
-const cache = new Map<string, MuxEntry>();
+interface MuxPool {
+  entries: MuxEntry[];
+  cursor: number;
+  lastUsed: number;
+}
+
+const pools = new Map<string, MuxPool>();
 const TTL_MS = parseInt(process.env.AURA_SSH_MUX_TTL_MS ?? "600000", 10);
 // Must be <= TTL so the master exits before we forget about it, but large
 // enough that a steady polling cadence (e.g. every 5s) never causes it to
 // reopen. 10 minutes matches the default TTL.
 const PERSIST_SEC = parseInt(process.env.AURA_SSH_MUX_PERSIST_SEC ?? "600", 10);
+const POOL_SIZE = Math.max(1, parseInt(process.env.AURA_SSH_MUX_POOL_SIZE ?? "1", 10));
 
 function targetKey(t: MuxTarget): string {
   const parts = [
@@ -71,19 +78,7 @@ function targetKey(t: MuxTarget): string {
   return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 20);
 }
 
-/**
- * Return a cached mux entry for this target, creating one on first use.
- * Callers must pass the returned `keyPath` as `-i` and `muxArgs(entry)` as
- * extra ssh options. Safe to call concurrently — the first caller wins the
- * cache slot; the second resolves to the same entry.
- */
-export function getMux(target: MuxTarget): MuxEntry {
-  const key = targetKey(target);
-  let e = cache.get(key);
-  if (e) {
-    e.lastUsed = Date.now();
-    return e;
-  }
+function createEntry(target: MuxTarget, slot: number): MuxEntry {
   const tmpDir = mkdtempSync(join(tmpdir(), "aura-sshmux-"));
   const keyPath = join(tmpDir, "ssh_key");
   writeFileSync(keyPath, target.privateKey, { mode: 0o600 });
@@ -95,10 +90,43 @@ export function getMux(target: MuxTarget): MuxEntry {
     chmodSync(jumpKeyPath, 0o600);
   }
   // Unix domain sockets have a path-length limit of ~108 bytes on Linux. Keep
-  // the socket filename short and colocated in our tmpDir (typically 40 chars).
-  const socketPath = join(tmpDir, "s");
-  e = { tmpDir, keyPath, jumpKeyPath, socketPath, lastUsed: Date.now() };
-  cache.set(key, e);
+  // the socket filename short and colocated in our tmpDir. The slot suffix
+  // ensures each pool entry has a distinct ControlPath — otherwise the
+  // second entry's spawn would just reuse the first master and we'd gain
+  // nothing from the pool.
+  const socketPath = join(tmpDir, `s${slot}`);
+  return { tmpDir, keyPath, jumpKeyPath, socketPath, lastUsed: Date.now() };
+}
+
+/**
+ * Return a pooled mux entry for this target. The pool round-robins across
+ * up to AURA_SSH_MUX_POOL_SIZE entries per target (lazily created), each
+ * backed by its own ControlMaster master connection.
+ *
+ * For ControlMaster alone, one master already handles many concurrent
+ * channels (sshd's MaxSessions, default 10). A pool buys you:
+ *   - headroom past MaxSessions for high-concurrency targets, and
+ *   - isolation — one wedged master doesn't stall every in-flight call.
+ */
+export function getMux(target: MuxTarget): MuxEntry {
+  const key = targetKey(target);
+  let pool = pools.get(key);
+  if (!pool) {
+    pool = { entries: [], cursor: 0, lastUsed: Date.now() };
+    pools.set(key, pool);
+  }
+  // Lazy-grow up to POOL_SIZE. Once at cap, round-robin through existing.
+  if (pool.entries.length < POOL_SIZE) {
+    const e = createEntry(target, pool.entries.length);
+    pool.entries.push(e);
+    pool.cursor = pool.entries.length - 1;
+    pool.lastUsed = Date.now();
+    return e;
+  }
+  const e = pool.entries[pool.cursor % pool.entries.length];
+  pool.cursor = (pool.cursor + 1) % pool.entries.length;
+  e.lastUsed = Date.now();
+  pool.lastUsed = Date.now();
   return e;
 }
 
@@ -112,16 +140,17 @@ export function muxArgs(entry: MuxEntry): string[] {
 }
 
 /**
- * Close and forget any mux entry for this target. Called on explicit teardown
- * (e.g. cluster key rotation). In steady state we rely on the TTL sweep +
- * OpenSSH's ControlPersist timer to clean up without manual intervention.
+ * Close and forget any mux entries for this target. Called on explicit
+ * teardown (e.g. cluster key rotation). In steady state we rely on the TTL
+ * sweep + OpenSSH's ControlPersist timer to clean up without manual
+ * intervention.
  */
 export function dropMux(target: MuxTarget): void {
   const key = targetKey(target);
-  const e = cache.get(key);
-  if (!e) return;
-  cache.delete(key);
-  teardownEntry(e);
+  const pool = pools.get(key);
+  if (!pool) return;
+  pools.delete(key);
+  for (const e of pool.entries) teardownEntry(e);
 }
 
 function teardownEntry(e: MuxEntry) {
@@ -137,14 +166,16 @@ function teardownEntry(e: MuxEntry) {
   try { rmSync(e.tmpDir, { recursive: true, force: true }); } catch {}
 }
 
-// Idle sweep. Runs every minute to evict entries idle beyond TTL.
+// Idle sweep. Runs every minute; when every entry in a pool has been idle
+// past TTL, tears them all down and drops the pool.
 if (muxEnabled()) {
   setInterval(() => {
     const now = Date.now();
-    for (const [k, e] of cache) {
-      if (now - e.lastUsed > TTL_MS) {
-        cache.delete(k);
-        teardownEntry(e);
+    for (const [k, pool] of pools) {
+      const allIdle = pool.entries.every((e) => now - e.lastUsed > TTL_MS);
+      if (allIdle && now - pool.lastUsed > TTL_MS) {
+        pools.delete(k);
+        for (const e of pool.entries) teardownEntry(e);
       }
     }
   }, 60_000).unref?.();

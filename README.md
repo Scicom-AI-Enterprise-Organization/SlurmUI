@@ -380,6 +380,15 @@ to push state back to nodes after restore.
 | `METRICS_TOKEN` | Bearer token for `/api/metrics` (empty = public) | empty |
 | `SLURMUI_HEALTH_INTERVAL_SEC` | Health-monitor poll interval (clamped to ≥ 15) | `60` |
 | `SLURMUI_STUCK_JOB_THRESHOLD_SEC` | Pending-job age before `job.stuck` fires for non-progress reasons | `600` |
+| `AURA_SSH_MUX` | Enable OpenSSH `ControlMaster` multiplexing for non-bastion clusters. Dramatically reduces latency on polled endpoints (e.g. `/jobs/:id/output`) by reusing one SSH connection per target instead of re-handshaking every call. `1` = on. | `0` |
+| `AURA_SSH_MUX_PERSIST_SEC` | How long the SSH master is kept alive after last use (OpenSSH `ControlPersist`). | `600` |
+| `AURA_SSH_MUX_TTL_MS` | Server-side cache eviction TTL for mux entries. Keep `≤ AURA_SSH_MUX_PERSIST_SEC * 1000`. | `600000` |
+| `AURA_SSH_MUX_POOL_SIZE` | Max ControlMaster masters per target; round-robin'd per call. One master already multiplexes many channels (`sshd` `MaxSessions`, default 10) — raise this when you exceed that cap or want to isolate a stuck master. | `1` |
+| `AURA_BASTION_MUX` | Keep one long-lived `ssh -tt` shell per bastion cluster and frame commands with markers — skips the per-call handshake and 1.5 s PTY bootstrap. Applies only when the cluster is in bastion mode. `1` = on. | `0` |
+| `AURA_BASTION_MUX_TTL_MS` | Idle TTL for a bastion session in ms. | `600000` |
+| `AURA_BASTION_MUX_READY_MS` | Warm-up deadline for a new bastion session in ms. | `30000` |
+| `AURA_BASTION_MUX_EXEC_MS` | Per-exec deadline in ms. A command exceeding this aborts and recycles the session. | `600000` |
+| `AURA_BASTION_MUX_POOL_SIZE` | Max parallel `ssh -tt` shells per bastion target. Each shell serves one command at a time; N of them run concurrently, new shells spawn lazily when existing ones are busy. | `5` |
 
 See `docker-compose.dev.yml` for the full working example.
 
