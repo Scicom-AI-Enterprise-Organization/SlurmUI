@@ -96,9 +96,17 @@ hot-reload; source changes in `agent/` need `docker compose restart agent`.
    your SSH host only allows interactive shells.
 2. Click **Bootstrap** on the cluster. The dialog streams the log as Slurm,
    munge, chrony, NFS, and a minimal `slurm.conf` are installed on the
-   controller.
-3. **Nodes → Add Node** for each worker. SlurmUI auto-detects CPUs / GPUs /
-   memory / topology via an SSH probe and writes a correct `NodeName=` line.
+   controller. In **bastion mode** the controller is auto-seeded as a node
+   before bootstrap runs, so `slurm.conf` boots with a valid single-node
+   `PartitionName=main` out of the gate — no extra step needed for a
+   single-host cluster. (The seeded node is visible on the Nodes tab with
+   a banner explaining it's safe to delete if you only want to submit
+   against workers.)
+3. **Nodes → Add Node** for each worker (skip this on a single-host bastion
+   cluster). SlurmUI auto-detects CPUs / GPUs / memory / topology via an
+   SSH probe and writes a correct `NodeName=` line. A small
+   `RealMemory` safety margin is baked in so slurmctld's floor check
+   never fails on MemTotal drift.
 4. **Partitions → Apply to Cluster**, then **Users → Add User** for yourself.
 5. Hit **Submit Job**, pick "Hello world", Submit.
 
@@ -168,12 +176,12 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 | Tab | What it does |
 |---|---|
 | **Configuration** | Raw `cluster.config` JSON editor with secrets masked (S3 keys, tokens — re-merged from DB on save). Slurm Accounting card toggles between `accounting_storage/none` and `slurmdbd + MariaDB`, plus one-click **FIFO priority** for scheduler-stuck queues. |
-| **SSH** | Manage the key that reaches the controller, test connectivity, bastion toggle. |
+| **SSH** | Manage the key that reaches the controller, test connectivity, bastion toggle. Bastion mode uses `-tt` PTYs with marker-framed commands; enable `AURA_BASTION_MUX` for a long-lived multiplexed shell per cluster to skip the per-call login + ~2 s PTY bootstrap. |
 | **Nodes** | Bootstrap, Add, Delete, Terminal, Logs, **Fix** (resume + kill stuck CG jobs + bounce slurmd), **Diagnose** (ping / TCP 6818 / slurmd status / chrony / recent slurmd logs), **Sync /etc/hosts** (distribute hostname→IP maps across the fleet and verify worker-to-worker connectivity). |
 | **Partitions** | Define named queues, assign nodes via checkboxes, Apply rewrites `PartitionName=` lines and restarts `slurmctld`. |
 | **Storages** | Attach NFS / S3fs mounts, Deploy to every worker, per-mount health column, Remove with confirmation. |
-| **Packages** | Apt packages installed cluster-wide; per-package per-node status column. |
-| **Python** | Shared or per-node venv managed by [`uv`](https://docs.astral.sh/uv/). Pick Python version and storage location. Per-package `--index-url` / `--extra-index-url`, plus a "paste a `pip install` command" parser. Version shown per installed package. |
+| **Packages** | Apt packages installed cluster-wide; per-package per-node status column. **Remove** runs `apt-get remove` + `autoremove` on every worker and only strips the entry from the stored config after the SSH script actually succeeds — no optimistic drift. Live log dialog on both Install and Remove. |
+| **Python** | Shared or per-node venv managed by [`uv`](https://docs.astral.sh/uv/). Pick Python version and storage location. Per-package `--index-url` / `--extra-index-url`, plus a "paste a `pip install` command" parser. Version shown per installed package. **Uninstall** runs `uv pip uninstall` (not `python -m pip` — uv-managed venvs have no bundled pip) on the shared venv or on each node in per-node mode; a node failure flips the task to `failed` and keeps the chip in the table. |
 | **Environment** | Cluster-wide env vars (optionally Secret) rendered into `/etc/profile.d/aura.sh` on every node. Status column confirms each key is present. |
 | **Users** | Two sub-tabs (URL-synced via `?tab=`). **Users** — live listing from the controller: `getent passwd` (uid ≥ 1000) joined with `sacctmgr show user`, deduped by uid so SSSD/LDAP aliases collapse, with a `presence` badge (`linux + slurm` / `linux` / `slurm`) and an `unmanaged` flag for anything not tracked by Aura. Provision / deprovision still creates the Linux account, NFS home, and Slurm accounting entry. **Account tree** — indent-collapse tree of the Slurm accounting hierarchy, parsed from `sacctmgr show associations`. Click a node to inspect: fairshare (with `% of siblings`), default QoS, GrpTRES, MaxJobs/MaxSubmit, parent. Full CRUD on accounts and per-user associations (`sacctmgr add/modify/delete account` + `add/modify/delete user`). Root is protected from deletion, and repeat `(user, partition)` association rows from `sacctmgr` are collapsed. |
 | **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue / terminate** buttons (via sudo `scontrol` / `scancel`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
@@ -183,7 +191,7 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 ### User-facing pages
 
 - **Dashboard** — last-24h running / completed / failed area chart + status donut; themed via CSS tokens so light/dark/brand switches are automatic.
-- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. Per-row **Restart** button on FAILED jobs runs `scontrol requeue`. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
+- **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. Per-row **Restart** button on FAILED jobs does a fresh `sbatch` of the stored script through a background task and opens a live log dialog — footer flips to a **Go to job `<id>`** deep-link once the new job row is created. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
 - **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
 - **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
 - **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
@@ -358,10 +366,10 @@ to push state back to nodes after restore.
 
 1. Web UI POSTs to an API route (e.g. `POST /api/clusters/[id]/packages`).
 2. Route creates a `BackgroundTask` row, returns `{ taskId }` immediately.
-3. A fire-and-forget IIFE kicks off `sshExecScript(target, script, { onStream, onComplete })` and registers the child process handle in an in-process cancel registry.
-4. `onStream` appends every log line to `BackgroundTask.logs`.
+3. A fire-and-forget IIFE kicks off `sshExecScript(target, script, { onStream, onComplete, timeoutMs })` and registers the child process handle in an in-process cancel registry. The `timeoutMs` override lets long admin flows (bootstrap, node deploy, package install) push past the 60 s default that's fine for short commands.
+4. `onStream` appends every log line to `BackgroundTask.logs` via a per-task serialized queue so writes don't race. Scripts emit a `[trace] bash exiting (status=N)` line on EXIT so the bastion ssh layer can close the channel immediately — without that trace, bastions routinely hold the `-tt` PTY open until the idle fallback fires.
 5. Client polls `/api/tasks/[taskId]` every 2s — dialog shows live logs even if you refresh / navigate away / re-open the tab.
-6. Cancel dispatches `POST /api/tasks/[taskId]/cancel`, which SIGTERMs (then SIGKILLs) the SSH process.
+6. Cancel dispatches `POST /api/tasks/[taskId]/cancel`, which SIGTERMs (then SIGKILLs) the SSH process and flips the task row to `failed` synchronously so the dialog doesn't sit in "Cancelling…" for minutes while `dpkg` drains.
 
 ---
 

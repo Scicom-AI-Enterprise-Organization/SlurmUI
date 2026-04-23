@@ -58,9 +58,29 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Install Ansible + SSH client for cluster bootstrap
-RUN apk add --no-cache openssl python3 py3-pip openssh-client git && \
+RUN apk add --no-cache openssl python3 py3-pip openssh-client git curl ca-certificates && \
     pip3 install --break-system-packages ansible-core==2.16.* && \
     rm -rf /root/.cache/pip
+
+# cloudflared — used to front the web tier with a Cloudflare Tunnel without
+# exposing a public LB. Pinned via ARG so CI can bump without editing this
+# file; `latest` resolves to Cloudflare's latest GA release.
+ARG CLOUDFLARED_VERSION=latest
+RUN set -eux; \
+    arch=$(uname -m); \
+    case "$arch" in \
+      x86_64)  asset=cloudflared-linux-amd64 ;; \
+      aarch64) asset=cloudflared-linux-arm64 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    if [ "$CLOUDFLARED_VERSION" = "latest" ]; then \
+      url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"; \
+    else \
+      url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/${asset}"; \
+    fi; \
+    curl -fsSL -o /usr/local/bin/cloudflared "$url"; \
+    chmod +x /usr/local/bin/cloudflared; \
+    cloudflared --version
 
 # System user for the app
 RUN addgroup --system --gid 1001 nodejs && \

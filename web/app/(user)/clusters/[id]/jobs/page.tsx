@@ -115,6 +115,10 @@ function ClusterResourcePanel({ clusterId }: { clusterId: string }) {
   const [data, setData] = useState<ClusterResources | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debug, setDebug] = useState<{ jobs: string; nodes: string; squeue: string; conf: string; fetchedAt: string } | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [debugErr, setDebugErr] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -131,11 +135,33 @@ function ClusterResourcePanel({ clusterId }: { clusterId: string }) {
     }
   };
 
+  const loadDebug = async () => {
+    setDebugLoading(true);
+    setDebugErr(null);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/alloc-debug`);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setDebug(d);
+    } catch (e) {
+      setDebugErr(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
   useEffect(() => {
     load();
     const i = setInterval(load, 30_000);
     return () => clearInterval(i);
   }, [clusterId]);
+
+  // First time the debug panel is expanded, fetch. Subsequent expansions
+  // reuse the last payload until the user hits Refresh.
+  useEffect(() => {
+    if (debugOpen && !debug && !debugLoading) loadDebug();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debugOpen]);
 
   return (
     <div className="rounded-md border p-4 space-y-3">
@@ -177,6 +203,69 @@ function ClusterResourcePanel({ clusterId }: { clusterId: string }) {
             getFree={(n) => (isLive(n.state) ? Math.max(0, n.gpuTotal - n.gpuUsed) : 0)}
             getTotal={(n) => n.gpuTotal}
           />
+        </div>
+      )}
+
+      {/* "Why is X allocated?" diagnostic — runs scontrol show job -dd,
+          scontrol show node, squeue with CPU column, and greps slurm.conf
+          for SelectType/Partition/NodeName. Cheap for small clusters,
+          collapsed by default to keep the panel tidy. */}
+      {data && (
+        <div className="rounded-md border bg-muted/30">
+          <button
+            type="button"
+            onClick={() => setDebugOpen((o) => !o)}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-mono hover:bg-muted"
+          >
+            <span>
+              <span className="mr-2 text-muted-foreground">{debugOpen ? "▾" : "▸"}</span>
+              Why is CPU / GPU / memory showing as allocated?
+            </span>
+            {debugOpen && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => { e.stopPropagation(); loadDebug(); }}
+                disabled={debugLoading}
+                className="h-6 px-2"
+              >
+                <RefreshCw className={`h-3 w-3 ${debugLoading ? "animate-spin" : ""}`} />
+              </Button>
+            )}
+          </button>
+          {debugOpen && (
+            <div className="space-y-3 border-t px-3 py-3 font-mono text-xs">
+              {debugErr && <p className="text-destructive">{debugErr}</p>}
+              {debugLoading && !debug && <p className="text-muted-foreground">Running scontrol / squeue on the controller…</p>}
+              {debug && (
+                <>
+                  <div className="text-muted-foreground">
+                    Fetched {new Date(debug.fetchedAt).toLocaleTimeString()}. Compare <code>AllocCPUs</code> / <code>AllocTRES</code> in the node dump with the <code>%C</code> column (CPUs) in squeue — if node &gt; sum(jobs), Slurm is rounding up to whole cores because of <code>CR_Core_Memory</code>.
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-muted-foreground">slurm.conf (SelectType / Partition / NodeName)</div>
+                    <pre className="max-h-40 overflow-auto rounded border bg-background p-2">{debug.conf || "(empty)"}</pre>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-muted-foreground">squeue — %C is CPUs per job</div>
+                    <pre className="max-h-40 overflow-auto rounded border bg-background p-2">{debug.squeue || "(no running / pending jobs)"}</pre>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-muted-foreground">scontrol show node — CPUAlloc, AllocTRES</div>
+                    <pre className="max-h-72 overflow-auto rounded border bg-background p-2">{debug.nodes || "(no nodes)"}</pre>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-muted-foreground">scontrol show job -dd — NumCPUs, MinCPUsNode, Gres</div>
+                    <pre className="max-h-72 overflow-auto rounded border bg-background p-2">{debug.jobs || "(no active jobs)"}</pre>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
