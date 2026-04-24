@@ -221,6 +221,39 @@ export function sshExecSimple(
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
 
+    // When AURA_BASTION_MUX=1, piggyback on the shared long-lived bastion
+    // shell instead of opening a fresh ssh -tt per call. Opening a second
+    // ssh to a bastion while the mux's pool is saturated (typical
+    // sshd MaxSessions=10) intermittently fails; the health probe then
+    // trips two consecutive failures and flips the cluster to OFFLINE.
+    if (target.bastion && bastionMuxEnabled()) {
+      const session = getBastionSession(target);
+      // Wrap the command in the same no-echo / markers dance the
+      // per-call path uses; the mux's session only needs unique per-
+      // request markers to demultiplex output, which it adds itself.
+      const script = `set +e
+${command}
+`;
+      const chunks: string[] = [];
+      let errMsg = "";
+      session.enqueue({
+        script,
+        onStream: (line) => chunks.push(line),
+        onComplete: (success, exitCode, error) => {
+          if (error) errMsg = error;
+          const stdout = chunks.join("\n") + (chunks.length ? "\n" : "");
+          if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
+          resolve({
+            success,
+            stdout,
+            stderr: errMsg,
+            exitCode,
+          });
+        },
+      });
+      return;
+    }
+
     if (target.bastion) {
       // Bastion mode: use -tt and pipe commands via stdin with markers.
       // Turn off PTY echo and bash prompts first so the input command and
