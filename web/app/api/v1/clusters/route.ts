@@ -16,11 +16,14 @@ export async function GET(req: NextRequest) {
   const user = await getApiUser(req);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // Prisma types `status` as the generated `ClusterUserStatus` enum, which
+  // is why plain "ACTIVE" strings fail the build. `as const` pins the
+  // literal; the enum's "ACTIVE" member accepts it.
   const where = user.role === "ADMIN"
     ? {}
     : {
         clusterUsers: {
-          some: { userId: user.id, status: "ACTIVE" },
+          some: { userId: user.id, status: "ACTIVE" as const },
         },
       };
 
