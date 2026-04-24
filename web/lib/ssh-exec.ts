@@ -382,6 +382,32 @@ export function sshExecScript(
     const session = getBastionSession(target);
     let seq = 0;
     let cancelled = false;
+    // There is no per-call child process when multiplexing — the session
+    // owns the ssh proc. Build a stub ChildProcess that exposes no-op
+    // `.on` / `.kill` so `registerRunningTask` (which attaches close/error
+    // listeners) and cancel-by-signal handlers don't blow up with
+    // "proc.on is not a function".
+    //
+    // We complete the stub by firing a synthetic "close" event in
+    // onComplete, so the task registry auto-unregisters this entry just
+    // like a real proc exit.
+    const listeners = new Map<string, Array<(...a: unknown[]) => void>>();
+    const stubProc = {
+      on(ev: string, cb: (...a: unknown[]) => void) {
+        const arr = listeners.get(ev) ?? [];
+        arr.push(cb);
+        listeners.set(ev, arr);
+        return this;
+      },
+      kill: () => { cancelled = true; },
+      exitCode: null as number | null,
+    } as unknown as ChildProcess;
+    const originalOnComplete = callbacks.onComplete;
+    callbacks.onComplete = (success, payload) => {
+      originalOnComplete(success, payload);
+      const cbs = listeners.get("close") ?? [];
+      for (const c of cbs) c(payload?.exitCode ?? (success ? 0 : 1));
+    };
     session.enqueue({
       script,
       onStream: (line) => {
@@ -394,13 +420,8 @@ export function sshExecScript(
         callbacks.onComplete(success, { exitCode });
       },
     });
-    // There is no per-call child process when multiplexing — the session
-    // owns the ssh proc. Return dummies so callers that stash `proc` /
-    // `cleanup` get a well-defined shape. `cleanup` flags the call as
-    // cancelled so late output is dropped; it does NOT tear down the
-    // shared session.
     return {
-      proc: {} as ChildProcess,
+      proc: stubProc,
       cleanup: () => { cancelled = true; },
     };
   }

@@ -167,9 +167,23 @@ TaskPlugin=task/none
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
 SlurmctldLogFile=/var/log/slurm/slurmctld.log
-SlurmdLogFile=/var/log/slurm/slurmd.log${nodeLines}SLURM_CONF"
+SlurmdLogFile=/var/log/slurm/slurmd.log
+# Keep the submitted batch script in slurmdbd so it's recoverable via
+# \`sacct -j <id> --json | jq .jobs[0].script\` or
+# \`scontrol write batch_script <id>\`. Useful when our own DB row was
+# created by an external sbatch (no UI / API) and thus has no script body.
+AccountingStoreFlags=job_script${nodeLines}SLURM_CONF"
   echo "  Generated minimal slurm.conf"
 else
+  # File already existed (re-bootstrap) — make sure the job-script flag is
+  # present so scripts from new submits land in slurmdbd.
+  if ! $S grep -q '^AccountingStoreFlags=.*job_script' /etc/slurm/slurm.conf; then
+    $S sed -i 's/^\(AccountingStoreFlags=.*\)$/\\1,job_script/' /etc/slurm/slurm.conf 2>/dev/null || true
+    if ! $S grep -q '^AccountingStoreFlags=' /etc/slurm/slurm.conf; then
+      echo "AccountingStoreFlags=job_script" | $S tee -a /etc/slurm/slurm.conf > /dev/null
+    fi
+    echo "  Appended AccountingStoreFlags=job_script to existing slurm.conf"
+  fi
   echo "  slurm.conf already exists"
 fi
 ${gresConfBlock}
