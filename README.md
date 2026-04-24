@@ -315,6 +315,59 @@ jobs/<cluster>/<date>/<id>.yaml
 into a new SlurmUI. Live clusters aren't touched; re-Apply each settings tab
 to push state back to nodes after restore.
 
+### Public API (`/api/v1`)
+
+Everything admins and users can do from the UI has a session-gated REST
+endpoint, but for programmatic use (CI pipelines, external schedulers,
+notebook scripts) there's a curated **`/api/v1`** surface that takes a
+Bearer token.
+
+- **Mint tokens** at **/profile/api-tokens** (copy-once dialog, prefix +
+  last-used are all that's persisted afterwards; revoke anytime).
+- **Docs + curl examples** at **/api-docs** (the same base URL as the
+  running UI; examples adapt to the page origin).
+- **Auth** — `Authorization: Bearer aura_<…>`. Session cookies also
+  work, so the same routes back your own UI integrations. VIEWER role
+  can list but not submit; non-admins see only their own jobs.
+
+Endpoints today:
+
+| Method | Path | What it does |
+|---|---|---|
+| `GET`  | `/api/v1/clusters` | List clusters the caller can see (id, name, mode, status, partitions, default partition, node count). |
+| `POST` | `/api/v1/clusters/:cluster/jobs` | Submit a job. Body `{script, partition?, name?}`. `:cluster` accepts name or UUID. Returns `{id, slurmJobId, status, …}` 201. |
+| `GET`  | `/api/v1/clusters/:cluster/jobs` | Paginated list with `status` / `partition` / `name` / `from` / `to` filters. |
+| `GET`  | `/api/v1/jobs/:id` | Job detail. `?output=1` tacks on the last 1 MB of stdout over SSH. |
+| `POST` | `/api/v1/jobs/:id/resync` | Re-query Slurm (`squeue` + `sacct`) and overwrite the DB row's status / exit code. Use this when the tail-based watcher missed a terminal transition (stuck `RUNNING` after bastion drop, output file on an unmounted path, etc.). |
+| `POST` | `/api/v1/jobs/:id/cancel` | `scancel --signal=KILL --full` on the controller, flips the DB row to `CANCELLED`. Safe to call on already-terminal jobs. |
+
+Data model is identical to the UI — tokens inherit the owner's role,
+submit audits are tagged with `via: "api/v1"`, and jobs submitted over
+the API show up alongside UI-submitted ones in the dashboard / Jobs
+list.
+
+Tests under `web/test/`, runnable with plain `node:test` — no extra deps:
+
+| File | Type | What it covers |
+|---|---|---|
+| `api-auth.unit.test.mjs` | Unit | `generateToken()` shape / prefix / URL-safe alphabet, `hashToken()` determinism + avalanche, 1000-iter uniqueness, no silent whitespace trimming. |
+| `api-v1.test.mjs` | Integration | End-to-end against a live SlurmUI: auth gates (401/403), `list clusters`, `list jobs`, `submit`, poll to terminal, `get job` with `?output=1`, plus filter enforcement. Uses a Gloo all-reduce script. |
+
+```bash
+# pure-logic unit tests (no server needed)
+node --test --test-reporter=spec web/test/api-auth.unit.test.mjs
+
+# full integration (real POST + SSH + slurm queue)
+export AURA_BASE=http://localhost:3000
+export AURA_TOKEN=aura_...                     # from /profile/api-tokens
+export AURA_CLUSTER=my-cluster                 # name or uuid
+node --test --test-reporter=spec web/test/api-v1.test.mjs
+```
+
+Route handlers get their coverage through the integration test — they
+`import` from `next/server`, which can't be loaded under a vanilla
+`node:test` process without a Next-aware runner.
+
 ### Observability
 
 - Prometheus scrape endpoint at `GET /api/metrics` (optional `METRICS_TOKEN`

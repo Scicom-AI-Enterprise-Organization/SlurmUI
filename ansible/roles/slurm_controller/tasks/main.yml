@@ -27,12 +27,57 @@
   # ships in a half-broken state (e.g. apparmor + missing libs on 24.04).
   when: vault_slurmdbd_storage_pass | default('') | length > 0
 
-- name: Enable and start MySQL
-  ansible.builtin.service:
-    name: mysql
-    state: started
-    enabled: true
+# Start MySQL inside a block so that if systemd refuses to bring the unit
+# up we can surface the actual error (journalctl + systemctl status +
+# mysqld error log) in the ansible log. Without this the caller only sees
+# systemd's generic "Job for mysql.service failed … see journalctl" line,
+# which is useless over SSH in our bootstrap UI.
+- name: Enable and start MySQL (with failure diagnostics)
   when: vault_slurmdbd_storage_pass | default('') | length > 0
+  block:
+    - name: Enable and start MySQL
+      ansible.builtin.service:
+        name: mysql
+        state: started
+        enabled: true
+  rescue:
+    - name: Capture mysql systemctl status
+      ansible.builtin.command: systemctl status mysql.service --no-pager -l
+      register: mysql_status
+      changed_when: false
+      failed_when: false
+    - name: Capture mysql journalctl (last 200 lines)
+      ansible.builtin.command: journalctl -u mysql.service --no-pager -n 200
+      register: mysql_journal
+      changed_when: false
+      failed_when: false
+    - name: Capture mysqld error log tail (if present)
+      ansible.builtin.shell: |
+        set +e
+        for f in /var/log/mysql/error.log /var/log/mysqld.log /var/log/mysql/mysql.err; do
+          if [ -f "$f" ]; then echo "---- $f ----"; tail -n 200 "$f"; fi
+        done
+      register: mysql_errlog
+      changed_when: false
+      failed_when: false
+    - name: Print mysql failure diagnostics
+      ansible.builtin.debug:
+        msg: |
+          mysql.service failed to start — diagnostics:
+
+          == systemctl status ==
+          {{ mysql_status.stdout | default('(no output)') }}
+          {{ mysql_status.stderr | default('') }}
+
+          == journalctl -u mysql.service (last 200) ==
+          {{ mysql_journal.stdout | default('(no output)') }}
+          {{ mysql_journal.stderr | default('') }}
+
+          == mysqld error logs ==
+          {{ mysql_errlog.stdout | default('(none)') }}
+    - name: Re-fail the play so the caller sees bootstrap as failed
+      ansible.builtin.fail:
+        msg: "mysql.service failed to start — see diagnostics above."
 
 - name: Create slurm accounting database
   community.mysql.mysql_db:

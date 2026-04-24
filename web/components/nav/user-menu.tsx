@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
-import { Sun, Moon, LogOut, User } from "lucide-react";
+import { Sun, Moon, LogOut, User, KeyRound, Code2 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -66,6 +66,18 @@ export function UserMenu() {
               <Link href="/profile">
                 <User className="h-4 w-4" />
                 Profile
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/profile/api-tokens">
+                <KeyRound className="h-4 w-4" />
+                API tokens
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/api-docs">
+                <Code2 className="h-4 w-4" />
+                API docs
               </Link>
             </DropdownMenuItem>
           </DropdownMenuGroup>

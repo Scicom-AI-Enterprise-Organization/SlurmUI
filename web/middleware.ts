@@ -56,6 +56,9 @@ export const config = {
      * - favicon.ico
      * - public files
      */
-    "/((?!_next/static|_next/image|favicon.ico|public|api/health|api/install|api/metrics|login|invite|reset|api/invites/by-token|api/password-reset/by-token).*)",
+    // Exclude /api/v1/* — those endpoints accept Bearer tokens (see
+    // lib/api-auth.ts) and do their own role checks, so the session-cookie
+    // gate below would wrongly 401 token-authenticated callers.
+    "/((?!_next/static|_next/image|favicon.ico|public|api/health|api/install|api/metrics|api/v1|login|invite|reset|api/invites/by-token|api/password-reset/by-token).*)",
   ],
 };

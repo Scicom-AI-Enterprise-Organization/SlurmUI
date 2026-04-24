@@ -119,7 +119,14 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
                 <JobStatusBadge status={job.status} />
               </TableCell>
               <TableCell>
-                {new Date(job.createdAt).toLocaleString()}
+                {/* Use suppressHydrationWarning — server renders in its own
+                    timezone (UTC) but the browser formats in the user's
+                    locale, which caused a hydration mismatch. The ISO
+                    string on the server side and the localized version on
+                    the client are semantically the same. */}
+                <span suppressHydrationWarning>
+                  {new Date(job.createdAt).toLocaleString()}
+                </span>
               </TableCell>
               <TableCell className="text-right">
                 <Button

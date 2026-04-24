@@ -147,6 +147,25 @@ model User {
   jobTemplates  JobTemplate[]
   invitesCreated Invite[]     @relation("InviteCreator")
   passwordResets PasswordResetToken[]
+  apiTokens      ApiToken[]
+}
+
+// Personal API token for the /api/v1 endpoints. The raw token is shown to
+// the user once at creation time (`aura_<32-bytes>`-ish); only the sha256
+// digest is stored, same pattern as GitHub PATs and our Invite table.
+model ApiToken {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String    // human label shown in /profile/api-tokens
+  tokenHash  String    @unique // sha256(rawToken)
+  prefix     String    // first 8 chars of the raw token, for the list UI
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  @@index([userId])
+  @@index([revokedAt])
 }
 
 model AppSession {
