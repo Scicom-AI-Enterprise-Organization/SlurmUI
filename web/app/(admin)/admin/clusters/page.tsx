@@ -3,6 +3,7 @@ import { ClusterCard } from "@/components/clusters/cluster-card";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus } from "lucide-react";
+import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 export default async function ClustersPage() {
   const clusters = await prisma.cluster.findMany({
@@ -11,6 +12,8 @@ export default async function ClustersPage() {
       name: true,
       controllerHost: true,
       status: true,
+      // Needed to derive the probe-based effective status below.
+      config: true,
       createdAt: true,
       _count: {
         select: { jobs: true },
@@ -51,7 +54,7 @@ export default async function ClustersPage() {
               id={cluster.id}
               name={cluster.name}
               controllerHost={cluster.controllerHost}
-              status={cluster.status as any}
+              status={effectiveClusterStatus(cluster) as any}
               jobCount={cluster._count.jobs}
               createdAt={cluster.createdAt.toISOString()}
             />

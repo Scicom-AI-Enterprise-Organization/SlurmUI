@@ -7,13 +7,19 @@ import { PagedJobs } from "@/components/jobs/paged-jobs";
 import { Separator } from "@/components/ui/separator";
 import Link from "next/link";
 import { Server } from "lucide-react";
+import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 export default async function JobsPage() {
   const session = await auth();
   if (!session?.user) redirect("/api/auth/signin");
 
-  const clusters = await prisma.cluster.findMany({
-    where: { status: { in: ["ACTIVE", "DEGRADED"] } },
+  // Pull all non-provisioning clusters, then filter by the probe-derived
+  // effective status. The DB's `status` column lags behind the probe, so a
+  // cluster that's actually alive can still be stamped OFFLINE in the
+  // column — those clusters would otherwise disappear from this page
+  // despite the status card calling them Active.
+  const all = await prisma.cluster.findMany({
+    where: { status: { not: "PROVISIONING" } },
     select: {
       id: true,
       name: true,
@@ -23,6 +29,9 @@ export default async function JobsPage() {
     },
     orderBy: { name: "asc" },
   });
+  const clusters = all
+    .map((c) => ({ ...c, status: effectiveClusterStatus(c) as typeof c.status }))
+    .filter((c) => c.status === "ACTIVE" || c.status === "DEGRADED");
 
   return (
     <div className="space-y-6">
