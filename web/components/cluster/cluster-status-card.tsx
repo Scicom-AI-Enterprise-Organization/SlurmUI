@@ -24,20 +24,25 @@ export function ClusterStatusCard({ clusterId, initialStatus, initialHealth }: P
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    // GET /api/clusters/[id] both serves fresh data AND kicks off the
-    // debounced probe. Poll every 15s so the probe's health write shows up
-    // without needing a full page navigation.
+    // GET /api/clusters/[id] serves the latest DB state AND asynchronously
+    // kicks off the debounced SSH liveness probe. The probe lands a few
+    // seconds later, so a single GET returns stale data. Poll periodically
+    // so the probe's write ("status flipped back to ACTIVE") shows up
+    // without the user having to hard-refresh several times.
+    let cancelled = false;
     const load = () =>
       fetch(`/api/clusters/${clusterId}`)
         .then((r) => r.json())
         .then((d) => {
+          if (cancelled) return;
           if (d?.status) setStatus(d.status);
           const h = (d?.config?.health as Health | undefined) ?? null;
           if (h) setHealth(h);
         })
         .catch(() => {});
-    // One-shot load. No polling — status refreshes only on full page reload.
     load();
+    const t = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(t); };
   }, [clusterId]);
 
   return (
@@ -48,7 +53,21 @@ export function ClusterStatusCard({ clusterId, initialStatus, initialHealth }: P
       </CardHeader>
       <CardContent className="space-y-2">
         <div className="flex items-center gap-2">
-          <ClusterStatusBadge status={status} />
+          {/* Derive the badge from the latest probe when we have one — the
+              DB's cluster.status is updated lazily and can lag behind the
+              probe result by a cycle. PROVISIONING always wins because it
+              means bootstrap is in flight (probe isn't authoritative). */}
+          <ClusterStatusBadge
+            status={
+              status === "PROVISIONING"
+                ? "PROVISIONING"
+                : health?.alive === true
+                ? "ACTIVE"
+                : health?.alive === false
+                ? "OFFLINE"
+                : status
+            }
+          />
           {health?.lastProbeAt && (
             <button
               type="button"

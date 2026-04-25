@@ -3,7 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
-import { probeClusterHealth } from "@/lib/cluster-health";
+import { probeClusterHealth, effectiveClusterStatus } from "@/lib/cluster-health";
 
 export async function GET() {
   const session = await auth();
@@ -17,6 +17,8 @@ export async function GET() {
       name: true,
       controllerHost: true,
       status: true,
+      // `config` carries the health blob the effective-status helper reads.
+      config: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { jobs: true } },
@@ -26,7 +28,13 @@ export async function GET() {
 
   for (const c of clusters) probeClusterHealth(c.id);
 
-  return NextResponse.json(clusters);
+  // Trust the probe's latest result over the stale DB status column.
+  const out = clusters.map(({ config, ...c }) => ({
+    ...c,
+    status: effectiveClusterStatus({ status: c.status, config }),
+  }));
+
+  return NextResponse.json(out);
 }
 
 export async function POST(req: NextRequest) {

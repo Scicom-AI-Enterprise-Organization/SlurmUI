@@ -3,7 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { redactConfig } from "@/lib/redact-config";
-import { probeClusterHealth } from "@/lib/cluster-health";
+import { probeClusterHealth, effectiveClusterStatus } from "@/lib/cluster-health";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -36,7 +36,13 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   probeClusterHealth(id);
 
   // Redact secret config values (S3 keys, passwords, etc.) before sending.
-  const redacted = { ...cluster, config: redactConfig(cluster.config) };
+  // Overwrite `status` with the probe-derived effective status so every
+  // client sees the same truth the status card shows.
+  const redacted = {
+    ...cluster,
+    status: effectiveClusterStatus(cluster),
+    config: redactConfig(cluster.config),
+  };
 
   // Only admins see install token fields
   if ((session.user as any).role !== "ADMIN") {

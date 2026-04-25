@@ -68,7 +68,13 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
 
   useEffect(() => {
     if (!autoScroll || !scrollRef.current) return;
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    // Only re-pin to the bottom when the user is already near the bottom.
+    // Without this, every 5s poll yanks the viewport down mid-read and the
+    // page appears to "blink". 80px tolerance covers line-level jitter.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (!nearBottom) return;
+    el.scrollTop = el.scrollHeight;
   }, [lines, earlier, autoScroll, maxDisplay]);
 
   // Poll the on-disk file and auto-backfill anything the SSE stream hasn't
@@ -95,7 +101,11 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
         const elapsed = Date.now() - t0;
         setFileSize(size);
         setPollStatus(`poll ok: source=${d.source} size=${size} returned=${disk.length} in ${elapsed}ms`);
-        setEarlier((prev) => (disk.length <= prev.length ? prev : disk));
+        // Skip the state update (and therefore the re-render + scroll hijack)
+        // when the disk snapshot is unchanged or strictly shorter than what
+        // we already have. This is the common case between polls: the file
+        // is quiet, but we were still flipping React back and forth.
+        setEarlier((prev) => (disk.length <= prev.length || disk === prev ? prev : disk));
         if (Array.isArray(d.debug)) setPollDebug(d.debug);
         setPollFetchMs(elapsed);
         // Keep a rolling history of the last 10 polls so the user can see

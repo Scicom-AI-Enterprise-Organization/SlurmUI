@@ -18,8 +18,14 @@ const SENSITIVE_KEY_HINTS = [
   "privatekey",
   "password",
   "passwd",
+  "passphrase",
+  // Catches snake_case secret fields ending in `_pass` — e.g. the Slurm
+  // accounting DB password we persist as `vault_slurmdbd_storage_pass`
+  // after an Enable-Accounting run.
+  "_pass",
   "token",
   "credential",
+  "apikey",
 ];
 
 function isSensitiveKey(key: string): boolean {
@@ -32,9 +38,16 @@ export function redactConfig<T>(value: T): T {
     return value.map(redactConfig) as unknown as T;
   }
   if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    // Pattern used by cluster.config.os_environment (and anywhere else that
+    // stores `{ key, value, secret }` entries): when `secret === true`, the
+    // `value` field is the thing to mask regardless of its field name.
+    const secretFlag = obj.secret === true;
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (isSensitiveKey(k) && typeof v === "string" && v.length > 0) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (secretFlag && k === "value" && typeof v === "string" && v.length > 0) {
+        out[k] = REDACTION_MASK;
+      } else if (isSensitiveKey(k) && typeof v === "string" && v.length > 0) {
         out[k] = REDACTION_MASK;
       } else {
         out[k] = redactConfig(v);
@@ -54,8 +67,11 @@ export function unredactConfig(incoming: unknown, stored: unknown): unknown {
   if (incoming && typeof incoming === "object" && stored && typeof stored === "object") {
     const out: Record<string, unknown> = {};
     const storedObj = stored as Record<string, unknown>;
+    const secretFlag = (incoming as Record<string, unknown>).secret === true;
     for (const [k, v] of Object.entries(incoming as Record<string, unknown>)) {
-      if (isSensitiveKey(k) && v === REDACTION_MASK) {
+      if (secretFlag && k === "value" && v === REDACTION_MASK) {
+        out[k] = storedObj[k] ?? "";
+      } else if (isSensitiveKey(k) && v === REDACTION_MASK) {
         out[k] = storedObj[k] ?? "";
       } else {
         out[k] = unredactConfig(v, storedObj[k]);

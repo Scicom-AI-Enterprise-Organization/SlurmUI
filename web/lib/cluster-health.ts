@@ -17,6 +17,26 @@ import { sshExecSimple } from "./ssh-exec";
 
 const DEBOUNCE_MS = 30_000;
 
+/**
+ * Derive the status to report to clients from the DB row.
+ *
+ * cluster.status is updated lazily (the probe runs asynchronously, and only
+ * flips OFFLINE after 2 consecutive fails), so a raw DB read can lag behind
+ * the most recent probe by a cycle. For the UI we trust the latest probe
+ * result directly: alive → ACTIVE, failed → OFFLINE. PROVISIONING is
+ * sticky (bootstrap in flight — the probe isn't authoritative yet).
+ */
+export function effectiveClusterStatus(row: {
+  status: string;
+  config: unknown;
+}): string {
+  if (row.status === "PROVISIONING") return row.status;
+  const health = (row.config as { health?: { alive?: boolean } } | null)?.health;
+  if (health?.alive === true) return "ACTIVE";
+  if (health?.alive === false) return "OFFLINE";
+  return row.status;
+}
+
 const lastProbeAt = new Map<string, number>();
 // Count of consecutive failures per cluster. Reset to 0 on success. An
 // ACTIVE → OFFLINE transition requires this to reach 2.
