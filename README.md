@@ -390,19 +390,20 @@ Route handlers get their coverage through the integration test — they
 ## Architecture
 
 ```
-                         ┌─────────────────────────────┐
-                         │   Next.js control plane     │
-                         │ (Prisma · Keycloak OIDC)    │
-                         └─────────────┬───────────────┘
-                                       │
-                ┌──────────────────────┼──────────────────────┐
-                │                      │                      │
-     SSH mode  ▼                 NATS mode  ▼           Observability
-   ┌───────────────────┐      ┌───────────────────┐    ┌────────────────┐
-   │ ssh (+ bastion)   │      │ NATS JetStream    │    │ /api/metrics   │
-   │   → controller    │      │   → agent (Go)    │    │  (Prometheus)  │
-   │     → workers     │      │     → slurmd/slurmctld│    │                │
-   └───────────────────┘      └───────────────────┘    └────────────────┘
+                          ┌─────────────────────────────┐
+                          │   Next.js control plane     │
+                          │ (Prisma · Keycloak OIDC)    │
+                          └──────────────┬──────────────┘
+                                         │
+                ┌────────────────────────┼────────────────────────┐
+                │                        │                        │
+            SSH mode                 NATS mode               Observability
+                ▼                        ▼                        ▼
+       ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+       │ ssh (+ bastion) │      │ NATS JetStream  │      │  /api/metrics   │
+       │  → controller   │      │   → agent (Go)  │      │  (Prometheus)   │
+       │  → workers      │      │   → slurmd/ctld │      │                 │
+       └─────────────────┘      └─────────────────┘      └─────────────────┘
 ```
 
 ### Repository layout
