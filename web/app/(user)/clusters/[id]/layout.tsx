@@ -10,6 +10,7 @@ import { ShieldOff, Settings } from "lucide-react";
 const tabs = [
   { label: "Jobs", href: "jobs" },
   { label: "Files", href: "files" },
+  { label: "Metrics", href: "metrics" },
 ];
 
 export default function ClusterLayout({ children }: { children: React.ReactNode }) {

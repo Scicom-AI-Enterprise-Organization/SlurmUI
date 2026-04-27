@@ -187,6 +187,7 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 | **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue / terminate** buttons (via sudo `scontrol` / `scancel`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
 | **Reservations** | List/create/delete Slurm reservations (`scontrol create reservation`). Dialog has native datetime pickers for start / end, multiselect for nodes (live `sinfo`) and users (cluster-provisioned, submitted as their unix usernames), partition dropdown, plus a read-only **command preview** textarea showing the exact `scontrol` invocation before it runs. |
 | **QoS** | CRUD over `sacctmgr qos` entries — Name, Priority, MaxJobsPU, MaxSubmitPU, MaxWall, MaxTRESPU, MaxTRESPJ, GrpTRES, GrpJobs, Flags. Edit reuses the same dialog as create; empty fields are left unchanged on edit, `-1` clears a limit. Requires `slurmdbd`. Built-in `normal` QoS is protected from deletion. |
+| **Metrics** | Per-node `node_exporter` (host CPU/RAM/disk/net on `:9100`) + auto-detected GPU exporter on `:9400` — DCGM via docker on bare-metal/VM, [`nvidia_gpu_exporter`](https://github.com/utkuozdemir/nvidia_gpu_exporter) binary in container hosts. Reuses pre-existing exporters when they're already exposed on `0.0.0.0`; rebinds loopback-only listeners. Optional Prometheus + Grafana stack (binary install + systemd, no docker) deployed to the controller or any worker; storage path configurable. Auto-provisions the upstream [gpu-metrics-exporter dashboards](https://github.com/Scicom-AI-Enterprise-Organization/gpu-metrics-exporter/tree/main/dashboards) and a Prometheus datasource. Per-row **Diagnose** (probes both ports, dumps systemd / docker / `nvidia-smi -L`) and per-stack **Prometheus logs** / **Grafana logs** (journalctl tail) viewers. Loopback-only bindings show as an amber `loopback only` badge with a tooltip explaining the scrape failure. |
 
 ### User-facing pages
 
@@ -196,6 +197,7 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 - **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
 - **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
+- **Metrics** — six native Recharts panels (GPU utilization, GPU memory %, GPU temp, GPU power, host CPU %, host memory %) with 5m / 15m / 1h / 6h / 24h range selector and 30 s auto-refresh. PromQL queries are union'd across DCGM and `nvidia_smi` exporter metric names so either mode renders. **Open Grafana** button reverse-proxies the cluster's Grafana UI through this app at `/grafana-proxy/<clusterId>/` (no iframe — Grafana served on Aura's origin) — one-shot SSH local port-forward per cluster, basic-auth injected server-side using the rotating admin password, no Grafana login screen.
 - **Profile** (`/profile`) — your identity card, Linux account (copy-to-clipboard for username / UID / GID), cluster provisioning table, and activity totals (jobs submitted, running, templates saved). Local-login accounts can change their own password here.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
@@ -372,6 +374,20 @@ Route handlers get their coverage through the integration test — they
 
 - Prometheus scrape endpoint at `GET /api/metrics` (optional `METRICS_TOKEN`
   gate). See [Metrics](#metrics).
+- **Per-cluster metrics stack** (admin Metrics tab). Installs `node_exporter`
+  (host) and a GPU exporter (DCGM via docker, or `nvidia_gpu_exporter` binary)
+  on selected nodes, and optionally deploys a Prometheus + Grafana pair as
+  systemd services on the controller or any worker. Auto-detects and reuses
+  pre-existing exporters bound to `0.0.0.0`; rebinds loopback-only listeners.
+  Provisions the upstream
+  [gpu-metrics-exporter dashboards](https://github.com/Scicom-AI-Enterprise-Organization/gpu-metrics-exporter/tree/main/dashboards)
+  with their `${DS_PROMETHEUS}` / `mimir` references rewritten to the local
+  Prometheus uid. Grafana is reverse-proxied through Aura at
+  `/grafana-proxy/<clusterId>/` over a per-cluster SSH local port-forward
+  (`-tt` + `sleep` keepalive for bastion-mode controllers); Basic auth
+  injected server-side using a rotating admin password so users never see
+  Grafana's login screen. Grafana Live (WebSocket) is disabled at deploy
+  since route handlers can't proxy WS — dashboards refresh on interval.
 - **Periodic health monitor** (`SLURMUI_HEALTH_INTERVAL_SEC`, default 60 s)
   SSHes to every ACTIVE / DEGRADED cluster, collects `scontrol ping`,
   `sinfo -h -N`, `squeue` with reason & submit time, and per-worker `mountpoint`
@@ -455,6 +471,11 @@ Route handlers get their coverage through the integration test — they
 See `docker-compose.dev.yml` for the full working example.
 
 ### Metrics
+
+This section documents Aura's own control-plane scrape endpoint (`slurmui_*`
+counters about clusters, jobs, queue, etc.). For **per-cluster GPU + host**
+metrics from the cluster nodes themselves, see the
+[per-cluster metrics stack](#observability) under Features.
 
 `/api/metrics` (Prometheus text format, `slurmui_*` namespace). Highlights:
 
