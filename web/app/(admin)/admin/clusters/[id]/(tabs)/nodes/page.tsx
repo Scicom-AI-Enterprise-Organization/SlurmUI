@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -800,10 +801,16 @@ export default function NodesPage() {
     }
   };
 
-  const openNodeLogs = (nodeName: string) => {
+  const openNodeLogs = (nodeName: string, source: string = "slurmd") => {
     setLogsNode(nodeName);
-    setLogsSource("slurmd");
-    fetchNodeLogs(nodeName, "slurmd");
+    setLogsSource(source);
+    fetchNodeLogs(nodeName, source);
+  };
+
+  const NODE_LOG_LABELS: Record<string, string> = {
+    slurmd: "Slurm Worker (slurmd)",
+    munge: "Munge",
+    system: "System (dmesg)",
   };
 
   // Parse the bulk textarea into rows. Accepts:
@@ -1456,14 +1463,32 @@ export default function NodesPage() {
                         >
                           <TerminalIcon className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          title="Logs"
-                          onClick={() => openNodeLogs(node.name)}
-                        >
-                          <FileText className="h-4 w-4" />
-                        </Button>
+                        <DropdownMenu>
+                          {/* shadcn <Button> isn't forwardRef-aware so the
+                              Slot from asChild can't attach Radix's click
+                              handler. Use a real <button> styled via
+                              buttonVariants instead. */}
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              type="button"
+                              title="Logs"
+                              className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
+                            >
+                              <FileText className="h-4 w-4" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56">
+                            <DropdownMenuItem onClick={() => openNodeLogs(node.name, "slurmd")}>
+                              Slurm Worker (slurmd)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openNodeLogs(node.name, "munge")}>
+                              Munge
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openNodeLogs(node.name, "system")}>
+                              System (dmesg)
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                         <Button
                           variant="ghost"
                           size="icon-sm"
@@ -1608,25 +1633,14 @@ export default function NodesPage() {
       <Dialog open={!!logsNode} onOpenChange={(o) => { if (!o) setLogsNode(null); }}>
         <DialogContent className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle>Logs: {logsNode}</DialogTitle>
+            <DialogTitle>
+              Logs: {logsNode}
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                — {NODE_LOG_LABELS[logsSource] ?? logsSource}
+              </span>
+            </DialogTitle>
           </DialogHeader>
           <div className="flex items-center gap-3">
-            <Select
-              value={logsSource}
-              onValueChange={(v) => {
-                setLogsSource(v);
-                if (logsNode) fetchNodeLogs(logsNode, v);
-              }}
-            >
-              <SelectTrigger className="w-[280px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="slurmd">Slurm Worker (slurmd)</SelectItem>
-                <SelectItem value="munge">Munge</SelectItem>
-                <SelectItem value="system">System (dmesg)</SelectItem>
-              </SelectContent>
-            </Select>
             <Button
               variant="outline"
               size="sm"

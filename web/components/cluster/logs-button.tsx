@@ -1,23 +1,23 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { buttonVariants } from "@/components/ui/button";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { FileText, Loader2, RefreshCw } from "lucide-react";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ChevronDown, FileText, Loader2, RefreshCw } from "lucide-react";
 
 interface LogsButtonProps {
   clusterId: string;
@@ -82,40 +82,45 @@ export function LogsButton({ clusterId }: LogsButtonProps) {
     }
   };
 
-  const handleOpen = () => {
-    setOpen(true);
-    fetchLogs();
-  };
-
-  const handleSourceChange = (v: string) => {
+  const openWithSource = (v: string) => {
     setSource(v);
+    setOpen(true);
     fetchLogs(v);
   };
 
+  const activeLabel = LOG_SOURCES.find((s) => s.value === source)?.label ?? source;
+
   return (
     <>
-      <Button variant="outline" onClick={handleOpen}>
-        <FileText className="mr-2 h-4 w-4" />
-        Logs
-      </Button>
+      <DropdownMenu>
+        {/* shadcn <Button> isn't forwardRef-aware so Radix's asChild Slot
+            can't attach the click handler — use a plain styled <button>. */}
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(buttonVariants({ variant: "outline" }))}
+          >
+            <FileText className="mr-2 h-4 w-4" />
+            Logs
+            <ChevronDown className="ml-2 h-3.5 w-3.5" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-64">
+          {LOG_SOURCES.map((s) => (
+            <DropdownMenuItem key={s.value} onClick={() => openWithSource(s.value)}>
+              {s.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent showCloseButton className="max-w-4xl">
           <DialogHeader>
-            <DialogTitle>Cluster Logs</DialogTitle>
+            <DialogTitle>Cluster Logs — {activeLabel}</DialogTitle>
           </DialogHeader>
 
           <div className="flex items-center gap-3">
-            <Select value={source} onValueChange={handleSourceChange}>
-              <SelectTrigger className="w-[280px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {LOG_SOURCES.map((s) => (
-                  <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
             <Button variant="outline" size="sm" onClick={() => fetchLogs()} disabled={loading}>
               <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               Refresh
