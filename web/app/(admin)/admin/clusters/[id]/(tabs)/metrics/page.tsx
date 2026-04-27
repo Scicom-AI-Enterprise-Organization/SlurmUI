@@ -57,6 +57,7 @@ interface MetricsConfig {
   nodes: Record<string, { exporter?: "dcgm" | "nvidia_smi"; installedAt?: string; scrape?: boolean }>;
   grafanaAdminPassword?: string;
   grafanaDeployedAt?: string;
+  grafanaRootUrl?: string;
 }
 
 interface StackStatus {
@@ -492,6 +493,7 @@ export default function MetricsPage() {
                 )}
               </p>
             )}
+            <RootUrlWarning baked={cfg.grafanaRootUrl} clusterId={clusterId} />
           </div>
           <div className="flex gap-2">
             <Button
@@ -759,6 +761,34 @@ export default function MetricsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Compares the baked grafana.ini root_url against the browser's current
+ * origin. When they don't match (typical after deploying from dev and
+ * accessing in prod), Grafana's HTML still references the dev origin for
+ * every asset URL — the proxy works but assets 404. Surface a one-line
+ * notice prodding the admin to redeploy.
+ */
+function RootUrlWarning({ baked, clusterId }: { baked?: string; clusterId: string }) {
+  const [drift, setDrift] = useState<string | null>(null);
+  useEffect(() => {
+    if (!baked) { setDrift(null); return; }
+    try {
+      const bakedOrigin = new URL(baked).origin;
+      const here = window.location.origin;
+      setDrift(bakedOrigin !== here ? bakedOrigin : null);
+    } catch { setDrift(null); }
+  }, [baked]);
+  if (!drift) return null;
+  return (
+    <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+      Grafana was deployed with <code className="font-mono">{drift}</code> baked into its <code>root_url</code>;
+      you&apos;re viewing from <code className="font-mono">{typeof window !== "undefined" ? window.location.origin : ""}</code>{" "}
+      so its assets won&apos;t load. Click <strong>Re-deploy</strong> to rewrite the config, or set <code>AURA_PUBLIC_URL</code>{" "}
+      in the prod environment so deploys always bake the right origin. Cluster id: {clusterId.slice(0, 8)}…
+    </p>
   );
 }
 

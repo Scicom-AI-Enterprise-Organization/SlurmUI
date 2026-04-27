@@ -119,6 +119,7 @@ exit 0
               const next = mergeMetricsConfig(fresh.config, {
                 grafanaAdminPassword: undefined,
                 grafanaDeployedAt: undefined,
+                grafanaRootUrl: undefined,
               });
               await prisma.cluster.update({ where: { id }, data: { config: next as never } });
             }

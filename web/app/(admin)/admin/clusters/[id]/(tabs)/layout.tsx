@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
+import { LiveClusterStatusBadge } from "@/components/clusters/live-cluster-status-badge";
 import { ClusterStatusCard } from "@/components/cluster/cluster-status-card";
 import { DeleteClusterButton } from "@/components/cluster/delete-cluster-button";
 import { BootstrapButton } from "@/components/cluster/bootstrap-button";
@@ -36,7 +36,11 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
         <div className="space-y-1">
           <div className="flex items-center gap-3">
             <h1 className="text-3xl font-bold">{cluster.name}</h1>
-            <ClusterStatusBadge status={cluster.status} />
+            <LiveClusterStatusBadge
+              clusterId={id}
+              initialStatus={cluster.status}
+              initialHealth={((cluster.config as Record<string, unknown> | null)?.health as never) ?? null}
+            />
           </div>
           <p className="text-muted-foreground">Controller: {cluster.controllerHost}</p>
         </div>

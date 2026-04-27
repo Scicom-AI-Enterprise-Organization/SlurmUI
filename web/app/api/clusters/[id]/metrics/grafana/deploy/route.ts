@@ -88,12 +88,24 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // the first available of: X-Forwarded-Proto/Host (when behind another
   // proxy), then the request's host header. Falls back to localhost so a
   // dev-mode deploy still produces a valid (if local-only) URL.
-  const proto = (req.headers.get("x-forwarded-proto") ?? "http").split(",")[0].trim();
-  const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "localhost").split(",")[0].trim();
-  // Mount lives at /grafana-proxy/<id>/ — outside /api/ so it doesn't
-  // collide with Grafana's own /api/* routes (any sub-path starting with
-  // /api/ makes Grafana 404 because its router treats it as an API call).
-  const rootUrl = `${proto}://${host}/grafana-proxy/${id}/`;
+  // Resolve the public origin Aura is reachable at. Order:
+  //   1. AURA_PUBLIC_URL env (deployment-stable, recommended for prod —
+  //      avoids baking dev/localhost into Grafana's root_url)
+  //   2. X-Forwarded-Proto / X-Forwarded-Host (when behind a reverse proxy)
+  //   3. Host header on the request itself (works in dev)
+  // root_url gets baked into grafana.ini at startup; if it ever drifts the
+  // admin has to re-deploy. The status endpoint reports it back so the UI
+  // can surface a "needs redeploy" warning when the origin shifts.
+  let rootUrl: string;
+  const publicUrl = (process.env.AURA_PUBLIC_URL ?? "").trim().replace(/\/+$/, "");
+  if (publicUrl) {
+    rootUrl = `${publicUrl}/grafana-proxy/${id}/`;
+  } else {
+    const proto = (req.headers.get("x-forwarded-proto") ?? "http").split(",")[0].trim();
+    const host = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "localhost").split(",")[0].trim();
+    rootUrl = `${proto}://${host}/grafana-proxy/${id}/`;
+  }
+  const host = new URL(rootUrl).host;
 
   // serve_from_sub_path=true: Grafana embeds the prefix in every asset URL
   // and strips it from incoming request URLs. Our proxy forwards the full
@@ -463,6 +475,7 @@ exit 0
                 enabled: true,
                 grafanaAdminPassword: grafanaPassword,
                 grafanaDeployedAt: new Date().toISOString(),
+                grafanaRootUrl: rootUrl,
               });
               await prisma.cluster.update({
                 where: { id },

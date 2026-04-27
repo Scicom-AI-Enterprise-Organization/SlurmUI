@@ -45,6 +45,13 @@ export interface MetricsConfig {
   // non-admins. Reset on re-deploy.
   grafanaAdminPassword?: string;
   grafanaDeployedAt?: string;
+  // Absolute URL baked into grafana.ini's `root_url` at deploy time.
+  // Grafana resolves this once on startup and uses it to build every
+  // absolute link it emits — drift between this value and the user's
+  // current browser origin (e.g. you deployed from dev, then opened in
+  // prod) breaks asset loading. The UI compares this against the live
+  // origin and surfaces a "needs redeploy" warning when they diverge.
+  grafanaRootUrl?: string;
 }
 
 export const METRICS_DEFAULTS: MetricsConfig = {
