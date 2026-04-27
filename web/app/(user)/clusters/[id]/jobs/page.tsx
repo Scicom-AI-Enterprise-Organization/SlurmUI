@@ -249,7 +249,7 @@ function ClusterResourcePanel({ clusterId }: { clusterId: string }) {
                   </div>
 
                   <div>
-                    <div className="mb-1 text-muted-foreground">squeue — %C is CPUs per job</div>
+                    <div className="mb-1 text-muted-foreground">squeue — %T STATE · %C CPUs · %m MinMem (MB) · %b TresPerNode (gres:gpu:N)</div>
                     <pre className="max-h-40 overflow-auto rounded border bg-background p-2">{debug.squeue || "(no running / pending jobs)"}</pre>
                   </div>
 

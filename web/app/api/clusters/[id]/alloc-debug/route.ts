@@ -12,7 +12,8 @@ interface RouteParams { params: Promise<{ id: string }> }
 // Commands (same ones in the README's diagnostic block):
 //   scontrol show job -dd                       # NumCPUs, MinCPUsNode, Gres, JobState
 //   scontrol show node                          # CPUAlloc, AllocTRES per node
-//   squeue -o "%.8i %.9P %.10j %.8u %.2t %.10M %.6D %.6C %R"
+//   squeue -o "%.8i %.9P %.10j %.8u %.10T %.10M %.6D %.6C %.10m %.14b %R"
+//                                            STATE         CPUs    MinMem  TresPerNode  Reason
 export async function GET(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   const session = await auth();
@@ -51,7 +52,9 @@ $S scontrol show node 2>&1 || scontrol show node 2>&1
 echo "${M}_NODES_END"
 
 echo "${M}_SQUEUE_START"
-squeue -o "%.8i %.9P %.10j %.8u %.2t %.10M %.6D %.6C %R" 2>&1
+# %T = State (RUNNING/PENDING/...), %C = CPUs, %m = MinMemory (MB),
+# %b = TresPerNode (e.g. gres:gpu:N), %R = Reason
+squeue -o "%.8i %.9P %.10j %.8u %.10T %.10M %.6D %.6C %.10m %.14b %R" 2>&1
 echo "${M}_SQUEUE_END"
 
 echo "${M}_CONF_START"

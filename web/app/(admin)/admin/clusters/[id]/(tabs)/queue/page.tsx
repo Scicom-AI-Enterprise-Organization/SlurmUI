@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -57,12 +57,47 @@ interface QueueRow {
   jobid: string; partition: string; user: string; state: string;
   reason: string; start: string; timeLeft: string; nodes: string;
   cpus: string; mem: string; prio: string; submit: string; nodelist: string;
+  // Parsed from squeue's %b (TresPerNode). e.g. `gres:gpu:1` → "1".
+  // Empty / "(null)" / no gpu in spec → "—".
+  gpus: string;
 }
+
+// Parse the gpu count out of a TresPerNode string like:
+//   "gres:gpu:1"      → "1"
+//   "gres/gpu=2"      → "2"
+//   "gres:gpu:a100:4" → "4"
+//   "(null)" / ""     → "—"
+function parseGpus(tresPerNode: string): string {
+  if (!tresPerNode || tresPerNode === "(null)" || tresPerNode === "N/A") return "—";
+  // gres:gpu[:type]:<n>  or  gres/gpu[:type]=<n>
+  const m = tresPerNode.match(/gres[:/]gpu(?::[A-Za-z0-9_-]+)?[=:](\d+)/);
+  return m ? m[1] : "—";
+}
+
+const VALID_TABS = ["queue", "priority", "reasons", "partitions", "fairshare", "qos", "sdiag"] as const;
+type TabKey = typeof VALID_TABS[number];
+const isValidTab = (v: string | null): v is TabKey =>
+  !!v && (VALID_TABS as readonly string[]).includes(v);
 
 export default function QueuePage() {
   const params = useParams();
   const clusterId = params.id as string;
-  const [tab, setTab] = useState("queue");
+
+  // Sync the active sub-tab with `?tab=` so the URL is shareable / refreshable
+  // and back-button navigation keeps the picked sub-tab. Falls back to
+  // "queue" for unknown / missing values.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const tab: TabKey = isValidTab(searchParams.get("tab")) ? (searchParams.get("tab") as TabKey) : "queue";
+
+  const setTab = (v: string) => {
+    if (!isValidTab(v)) return;
+    const sp = new URLSearchParams(searchParams.toString());
+    if (v === "queue") sp.delete("tab"); else sp.set("tab", v);
+    const qs = sp.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
 
   return (
     <div className="space-y-4">
@@ -131,6 +166,7 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
           jobid: p[0], partition: p[1], user: p[2], state: p[3], reason: p[4],
           start: p[5], timeLeft: p[6], nodes: p[7], cpus: p[8], mem: p[9],
           prio: p[10], submit: p[11], nodelist: p[12],
+          gpus: parseGpus(p[13] ?? ""),
         };
       }).filter((x): x is QueueRow => x !== null);
       setRows(parsed);
@@ -216,7 +252,7 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
           <Table>
             <TableHeader>
               <TableRow>
-                {["jobid", "partition", "user", "state", "reason", "nodes", "cpus", "mem", "timeLeft", "prio", "nodelist"].map((k) => (
+                {["jobid", "partition", "user", "state", "reason", "nodes", "cpus", "mem", "gpus", "timeLeft", "prio", "nodelist"].map((k) => (
                   <TableHead key={k}
                     className="cursor-pointer select-none"
                     onClick={() => setSortBy(k as keyof QueueRow)}>
@@ -248,6 +284,7 @@ function QueueTable({ clusterId, active }: { clusterId: string; active: boolean 
                   <TableCell className="font-mono text-sm">{r.nodes}</TableCell>
                   <TableCell className="font-mono text-sm">{r.cpus}</TableCell>
                   <TableCell className="font-mono text-sm">{r.mem}</TableCell>
+                  <TableCell className="font-mono text-sm">{r.gpus}</TableCell>
                   <TableCell className="font-mono text-sm">{r.timeLeft}</TableCell>
                   <TableCell className="font-mono text-sm">{r.prio}</TableCell>
                   <TableCell className="font-mono text-sm text-muted-foreground">{r.nodelist}</TableCell>

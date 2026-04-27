@@ -26,7 +26,10 @@ const SACCT_FORMAT = [
 ].join(",");
 
 const SPRIO_FORMAT = "%.15i %.9u %.10Y %.10A %.10F %.10J %.10P %.10Q %.10N";
-const SQUEUE_FORMAT = "%i|%P|%u|%T|%r|%S|%L|%D|%C|%m|%Q|%V|%R";
+// id|partition|user|state|reason|start|timeLeft|nodes|cpus|mem|prio|submit|nodelist|tresPerNode
+// %b is TresPerNode — that's where GPUs land for jobs requesting `--gres=gpu:N`
+// (renders as `gres:gpu:1` etc). The queue UI parses gpus out of this column.
+const SQUEUE_FORMAT = "%i|%P|%u|%T|%r|%S|%L|%D|%C|%m|%Q|%V|%R|%b";
 
 function build(kind: Kind, jobId?: string): string | null {
   switch (kind) {
