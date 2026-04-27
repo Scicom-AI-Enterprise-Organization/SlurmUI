@@ -1111,6 +1111,12 @@ export default function NodesPage() {
     return "bg-gray-100 text-gray-800";
   };
 
+  // Names of nodes whose deploy task is currently in flight (have a real
+  // taskId, not the "" sentinel). Drives the in-progress banner so users
+  // who closed the live-log dialog can re-open it without hunting for the
+  // spinning ⚡ icon in the table.
+  const deployingWithTask = Object.entries(deployTasks).filter(([, t]) => t).map(([n]) => n);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-end">
@@ -1266,6 +1272,25 @@ export default function NodesPage() {
           </Dialog>
         </div>
       </div>
+
+      {deployingWithTask.length > 0 && !sseLogOpen && (
+        <div className="space-y-2">
+          {deployingWithTask.map((nodeName) => (
+            <button
+              key={nodeName}
+              type="button"
+              onClick={() => reopenDeployLog(nodeName)}
+              className="flex w-full items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-4 py-2.5 text-left text-sm text-blue-900 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100 dark:hover:bg-blue-950/60"
+            >
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              <span className="flex-1">
+                <span className="font-medium">Deploying node: {nodeName}</span>
+                <span className="ml-2 text-xs text-blue-700 dark:text-blue-300">running in background — click to view live logs</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {clusterStatus === "PROVISIONING" && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">

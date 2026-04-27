@@ -101,6 +101,12 @@ export default function MetricsPage() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  // Type of the currently-running task. Lets the per-action buttons swap
+  // their icon/label to a spinner ("Show Progress") that reopens the dialog
+  // — same UX as the Python install Apply button.
+  const [currentTaskType, setCurrentTaskType] = useState<
+    "install" | "uninstall" | "deploy" | "teardown" | null
+  >(null);
   const logRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -130,14 +136,16 @@ export default function MetricsPage() {
         setStackHostCandidates(d.stackHostCandidates ?? ["controller"]);
         setControllerHost(d.controllerHost ?? "");
         if (d.latestTask && d.latestTask.status === "running") {
-          const titleByType: Record<string, string> = {
-            metrics_install: "Installing exporters",
-            metrics_uninstall: "Removing exporters",
-            metrics_grafana_deploy: "Deploying Prometheus + Grafana",
-            metrics_grafana_teardown: "Tearing down stack",
+          const meta: Record<string, { title: string; type: "install" | "uninstall" | "deploy" | "teardown" }> = {
+            metrics_install: { title: "Installing exporters", type: "install" },
+            metrics_uninstall: { title: "Removing exporters", type: "uninstall" },
+            metrics_grafana_deploy: { title: "Deploying Prometheus + Grafana", type: "deploy" },
+            metrics_grafana_teardown: { title: "Tearing down stack", type: "teardown" },
           };
-          attachToTask(d.latestTask.id, titleByType[d.latestTask.type] ?? "Working");
-          // Don't auto-open the dialog on reload — the banner cues the user.
+          const m = meta[d.latestTask.type as string] ?? { title: "Working", type: null as null };
+          attachToTask(d.latestTask.id, m.title, m.type);
+          // Don't auto-open the dialog on reload — the spinner button + tab
+          // shows progress is in flight.
           setLogDialog(false);
         }
       })
@@ -160,9 +168,14 @@ export default function MetricsPage() {
     };
   }, []);
 
-  const attachToTask = (taskId: string, title: string) => {
+  const attachToTask = (
+    taskId: string,
+    title: string,
+    type: "install" | "uninstall" | "deploy" | "teardown" | null = null,
+  ) => {
     if (pollRef.current) clearInterval(pollRef.current);
     setCurrentTaskId(taskId);
+    setCurrentTaskType(type);
     setLogTitle(title);
     setLogLines([]);
     setLogStatus("running");
@@ -177,6 +190,7 @@ export default function MetricsPage() {
           setLogStatus(t.status);
           if (pollRef.current) clearInterval(pollRef.current);
           setCurrentTaskId(null);
+          setCurrentTaskType(null);
           refresh(true);
         }
       } catch {}
@@ -202,7 +216,7 @@ export default function MetricsPage() {
         toast.error(d.error || "Install failed");
         return;
       }
-      attachToTask(d.taskId, `Installing exporters on ${hostname}`);
+      attachToTask(d.taskId, `Installing exporters on ${hostname}`, "install");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Install failed");
     }
@@ -218,7 +232,7 @@ export default function MetricsPage() {
       });
       const d = await r.json();
       if (!r.ok) { toast.error(d.error || "Install failed"); return; }
-      attachToTask(d.taskId, `Installing exporters on ${nodes.length} node(s)`);
+      attachToTask(d.taskId, `Installing exporters on ${nodes.length} node(s)`, "install");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Install failed");
     }
@@ -278,7 +292,7 @@ export default function MetricsPage() {
       });
       const d = await r.json();
       if (!r.ok) { toast.error(d.error || "Uninstall failed"); return; }
-      attachToTask(d.taskId, `Removing exporters from ${hostname}`);
+      attachToTask(d.taskId, `Removing exporters from ${hostname}`, "uninstall");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Uninstall failed");
     }
@@ -289,7 +303,7 @@ export default function MetricsPage() {
       const r = await fetch(`/api/clusters/${clusterId}/metrics/grafana/deploy`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) { toast.error(d.error || "Deploy failed"); return; }
-      attachToTask(d.taskId, "Deploying Prometheus + Grafana");
+      attachToTask(d.taskId, "Deploying Prometheus + Grafana", "deploy");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Deploy failed");
     }
@@ -301,7 +315,7 @@ export default function MetricsPage() {
       const r = await fetch(`/api/clusters/${clusterId}/metrics/grafana/teardown`, { method: "POST" });
       const d = await r.json();
       if (!r.ok) { toast.error(d.error || "Teardown failed"); return; }
-      attachToTask(d.taskId, "Tearing down stack");
+      attachToTask(d.taskId, "Tearing down stack", "teardown");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Teardown failed");
     }
@@ -358,6 +372,7 @@ export default function MetricsPage() {
           Refresh
         </Button>
       </div>
+
 
       <Card>
         <CardHeader>
@@ -509,16 +524,38 @@ export default function MetricsPage() {
                 </Button>
               </a>
             )}
-            <Button onClick={deployStack} size="sm" disabled={installedCount === 0}>
-              <Play className="mr-2 h-4 w-4" />
-              {stack?.grafana === "up" ? "Re-deploy" : "Deploy"}
-            </Button>
-            {stack?.grafana === "up" && (
-              <Button variant="outline" size="sm" onClick={teardownStack}>
-                <Trash2 className="mr-2 h-4 w-4" />
-                Tear down
-              </Button>
-            )}
+            {(() => {
+              const deployRunning = currentTaskType === "deploy" && logStatus === "running";
+              return (
+                <Button
+                  size="sm"
+                  onClick={() => deployRunning ? setLogDialog(true) : deployStack()}
+                  disabled={!deployRunning && installedCount === 0}
+                >
+                  {deployRunning
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <Play className="mr-2 h-4 w-4" />}
+                  {deployRunning
+                    ? "Show Progress"
+                    : stack?.grafana === "up" ? "Re-deploy" : "Deploy"}
+                </Button>
+              );
+            })()}
+            {stack?.grafana === "up" && (() => {
+              const teardownRunning = currentTaskType === "teardown" && logStatus === "running";
+              return (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => teardownRunning ? setLogDialog(true) : teardownStack()}
+                >
+                  {teardownRunning
+                    ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    : <Trash2 className="mr-2 h-4 w-4" />}
+                  {teardownRunning ? "Show Progress" : "Tear down"}
+                </Button>
+              );
+            })()}
           </div>
         </CardHeader>
         {(cfg.grafanaAdminPassword || installedCount === 0) && (

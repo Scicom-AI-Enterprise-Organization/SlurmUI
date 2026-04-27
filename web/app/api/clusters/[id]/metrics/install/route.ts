@@ -155,17 +155,36 @@ if [ "$GPU_REACHABLE" = "1" ]; then
 elif [ -n "$GPU_BIND" ]; then
   echo "[gpu] :9400 bound to $GPU_BIND (loopback only) — tearing down to rebind on 0.0.0.0"
   if command -v docker >/dev/null 2>&1; then
-    # Stop any container publishing :9400 — covers our aura-dcgm-exporter
-    # and any user-managed dcgm container started with -p 127.0.0.1:9400.
-    for c in $(docker ps -a --format '{{.Names}}' --filter publish=9400 2>/dev/null); do
+    # Match ANY container with a :9400 port mapping, regardless of bind
+    # address. \`--filter publish=9400\` was missing loopback-bound
+    # containers like \`127.0.0.1:9400->9400/tcp\` on some docker versions,
+    # so we parse the Ports column ourselves.
+    for c in $(docker ps -a --format '{{.Names}}|{{.Ports}}' 2>/dev/null | awk -F'|' '$2 ~ /:9400(->|\\/)/{print $1}'); do
       echo "[gpu] removing container $c"
       $S docker rm -f "$c" >/dev/null 2>&1 || true
     done
   fi
   $S systemctl stop nvidia_gpu_exporter 2>/dev/null || true
-  PIDS=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:9400$/ {print $7}' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
-  for pid in $PIDS; do $S kill "$pid" 2>/dev/null || true; done
-  sleep 2
+  # Kill anything still holding the port (covers raw binaries, lingering
+  # docker-proxy, etc.). fuser is the most universal; falls back to ss + kill.
+  if command -v fuser >/dev/null 2>&1; then
+    $S fuser -k -n tcp 9400 2>/dev/null || true
+  else
+    PIDS=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:9400$/ {print $7}' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+    for pid in $PIDS; do $S kill -9 "$pid" 2>/dev/null || true; done
+  fi
+  # Wait for the port to actually release — docker-proxy can take a beat
+  # to clean up iptables rules after the container is removed.
+  for i in 1 2 3 4 5 6 7 8; do
+    ss -ltn 2>/dev/null | awk '$4 ~ /:9400$/' | grep -q . || break
+    sleep 1
+  done
+  STILL=$(ss -ltn 2>/dev/null | awk '$4 ~ /:9400$/ {print $4}' | head -1)
+  if [ -n "$STILL" ]; then
+    echo "[gpu] WARNING port still held by $STILL after teardown — install will likely fail. Investigate via 'fuser -v -n tcp 9400' and 'docker ps -a | grep 9400'."
+  else
+    echo "[gpu] :9400 released"
+  fi
 fi
 
 if [ -n "$EXISTING_GPU" ]; then
