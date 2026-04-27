@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 const tabs = [
@@ -20,14 +21,46 @@ const tabs = [
   { slug: "metrics", label: "Metrics", requiresActive: true },
 ];
 
+interface Health {
+  alive?: boolean;
+}
+
 interface ClusterTabsProps {
   clusterId: string;
   isActive: boolean;
 }
 
-export function ClusterTabs({ clusterId, isActive: clusterIsActive }: ClusterTabsProps) {
+export function ClusterTabs({ clusterId, isActive: initialIsActive }: ClusterTabsProps) {
   const pathname = usePathname();
   const base = `/admin/clusters/${clusterId}`;
+  // SSR seeds isActive from cluster.status; the DB column lags the live SSH
+  // probe by a cycle, so without polling the user sees disabled tabs even
+  // after the cluster comes back ACTIVE. Mirror the same probe-derived
+  // logic ClusterStatusCard uses so the tabs unlock immediately when the
+  // probe goes green.
+  const [clusterIsActive, setClusterIsActive] = useState(initialIsActive);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      fetch(`/api/clusters/${clusterId}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (cancelled) return;
+          const status = d?.status as string | undefined;
+          const health = (d?.config?.health as Health | undefined) ?? null;
+          if (status === "PROVISIONING") {
+            setClusterIsActive(false);
+            return;
+          }
+          if (health?.alive === true) setClusterIsActive(true);
+          else if (health?.alive === false) setClusterIsActive(false);
+          else if (status) setClusterIsActive(status === "ACTIVE");
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [clusterId]);
 
   return (
     <div className="flex gap-1 border-b">

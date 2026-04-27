@@ -86,9 +86,9 @@ export function ConfigEditor({ clusterId, initialConfig }: ConfigEditorProps) {
         <p className="text-sm text-destructive">JSON Error: {parseError}</p>
       )}
 
-      <ScrollArea className="h-[500px] rounded-md border bg-white dark:bg-white">
+      <ScrollArea className="h-[500px] rounded-md border bg-background">
         <textarea
-          className="h-full w-full resize-none bg-white text-black p-4 font-mono text-sm focus:outline-none"
+          className="h-full w-full resize-none bg-background text-foreground p-4 font-mono text-sm focus:outline-none"
           value={configText}
           onChange={(e) => handleChange(e.target.value)}
           spellCheck={false}

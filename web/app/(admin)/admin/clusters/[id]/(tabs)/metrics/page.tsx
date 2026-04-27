@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -31,8 +32,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { Activity, Cpu, RefreshCw, Loader2, Trash2, Play, Eye, EyeOff, Copy, Zap, Stethoscope, ExternalLink, FileText } from "lucide-react";
+import { Activity, Cpu, RefreshCw, Loader2, Trash2, Play, Eye, EyeOff, Copy, Zap, Stethoscope, ExternalLink, FileText, ChevronDown } from "lucide-react";
 
 type ExporterMode = "auto" | "dcgm" | "nvidia_smi";
 
@@ -496,24 +503,37 @@ export default function MetricsPage() {
             <RootUrlWarning baked={cfg.grafanaRootUrl} clusterId={clusterId} />
           </div>
           <div className="flex gap-2">
-            <Button
-              variant="outline" size="sm"
-              onClick={() => openServiceLogs("prometheus")}
-              disabled={!stack || stack.prometheus === "down"}
-              title="View prometheus systemd logs"
-            >
-              <FileText className="mr-2 h-4 w-4" />
-              Prometheus logs
-            </Button>
-            <Button
-              variant="outline" size="sm"
-              onClick={() => openServiceLogs("grafana")}
-              disabled={!stack || stack.grafana === "down"}
-              title="View grafana systemd logs"
-            >
-              <FileText className="mr-2 h-4 w-4" />
-              Grafana logs
-            </Button>
+            <DropdownMenu>
+              {/* asChild + shadcn <Button> drops the click handler because
+                  Button is a plain function component (no forwardRef).
+                  Use a real <button> styled via buttonVariants instead — same
+                  visual, but Radix can attach its handlers/refs directly. */}
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+                  disabled={!stack || (stack.prometheus === "down" && stack.grafana === "down")}
+                >
+                  <FileText className="mr-2 h-4 w-4" />
+                  Logs
+                  <ChevronDown className="ml-2 h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => openServiceLogs("prometheus")}
+                  disabled={!stack || stack.prometheus === "down"}
+                >
+                  Prometheus
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => openServiceLogs("grafana")}
+                  disabled={!stack || stack.grafana === "down"}
+                >
+                  Grafana
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             {stack?.grafana === "up" && (
               <a
                 href={`/grafana-proxy/${clusterId}/`}
