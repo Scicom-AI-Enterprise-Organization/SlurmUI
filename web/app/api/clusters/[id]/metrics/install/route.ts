@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
-import { mergeMetricsConfig, readMetricsConfig } from "@/lib/metrics-config";
+import { mergeMetricsConfig, readMetricsConfig, resolveStackHost } from "@/lib/metrics-config";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -33,6 +33,13 @@ async function finishTask(taskId: string, success: boolean) {
 const NODE_EXPORTER_VERSION = "1.8.2";
 const NVIDIA_GPU_EXPORTER_VERSION = "1.3.2";
 const DCGM_EXPORTER_IMAGE = "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.7-3.5.0-ubuntu22.04";
+const PROMTAIL_VERSION = "3.2.1";
+
+interface PromtailOptions {
+  enabled: boolean;
+  pushUrl: string;   // e.g. http://<stackIp>:3100/loki/api/v1/push
+  cluster: string;   // label for log lines
+}
 
 /**
  * Build the bash that installs node_exporter (always) plus a GPU exporter
@@ -41,8 +48,11 @@ const DCGM_EXPORTER_IMAGE = "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.7-3.5.0-ubuntu
  *   - "nvidia_smi":  install utkuozdemir/nvidia_gpu_exporter binary as systemd
  *   - "auto":        let the script pick (docker present + GPU + not in
  *                    container -> dcgm, else nvidia_smi)
+ *
+ * When `promtail.enabled`, also installs Grafana promtail as a systemd
+ * service shipping journal + /mnt/shared/*.out (job stdout) to Loki.
  */
-function buildInstallScript(mode: "dcgm" | "nvidia_smi" | "auto"): string {
+function buildInstallScript(mode: "dcgm" | "nvidia_smi" | "auto", promtail: PromtailOptions): string {
   return `#!/bin/bash
 set +e
 trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
@@ -268,6 +278,119 @@ else
 fi
 
 echo "INSTALLED_MODE=$MODE"
+
+${promtail.enabled ? `############################################################
+# promtail — ships journal + job stdout to the cluster's Loki
+############################################################
+HOST=$(hostname)
+echo "[promtail] installing v${PROMTAIL_VERSION} ($NEARCH)..."
+$S id promtail >/dev/null 2>&1 || $S useradd --no-create-home --shell /usr/sbin/nologin promtail
+# Promtail needs to read systemd journal — adm group covers that on Debian/Ubuntu;
+# systemd-journal on RHEL.
+$S usermod -aG adm promtail 2>/dev/null || true
+$S usermod -aG systemd-journal promtail 2>/dev/null || true
+
+if [ ! -x /usr/local/bin/promtail ] || ! /usr/local/bin/promtail --version 2>&1 | grep -q "${PROMTAIL_VERSION}"; then
+  TMP=$(mktemp -d)
+  cd "$TMP"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/grafana/loki/releases/download/v${PROMTAIL_VERSION}/promtail-linux-$NEARCH.zip" -o promtail.zip
+  else
+    wget -q "https://github.com/grafana/loki/releases/download/v${PROMTAIL_VERSION}/promtail-linux-$NEARCH.zip" -O promtail.zip
+  fi
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -o promtail.zip
+  elif command -v bsdtar >/dev/null 2>&1; then
+    bsdtar xf promtail.zip
+  else
+    $S apt-get install -y -qq unzip 2>/dev/null || $S dnf install -y unzip 2>/dev/null || true
+    unzip -o promtail.zip
+  fi
+  $S install -m 0755 promtail-linux-$NEARCH /usr/local/bin/promtail
+  cd / && rm -rf "$TMP"
+else
+  echo "[promtail] binary already up to date"
+fi
+
+$S mkdir -p /etc/promtail /var/lib/promtail
+$S chown promtail:promtail /var/lib/promtail
+
+# Use cat <<EOF (NOT quoted) so \$HOST gets expanded to the actual hostname.
+$S tee /etc/promtail/promtail.yaml >/dev/null <<EOF
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+positions:
+  filename: /var/lib/promtail/positions.yaml
+clients:
+  - url: ${promtail.pushUrl}
+scrape_configs:
+  - job_name: systemd-journal
+    journal:
+      path: /var/log/journal
+      max_age: 24h
+      labels:
+        cluster: ${promtail.cluster}
+        instance: $HOST
+        job: systemd-journal
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+      - source_labels: ['__journal_priority_keyword']
+        target_label: 'level'
+  - job_name: slurm-job-output
+    static_configs:
+      - targets: [localhost]
+        labels:
+          cluster: ${promtail.cluster}
+          instance: $HOST
+          job: slurm-output
+          __path__: /mnt/shared/*.out
+    pipeline_stages:
+      - match:
+          # The job output filename pattern from job-template-helpers
+          # ("<jobname>-<jobid>.out") — pull jobid out as a label.
+          selector: '{job="slurm-output"}'
+          stages:
+            - regex:
+                source: filename
+                expression: '.*-(?P<jobid>\\d+)\\.out$'
+            - labels:
+                jobid:
+EOF
+$S chown promtail:promtail /etc/promtail/promtail.yaml
+
+$S tee /etc/systemd/system/promtail.service >/dev/null <<UNIT
+[Unit]
+Description=Grafana Promtail (log shipper to Loki)
+After=network.target
+
+[Service]
+User=promtail
+Group=promtail
+Type=simple
+ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/promtail.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+$S systemctl daemon-reload
+$S systemctl enable promtail
+$S systemctl restart promtail
+sleep 1
+ss -ltn 2>/dev/null | grep -q ':9080 ' && echo "[promtail] running, shipping to ${promtail.pushUrl}" || echo "[promtail] WARNING not listening on :9080 — check journalctl -u promtail"
+` : `# Loki disabled — uninstall promtail if it exists.
+if systemctl list-unit-files 2>/dev/null | grep -q '^promtail\\.service'; then
+  echo "[promtail] disabling existing promtail (lokiEnabled=false)"
+  $S systemctl disable --now promtail 2>/dev/null || true
+  $S rm -f /etc/systemd/system/promtail.service /usr/local/bin/promtail
+  $S systemctl daemon-reload 2>/dev/null || true
+fi
+`}
+
 exit 0
 `;
 }
@@ -321,8 +444,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   // The install body runs on each worker via SSH-from-controller; we reuse
   // the same helper script and ssh into each target sequentially so logs are
-  // grouped per-host.
-  const inner = buildInstallScript(mode);
+  // grouped per-host. promtail (when enabled) needs the stack host's IP
+  // baked in so each node knows where to push logs.
+  const stack = resolveStackHost(cluster.controllerHost, config, metrics);
+  const stackIpForPush = stack.isController ? cluster.controllerHost : stack.ip;
+  const inner = buildInstallScript(mode, {
+    enabled: !!metrics.lokiEnabled,
+    pushUrl: `http://${stackIpForPush}:${metrics.lokiPort}/loki/api/v1/push`,
+    cluster: cluster.name,
+  });
   const workerBlock = targets.map((h) => {
     const u = h.user || "root";
     const p = h.port || 22;

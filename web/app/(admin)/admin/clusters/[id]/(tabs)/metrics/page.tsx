@@ -58,7 +58,10 @@ interface MetricsConfig {
   exporterMode: ExporterMode;
   prometheusPort: number;
   grafanaPort: number;
+  lokiPort: number;
   retention: string;
+  lokiRetention: string;
+  lokiEnabled: boolean;
   stackHost?: string;
   stackDataPath?: string;
   nodes: Record<string, { exporter?: "dcgm" | "nvidia_smi"; installedAt?: string; scrape?: boolean }>;
@@ -72,6 +75,7 @@ interface StackStatus {
   isController?: boolean;
   prometheus: "up" | "down";
   grafana: "up" | "down";
+  loki?: "up" | "down" | "disabled";
   grafanaDeployedAt: string | null;
 }
 
@@ -98,7 +102,7 @@ export default function MetricsPage() {
 
   // Stack-service journalctl viewer
   const [svcLogOpen, setSvcLogOpen] = useState(false);
-  const [svcLogService, setSvcLogService] = useState<"grafana" | "prometheus">("grafana");
+  const [svcLogService, setSvcLogService] = useState<"grafana" | "prometheus" | "loki">("grafana");
   const [svcLogOutput, setSvcLogOutput] = useState<string>("");
   const [svcLogLoading, setSvcLogLoading] = useState(false);
   const svcLogRef = useRef<HTMLDivElement>(null);
@@ -246,7 +250,7 @@ export default function MetricsPage() {
     }
   };
 
-  const openServiceLogs = async (svc: "grafana" | "prometheus") => {
+  const openServiceLogs = async (svc: "grafana" | "prometheus" | "loki") => {
     setSvcLogService(svc);
     setSvcLogOpen(true);
     setSvcLogOutput("");
@@ -473,6 +477,54 @@ export default function MetricsPage() {
               </p>
             </div>
           </div>
+
+          {/* Optional log aggregation toggle. Re-deploy stack + re-install
+              exporters after flipping — the deploy script provisions Loki
+              on the stack host and the install script provisions promtail
+              on every node so jobs' stdout + slurmd journals stream in. */}
+          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={!!cfg.lokiEnabled}
+                onChange={(e) => saveCfg({ lokiEnabled: e.target.checked })}
+                disabled={savingCfg}
+              />
+              <div className="flex-1">
+                <span className="text-sm font-medium">Enable log aggregation (Loki + promtail)</span>
+                <p className="text-[11px] text-muted-foreground">
+                  Adds Loki on the stack host and promtail on each node. Ships systemd journals (slurmd / slurmctld) and job stdout from <code>/mnt/shared/*.out</code> with the job id as a label, queryable from Grafana&apos;s Explore tab. Re-deploy the stack <strong>and</strong> re-install exporters after toggling.
+                </p>
+              </div>
+            </label>
+            {cfg.lokiEnabled && (
+              <div className="grid gap-3 md:grid-cols-2 pl-6">
+                <div>
+                  <Label className="text-xs">Loki port</Label>
+                  <Input
+                    type="number"
+                    defaultValue={cfg.lokiPort}
+                    onBlur={(e) => {
+                      const v = Number(e.target.value);
+                      if (v && v !== cfg.lokiPort) saveCfg({ lokiPort: v });
+                    }}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs">Loki retention</Label>
+                  <Input
+                    defaultValue={cfg.lokiRetention}
+                    placeholder="168h"
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v && v !== cfg.lokiRetention) saveCfg({ lokiRetention: v });
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -493,6 +545,14 @@ export default function MetricsPage() {
                 <Badge variant="outline" className={stack.grafana === "up" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}>
                   {stack.grafana}
                 </Badge>
+                {stack.loki && stack.loki !== "disabled" && (
+                  <>
+                    {" "}· Loki{" "}
+                    <Badge variant="outline" className={stack.loki === "up" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}>
+                      {stack.loki}
+                    </Badge>
+                  </>
+                )}
                 {stack.grafanaDeployedAt && (
                   <span className="ml-2" suppressHydrationWarning>
                     · deployed {new Date(stack.grafanaDeployedAt).toLocaleString()}
@@ -532,6 +592,14 @@ export default function MetricsPage() {
                 >
                   Grafana
                 </DropdownMenuItem>
+                {cfg.lokiEnabled && (
+                  <DropdownMenuItem
+                    onClick={() => openServiceLogs("loki")}
+                    disabled={!stack || stack.loki === "down"}
+                  >
+                    Loki
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
             {stack?.grafana === "up" && (

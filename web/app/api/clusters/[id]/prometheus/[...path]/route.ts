@@ -96,16 +96,31 @@ async function proxy(req: NextRequest, clusterId: string, pathSegs: string[]) {
 
   // -w prints the HTTP code on its own line at the end so we can demux
   // body vs status without hitting curl's header-mode in PTY-based bastion
-  // sessions (which corrupt -i header parsing).
-  const cmd = `curl -sS --max-time 15 ${bodyPart} -w '\\n__AURA_HTTP__:%{http_code}' ${shellQuote(url)}`;
+  // sessions (which corrupt -i header parsing). The TRAILING `\\n` is
+  // critical: without it, the bastion-mux wrapper's `echo __AURA_CMD_END…`
+  // glues onto the same buffered line as our marker, the mux sees the
+  // END marker first and discards the whole line — every 200 mis-mapped
+  // to a 502.
+  const cmd = `curl -sS --max-time 15 ${bodyPart} -w '\\n__AURA_HTTP__:%{http_code}\\n' ${shellQuote(url)}`;
   const r = await sshExecSimple(tgt, cmd);
   if (!r.success) {
     return NextResponse.json({ error: "Upstream SSH failed", detail: r.stderr || "ssh exited nonzero" }, { status: 502 });
   }
+  // Find the trailer marker anywhere near the end (not anchored), tolerant
+  // of trailing CR / NL noise that the bastion PTY likes to introduce. The
+  // previous anchored regex would miss when stdout ended in `\r\n` instead
+  // of plain `\n`, causing every successful 200 to be mis-mapped to 502.
   const out = r.stdout;
-  const m = out.match(/\n__AURA_HTTP__:(\d{3})\s*$/);
-  const code = m ? Number(m[1]) : 502;
-  const body = m ? out.slice(0, out.length - m[0].length) : out;
+  const idx = out.lastIndexOf("__AURA_HTTP__:");
+  let code = 502;
+  let body = out;
+  if (idx !== -1) {
+    const tail = out.slice(idx + "__AURA_HTTP__:".length).trim();
+    const cm = tail.match(/^(\d{3})/);
+    if (cm) code = Number(cm[1]);
+    // Strip the marker (and the leading \n curl printed before it) from body.
+    body = out.slice(0, idx).replace(/[\r\n]+$/, "");
+  }
   return new NextResponse(body, {
     status: code,
     headers: { "Content-Type": "application/json" },

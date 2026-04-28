@@ -21,6 +21,8 @@ import {
 import { toast } from "sonner";
 import { XCircle, RefreshCw, RotateCw, Repeat2 } from "lucide-react";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
+import { ErrorExplainer } from "@/components/jobs/error-explainer";
+import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0 B";
@@ -46,7 +48,7 @@ interface JobDetail {
   user?: { email: string; name: string | null; unixUsername: string | null };
 }
 
-const TAB_VALUES = ["output", "stderr", "usage", "info"] as const;
+const TAB_VALUES = ["output", "stderr", "usage", "info", "deps"] as const;
 type TabValue = (typeof TAB_VALUES)[number];
 
 export default function JobDetailPage() {
@@ -486,6 +488,26 @@ export default function JobDetailPage() {
 
       <Separator />
 
+      {/* Best-effort plain-English explanation for failed/cancelled jobs.
+          Renders nothing when no known patterns matched. We feed it the
+          fetched stdout tail + stderr body + Slurm Info dump (if loaded)
+          so a single match can be triggered by any source. */}
+      {(job.status === "FAILED" || job.status === "CANCELLED") && (
+        <ErrorExplainer
+          texts={[
+            stderrBody,
+            stderrMerged,
+            fetchedOutput,
+            infoSections ? Object.values(infoSections).join("\n") : null,
+          ]}
+          ctx={{
+            reason: (infoSections?.["scontrol show job -dd"] ?? "").match(/Reason=(\S+)/)?.[1] ?? null,
+            exitCode: job.exitCode,
+            status: job.status,
+          }}
+        />
+      )}
+
       <Tabs value={tab} onValueChange={(v) => {
         changeTab(v);
         if (v === "info" && !infoSections && !infoLoading) fetchInfo();
@@ -496,6 +518,7 @@ export default function JobDetailPage() {
           <TabsTrigger value="stderr">Stderr</TabsTrigger>
           {job.status === "RUNNING" && <TabsTrigger value="usage">Usage</TabsTrigger>}
           <TabsTrigger value="info">Slurm Info</TabsTrigger>
+          <TabsTrigger value="deps">Dependencies</TabsTrigger>
         </TabsList>
 
         <TabsContent value="output" className="mt-4">
@@ -669,6 +692,10 @@ export default function JobDetailPage() {
               </div>
             </div>
           ))}
+        </TabsContent>
+
+        <TabsContent value="deps" className="mt-4">
+          <JobDepsGraph clusterId={clusterId} jobId={jobId} />
         </TabsContent>
       </Tabs>
 

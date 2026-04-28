@@ -123,10 +123,24 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   const stack = resolveStackHost(cluster.controllerHost, config, metrics);
   const stackProbeIp = stack.isController ? "127.0.0.1" : stack.ip;
   const stackTarget = { ...target, bastion: cluster.sshBastion };
-  const stackCmd = `printf 'PROM='; curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://${stackProbeIp}:${promPort}/-/ready; printf '\\nGRAF='; curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://${stackProbeIp}:${grafanaPort}/api/health; printf '\\n'`;
+  // Probe Loki when enabled too — /ready is the standard k8s-style readiness
+  // endpoint (returns 200 once all internal modules are ready).
+  const lokiPort = metrics.lokiPort;
+  const stackCmd = [
+    `printf 'PROM='; curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://${stackProbeIp}:${promPort}/-/ready`,
+    `printf '\\nGRAF='; curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://${stackProbeIp}:${grafanaPort}/api/health`,
+    metrics.lokiEnabled
+      // exclude compactor — its ring-stability delay can keep /ready 503
+      // for ~10 min after start even though Loki is fully accepting writes
+      // and queries. We don't need the compactor for "is Loki up?".
+      ? `printf '\\nLOKI='; curl -s -o /dev/null -w '%{http_code}' --max-time 3 'http://${stackProbeIp}:${lokiPort}/ready?excluded_module=compactor'`
+      : "",
+    `printf '\\n'`,
+  ].filter(Boolean).join("; ");
   const sr = await sshExecSimple(stackTarget, stackCmd);
   const promUp = /PROM=200/.test(sr.stdout);
   const grafUp = /GRAF=200/.test(sr.stdout);
+  const lokiUp = metrics.lokiEnabled ? /LOKI=200/.test(sr.stdout) : null;
 
   return NextResponse.json({
     metrics,
@@ -136,6 +150,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
       isController: stack.isController,
       prometheus: promUp ? "up" : "down",
       grafana: grafUp ? "up" : "down",
+      loki: metrics.lokiEnabled ? (lokiUp ? "up" : "down") : "disabled",
       grafanaDeployedAt: metrics.grafanaDeployedAt ?? null,
     },
   });

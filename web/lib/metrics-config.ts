@@ -26,8 +26,17 @@ export interface MetricsConfig {
   exporterMode: ExporterMode;
   prometheusPort: number;
   grafanaPort: number;
+  lokiPort: number;
   // Prometheus retention, e.g. "15d", "30d", "90d".
   retention: string;
+  // Loki retention, e.g. "168h" (7d), "720h" (30d). Stored separately from
+  // Prometheus retention because logs are usually higher-volume / shorter-
+  // lived than time-series metrics.
+  lokiRetention: string;
+  // Optional log-aggregation pair. When false (default), the deploy
+  // skips installing Loki on the stack host and the per-node install
+  // skips promtail. Toggle from the Metrics tab.
+  lokiEnabled: boolean;
   // Hostname of the node that runs the Prometheus + Grafana stack. Special
   // value "controller" (or unset) uses the cluster controller. Otherwise
   // must match a slurm_hosts_entries[].hostname so we can resolve its IP
@@ -59,7 +68,10 @@ export const METRICS_DEFAULTS: MetricsConfig = {
   exporterMode: "auto",
   prometheusPort: 9090,
   grafanaPort: 3000,
+  lokiPort: 3100,
   retention: "15d",
+  lokiRetention: "168h",
+  lokiEnabled: false,
   stackHost: "controller",
   nodes: {},
 };

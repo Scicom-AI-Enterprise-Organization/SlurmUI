@@ -31,6 +31,7 @@ async function finishTask(taskId: string, success: boolean) {
 
 const PROMETHEUS_VERSION = "2.55.1";
 const GRAFANA_VERSION = "11.3.0";
+const LOKI_VERSION = "3.2.1";
 const DEFAULT_DATA_PATH = "/var/lib/aura-metrics";
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
@@ -140,8 +141,10 @@ enabled = false
 max_connections = 0
 `;
 
-  // Provision a Prometheus datasource pointing at the local prometheus
-  // (same host as grafana). Grafana picks this up on startup.
+  // Provision Prometheus (always) + Loki (when enabled) datasources. They
+  // point at localhost on the stack host because everything runs on the
+  // same machine.
+  const lokiEnabled = !!metrics.lokiEnabled;
   const datasourcesYaml = `apiVersion: 1
 datasources:
   - name: Prometheus
@@ -151,7 +154,13 @@ datasources:
     url: http://localhost:${metrics.prometheusPort}
     isDefault: true
     editable: true
-`;
+${lokiEnabled ? `  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://localhost:${metrics.lokiPort}
+    editable: true
+` : ""}`;
 
   // File-based dashboard provider. Grafana imports any *.json under
   // options.path on startup and re-checks every 30s.
@@ -167,6 +176,71 @@ providers:
       path: /etc/grafana/provisioning/dashboards/aura-gpu
 `;
 
+  // Loki config — single-binary mode, filesystem chunks, in-memory ring.
+  // Suited for one-host log aggregation on a small cluster; not meant for
+  // HA. Retention enforced by the compactor.
+  const lokiDataDir = `${dataPath}/loki`;
+  const lokiYml = `auth_enabled: false
+server:
+  http_listen_port: ${metrics.lokiPort}
+  grpc_listen_port: 0
+# instance_addr explicit so the ring doesn't try to auto-discover via the
+# host's IP — single-binary mode in 3.x bails with 503 on /ready when
+# auto-discovery fails (no eth0 with a routable IP, multiple NICs, etc).
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: ${lokiDataDir}
+  storage:
+    filesystem:
+      chunks_directory: ${lokiDataDir}/chunks
+      rules_directory: ${lokiDataDir}/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+limits_config:
+  retention_period: ${metrics.lokiRetention}
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  allow_structured_metadata: true
+# Compactor: retention enforcement + log deletion. delete_request_store
+# must point at one of the storage stanzas defined under common.storage —
+# "filesystem" matches what we set above. Loki refuses to start otherwise.
+# The compactor's ~10min "wait for ring to stay stable" delay still keeps
+# /ready returning 503 on cold start; we work around that by querying
+# /ready?excluded_module=compactor in the deploy probe and status check
+# (the compactor isn't required for ingest/query — only retention).
+compactor:
+  working_directory: ${lokiDataDir}/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+  compactor_ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+ruler:
+  storage:
+    type: local
+    local:
+      directory: ${lokiDataDir}/rules
+  rule_path: ${lokiDataDir}/rules-tmp
+  ring:
+    kvstore:
+      store: inmemory
+analytics:
+  reporting_enabled: false
+`;
+
   // base64-encode all configs so heredoc quoting / shell expansion never
   // mangles colons, quotes, or backticks. The remote side decodes them
   // verbatim.
@@ -174,6 +248,7 @@ providers:
   const grafB64 = Buffer.from(grafanaIni).toString("base64");
   const dsB64 = Buffer.from(datasourcesYaml).toString("base64");
   const dbB64 = Buffer.from(dashboardsYaml).toString("base64");
+  const lokiB64 = Buffer.from(lokiYml).toString("base64");
 
   const target = {
     host: cluster.controllerHost,
@@ -260,6 +335,97 @@ $S systemctl daemon-reload
 $S systemctl enable prometheus
 $S systemctl restart prometheus
 
+${lokiEnabled ? `############################################################
+# Loki binary + systemd unit (optional log aggregation)
+############################################################
+echo "[loki] installing v${LOKI_VERSION} ($NEARCH)..."
+$S id loki >/dev/null 2>&1 || $S useradd --no-create-home --shell /usr/sbin/nologin loki
+
+if [ ! -x /usr/local/bin/loki ] || ! /usr/local/bin/loki --version 2>&1 | grep -q "${LOKI_VERSION}"; then
+  TMP=$(mktemp -d)
+  cd "$TMP"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/loki-linux-$NEARCH.zip" -o loki.zip
+  else
+    wget -q "https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/loki-linux-$NEARCH.zip" -O loki.zip
+  fi
+  # unzip is part of base on most distros; fall back to busybox / bsdtar.
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -o loki.zip
+  elif command -v bsdtar >/dev/null 2>&1; then
+    bsdtar xf loki.zip
+  else
+    $S apt-get install -y -qq unzip 2>/dev/null || $S dnf install -y unzip 2>/dev/null || true
+    unzip -o loki.zip
+  fi
+  $S install -m 0755 loki-linux-$NEARCH /usr/local/bin/loki
+  cd / && rm -rf "$TMP"
+else
+  echo "[loki] binary already up to date"
+fi
+
+$S mkdir -p /etc/loki ${lokiDataDir} ${lokiDataDir}/chunks ${lokiDataDir}/rules ${lokiDataDir}/compactor
+echo "${lokiB64}" | base64 -d | $S tee /etc/loki/loki.yaml >/dev/null
+$S chown -R loki:loki ${lokiDataDir} /etc/loki
+
+$S tee /etc/systemd/system/loki.service >/dev/null <<UNIT
+[Unit]
+Description=Loki log aggregator
+After=network.target
+
+[Service]
+User=loki
+Group=loki
+Type=simple
+ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+$S systemctl daemon-reload
+$S systemctl enable loki
+$S systemctl restart loki
+` : `############################################################
+# Loki DISABLED in cluster config — tear down Loki on the stack host
+# AND sweep promtail off every node (since they were paired together).
+############################################################
+echo "[loki] log aggregation disabled in config — tearing down"
+if systemctl list-unit-files 2>/dev/null | grep -q '^loki\\.service'; then
+  echo "[loki] stopping & disabling unit"
+  $S systemctl disable --now loki 2>&1 | tail -3
+  $S rm -f /etc/systemd/system/loki.service /usr/local/bin/loki
+  $S rm -rf /etc/loki ${lokiDataDir}
+  $S systemctl daemon-reload 2>/dev/null || true
+  $S id loki >/dev/null 2>&1 && $S userdel loki 2>/dev/null || true
+  echo "[loki] removed"
+else
+  echo "[loki] no unit installed — nothing to remove on stack host"
+fi
+
+echo "[promtail] sweeping every node to remove promtail (lokiEnabled=false)"
+${(config.slurm_hosts_entries as Array<{ hostname: string; ip: string; user?: string; port?: number }> ?? []).map((h) => {
+  const u = h.user || "root";
+  const p = h.port || 22;
+  return `
+echo "[promtail] [${h.hostname}] removing..."
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p ${p} ${u}@${h.ip} bash -s <<'PT_EOF' || echo "[promtail] [${h.hostname}] ssh failed (skipping)"
+set +e
+S=""; [ "$(id -u)" != "0" ] && S="sudo"
+if systemctl list-unit-files 2>/dev/null | grep -q '^promtail\\.service'; then
+  $S systemctl disable --now promtail 2>&1 | tail -3
+  $S rm -f /etc/systemd/system/promtail.service /usr/local/bin/promtail
+  $S rm -rf /etc/promtail /var/lib/promtail
+  $S systemctl daemon-reload 2>/dev/null || true
+  echo "  removed"
+else
+  echo "  no promtail unit — nothing to do"
+fi
+PT_EOF`;
+}).join("\n")}
+`}
 ############################################################
 # Grafana tarball + systemd unit
 ############################################################
@@ -422,7 +588,21 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   echo "[grafana] not ready ($CODE) — retry $i/10"
   sleep 2
 done
-
+${lokiEnabled ? `LOKI_OK=0
+# excluded_module=compactor avoids waiting on the compactor's ring-stability
+# delay (which can be minutes on cold start). Loki accepts pushes / queries
+# long before the compactor passes /ready; we only need it for retention.
+for i in 1 2 3 4 5 6 7 8; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${metrics.lokiPort}/ready?excluded_module=compactor" 2>/dev/null || echo "000")
+  if [ "$CODE" = "200" ]; then echo "[loki] ready (HTTP $CODE)"; LOKI_OK=1; break; fi
+  echo "[loki] not ready ($CODE) — retry $i/8"
+  sleep 2
+done
+if [ "$LOKI_OK" != "1" ]; then
+  echo "[loki] FAILED to become ready — last 40 lines of journal:"
+  $S journalctl -u loki -n 40 --no-pager 2>&1 | sed 's/^/  /' || true
+fi
+` : ""}
 echo "[stack] Deploy complete."
 `;
 

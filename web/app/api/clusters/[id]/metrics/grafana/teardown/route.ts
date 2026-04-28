@@ -65,7 +65,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
 S=""
 [ "$(id -u)" != "0" ] && S="sudo"
 
-for svc in grafana prometheus; do
+for svc in grafana prometheus loki; do
   if systemctl list-unit-files | grep -q "^\${svc}\\.service"; then
     echo "[\${svc}] stopping & disabling..."
     $S systemctl disable --now \${svc} 2>&1 | tail -3
@@ -73,8 +73,8 @@ for svc in grafana prometheus; do
   fi
 done
 
-$S rm -f /usr/local/bin/prometheus /usr/local/bin/promtool
-$S rm -rf /opt/grafana /opt/grafana-* /etc/prometheus /etc/grafana
+$S rm -f /usr/local/bin/prometheus /usr/local/bin/promtool /usr/local/bin/loki
+$S rm -rf /opt/grafana /opt/grafana-* /etc/prometheus /etc/grafana /etc/loki
 $S rm -rf ${dataPath}
 
 $S systemctl daemon-reload 2>/dev/null || true

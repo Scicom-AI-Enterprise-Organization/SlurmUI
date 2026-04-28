@@ -8,7 +8,7 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-const ALLOWED = new Set(["grafana", "prometheus"]);
+const ALLOWED = new Set(["grafana", "prometheus", "loki"]);
 
 /**
  * Tail systemd logs for the metrics stack services. Read-only.
@@ -27,7 +27,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const url = new URL(req.url);
   const service = url.searchParams.get("service") ?? "";
   if (!ALLOWED.has(service)) {
-    return NextResponse.json({ error: "service must be grafana or prometheus" }, { status: 400 });
+    return NextResponse.json({ error: "service must be grafana, prometheus, or loki" }, { status: 400 });
   }
   const linesRaw = Number(url.searchParams.get("lines") ?? "300");
   const lines = Number.isFinite(linesRaw) ? Math.max(50, Math.min(2000, Math.floor(linesRaw))) : 300;

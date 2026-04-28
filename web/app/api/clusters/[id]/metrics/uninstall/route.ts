@@ -51,8 +51,15 @@ if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' | gre
   $S docker rm -f aura-dcgm-exporter 2>&1 | tail -3
 fi
 
+if systemctl list-unit-files | grep -q '^promtail\\.service'; then
+  echo "[promtail] stopping & disabling..."
+  $S systemctl disable --now promtail 2>&1 | tail -3
+  $S rm -f /etc/systemd/system/promtail.service /usr/local/bin/promtail
+  $S rm -rf /etc/promtail /var/lib/promtail
+fi
+
 $S systemctl daemon-reload 2>/dev/null || true
-echo "[done] exporters removed"
+echo "[done] exporters + promtail removed"
 `;
 
 export async function POST(req: NextRequest, { params }: RouteParams) {

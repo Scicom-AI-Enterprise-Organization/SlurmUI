@@ -58,7 +58,10 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
     exporterMode: ExporterMode;
     prometheusPort: number;
     grafanaPort: number;
+    lokiPort: number;
     retention: string;
+    lokiRetention: string;
+    lokiEnabled: boolean;
     stackHost: string;
     stackDataPath: string;
   }> = {};
@@ -73,8 +76,17 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
   if (Number.isInteger(body.grafanaPort) && body.grafanaPort > 0 && body.grafanaPort < 65536) {
     patch.grafanaPort = body.grafanaPort;
   }
+  if (Number.isInteger(body.lokiPort) && body.lokiPort > 0 && body.lokiPort < 65536) {
+    patch.lokiPort = body.lokiPort;
+  }
   if (typeof body.retention === "string" && /^\d+[smhdwy]$/.test(body.retention)) {
     patch.retention = body.retention;
+  }
+  if (typeof body.lokiRetention === "string" && /^\d+[smhdwy]$/.test(body.lokiRetention)) {
+    patch.lokiRetention = body.lokiRetention;
+  }
+  if (typeof body.lokiEnabled === "boolean") {
+    patch.lokiEnabled = body.lokiEnabled;
   }
   if (typeof body.stackHost === "string" && body.stackHost.trim()) {
     patch.stackHost = body.stackHost.trim();
