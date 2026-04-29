@@ -2,6 +2,7 @@ import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { sshExecSimple } from "@/lib/ssh-exec";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { JobTable } from "@/components/jobs/job-table";
 import { JobsLast24hChart } from "@/components/dashboard/jobs-last-24h-chart";
@@ -12,12 +13,34 @@ import { PerClusterSplit } from "@/components/dashboard/per-cluster-split";
 import { ResourceHours7d } from "@/components/dashboard/resource-hours-7d";
 import { ActivityHeatmap } from "@/components/dashboard/activity-heatmap";
 
-// Pull #SBATCH --gres=gpu:N and --cpus-per-task=N out of a submission script.
+// Pull GPU and CPU request counts out of a submission script.
+//
+// Slurm has many ways to ask for GPUs and we want compute-consumed totals
+// to be honest, so we accept all the common forms a user might write:
+//   --gres=gpu:N              (legacy, but very common)
+//   --gres=gpu:a100:N         (typed)
+//   --gpus=N      / -G N      (newer Slurm, per-job)
+//   --gpus-per-task=N
+//   --gpus-per-node=N
+// We pick the largest N seen — submitting `--gpus=4` AND `--gpus-per-node=4`
+// in the same script asks for 4 (not 8); largest is the safe approximation.
+// Same regex tolerance for CPUs (`--cpus-per-task` / `-c`).
 function parseJobGresCpus(script: string): { gpus: number; cpus: number } {
-  const gres = script.match(/#SBATCH\s+--gres=gpu(?::[^:\s]+)?:(\d+)/);
+  const gpuPatterns: RegExp[] = [
+    /#SBATCH\s+--gres=gpu(?::[^:\s]+)?:(\d+)/,
+    /#SBATCH\s+--gpus[=\s]+(?:[a-z0-9_-]+:)?(\d+)/i,
+    /#SBATCH\s+-G[=\s]+(?:[a-z0-9_-]+:)?(\d+)/i,
+    /#SBATCH\s+--gpus-per-task[=\s]+(?:[a-z0-9_-]+:)?(\d+)/i,
+    /#SBATCH\s+--gpus-per-node[=\s]+(?:[a-z0-9_-]+:)?(\d+)/i,
+  ];
+  let gpus = 0;
+  for (const re of gpuPatterns) {
+    const m = script.match(re);
+    if (m) gpus = Math.max(gpus, parseInt(m[1], 10) || 0);
+  }
   const cpt = script.match(/#SBATCH\s+(?:--cpus-per-task|-c)[=\s]+(\d+)/);
   return {
-    gpus: gres ? parseInt(gres[1], 10) || 0 : 0,
+    gpus,
     cpus: cpt ? parseInt(cpt[1], 10) || 1 : 1,
   };
 }
@@ -39,31 +62,46 @@ export default async function DashboardPage() {
   if (!session?.user) redirect("/api/auth/signin");
 
   const userId = session.user.id;
+  const isAdmin = (session.user as { role?: string }).role === "ADMIN";
+  // Admins act as cluster operators — their dashboard shows cluster-wide
+  // activity. Non-admins see their own jobs. Imports / GitOps / agents
+  // can attribute jobs to a different Aura user (e.g. import maps Slurm
+  // `admin` → the user with unixUsername="admin"), so an admin viewing
+  // under a different login would otherwise see 0 across every panel.
+  // Single `scope` object so every Prisma query stays consistent.
+  const scope: Record<string, unknown> = isAdmin ? {} : { userId };
   const now = new Date();
   const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const since60d = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
 
+  // Two scopes on this page:
+  //   - "Your work" panels (Recent jobs, Top failures, Duration histogram,
+  //     Compute consumed, By cluster, Activity heatmap) follow `scope`.
+  //   - Live operational panels (running / queued tiles, live queue,
+  //     status donut) are cluster-wide. They answer "what's happening on
+  //     the cluster right now?". Everyone benefits from this view, not
+  //     just admins, since it tells you how busy the queue is before you
+  //     submit.
+  // Both kinds are clearly labelled in the UI to avoid the cross-scope
+  // surprise the QA report flagged.
   const [recentJobs, jobs7d, liveJobs, createdAt60d] = await Promise.all([
     prisma.job.findMany({
-      where: { userId },
+      where: { ...scope },
       orderBy: { createdAt: "desc" },
       take: 10,
       include: { cluster: { select: { name: true } } },
     }),
     prisma.job.findMany({
-      where: { userId, createdAt: { gte: since7d } },
+      where: { ...scope, createdAt: { gte: since7d } },
       select: {
         id: true, status: true, exitCode: true, createdAt: true, updatedAt: true,
-        script: true, cluster: { select: { id: true, name: true } },
+        script: true, slurmJobId: true,
+        cluster: { select: { id: true, name: true } },
       },
     }),
-    // User-scoped — every other panel on this page filters by userId, so
-    // leaving liveJobs unscoped meant the "Jobs (24h)" tile (user-scope)
-    // and the donut total (cluster-scope, multiplied by 24 hourly buckets)
-    // disagreed wildly. Same scope across the dashboard now.
     prisma.job.findMany({
-      where: { userId, status: { in: ["PENDING", "RUNNING"] } },
+      where: { status: { in: ["PENDING", "RUNNING"] } },
       select: {
         id: true, status: true, createdAt: true, slurmJobId: true,
         cluster: { select: { id: true, name: true } },
@@ -71,10 +109,83 @@ export default async function DashboardPage() {
       orderBy: { createdAt: "desc" },
     }),
     prisma.job.findMany({
-      where: { userId, createdAt: { gte: since60d } },
+      where: { ...scope, createdAt: { gte: since60d } },
       select: { createdAt: true },
     }),
   ]);
+
+  // Cluster-wide 24h terminal counts — drives the Status breakdown donut.
+  // We pull only the status column to keep this cheap, since this can
+  // sweep every user's jobs on the cluster.
+  const clusterTerminal24h = await prisma.job.findMany({
+    where: { createdAt: { gte: since24h }, status: { in: ["COMPLETED", "FAILED", "CANCELLED"] } },
+    select: { status: true },
+  });
+
+  // Live GPU count lookup. Slurm 23+ doesn't put gres in squeue's %b/%G or
+  // sacct AllocTRES — the only authoritative source for a running job's
+  // GPU count is `scontrol show job <id>` -> JOB_GRES=gpu:N. Imported jobs
+  // have placeholder scripts without the directive so the regex returns 0.
+  // Fix at render time: query each cluster ONCE for all the user's running
+  // job ids and merge those counts into the compute-hours calculation.
+  const liveGpuByJobId = new Map<string, number>();
+  const runningJobsByCluster = new Map<string, { clusterId: string; slurmIds: number[] }>();
+  for (const j of jobs7d) {
+    if (j.status !== "RUNNING" || !j.cluster?.id) continue;
+    const slurmId = (j as { slurmJobId: number | null }).slurmJobId;
+    if (!slurmId) continue;
+    let bucket = runningJobsByCluster.get(j.cluster.id);
+    if (!bucket) {
+      bucket = { clusterId: j.cluster.id, slurmIds: [] };
+      runningJobsByCluster.set(j.cluster.id, bucket);
+    }
+    bucket.slurmIds.push(slurmId);
+  }
+  if (runningJobsByCluster.size > 0) {
+    const clusterIds = Array.from(runningJobsByCluster.keys());
+    const clustersForSsh = await prisma.cluster.findMany({
+      where: { id: { in: clusterIds } },
+      include: { sshKey: true },
+    });
+    await Promise.all(clustersForSsh.map(async (c) => {
+      const bucket = runningJobsByCluster.get(c.id);
+      if (!bucket || !c.sshKey || c.connectionMode !== "SSH") return;
+      const idList = bucket.slurmIds.join(" ");
+      // grep+cut instead of `awk match(...,m)` — that 3-arg form is
+      // gawk-only and Debian/Ubuntu's default mawk silently drops the
+      // captured group, returning empty output and leaving the live-
+      // GPU map empty.
+      const cmd = `for J in ${idList}; do
+  G=$(scontrol show job "$J" 2>/dev/null | grep -oE 'JOB_GRES=[^ ]+' | head -1 | cut -d= -f2)
+  if [ -n "$G" ]; then echo "$J|$G"; fi
+done`;
+      const r = await sshExecSimple({
+        host: c.controllerHost,
+        user: c.sshUser,
+        port: c.sshPort,
+        privateKey: c.sshKey.privateKey,
+        bastion: c.sshBastion,
+        jumpHost: c.sshJumpHost,
+        jumpUser: c.sshJumpUser,
+        jumpPort: c.sshJumpPort,
+        proxyCommand: c.sshProxyCommand,
+        jumpProxyCommand: c.sshJumpProxyCommand,
+      }, cmd).catch(() => null);
+      if (!r || !r.success) return;
+      for (const line of r.stdout.split("\n")) {
+        const m = line.trim().match(/^(\d+)\|gpu(?::[A-Za-z0-9_-]+)?:(\d+)$/);
+        if (m) liveGpuByJobId.set(`${c.id}:${m[1]}`, parseInt(m[2], 10));
+      }
+    }));
+  }
+  // Helper: per-job GPU count, preferring live Slurm data for RUNNING.
+  const gpusForJob = (j: { status: string; script: string; slurmJobId: number | null; cluster?: { id: string } | null }): number => {
+    if (j.status === "RUNNING" && j.slurmJobId && j.cluster?.id) {
+      const live = liveGpuByJobId.get(`${j.cluster.id}:${j.slurmJobId}`);
+      if (live !== undefined) return live;
+    }
+    return parseJobGresCpus(j.script).gpus;
+  };
 
   // ---------- 24h rollup (for area chart + donut + totals) ----------
   const jobs24h = jobs7d.filter((j) => j.createdAt >= since24h);
@@ -107,10 +218,15 @@ export default async function DashboardPage() {
       b.running += 1;
     }
   }
-  const last24Totals = buckets.reduce(
-    (acc, b) => ({ running: acc.running + b.running, completed: acc.completed + b.completed, failed: acc.failed + b.failed }),
-    { running: 0, completed: 0, failed: 0 },
-  );
+  // Donut is CLUSTER-wide so admins (and users curious about overall
+  // activity) actually see something. Running/queued counts come from
+  // liveJobs (cluster-wide PENDING/RUNNING) and the terminal counts come
+  // from the dedicated 24h cluster query above. No bucket multiplication.
+  const last24Totals = {
+    running: liveJobs.filter((j) => j.status === "RUNNING").length,
+    completed: clusterTerminal24h.filter((j) => j.status === "COMPLETED").length,
+    failed: clusterTerminal24h.filter((j) => j.status === "FAILED" || j.status === "CANCELLED").length,
+  };
 
   // ---------- KPI stats ----------
   const running = liveJobs.filter((j) => j.status === "RUNNING").length;
@@ -132,10 +248,17 @@ export default async function DashboardPage() {
   let gpuHours7d = 0;
   let cpuHours7d = 0;
   for (const j of jobs7d) {
-    if (j.status !== "COMPLETED" && j.status !== "FAILED" && j.status !== "CANCELLED") continue;
-    const durSec = (j.updatedAt.getTime() - j.createdAt.getTime()) / 1000;
+    // Terminal jobs use createdAt → updatedAt as duration. RUNNING jobs
+    // are counted too with createdAt → now (clamped to the window).
+    const isTerminal = j.status === "COMPLETED" || j.status === "FAILED" || j.status === "CANCELLED";
+    const isLive = j.status === "RUNNING";
+    if (!isTerminal && !isLive) continue;
+    const startMs = Math.max(j.createdAt.getTime(), since7d.getTime());
+    const endMs = isTerminal ? j.updatedAt.getTime() : now.getTime();
+    const durSec = (endMs - startMs) / 1000;
     if (durSec <= 0) continue;
-    const { gpus, cpus } = parseJobGresCpus(j.script);
+    const { cpus } = parseJobGresCpus(j.script);
+    const gpus = gpusForJob(j);
     gpuHours7d += (gpus * durSec) / 3600;
     cpuHours7d += (cpus * durSec) / 3600;
   }
@@ -180,14 +303,20 @@ export default async function DashboardPage() {
     return { day: `${d.getMonth() + 1}/${d.getDate()}`, gpu: 0, cpu: 0, epoch: d.getTime() };
   });
   for (const j of jobs7d) {
-    if (j.status !== "COMPLETED" && j.status !== "FAILED" && j.status !== "CANCELLED") continue;
-    const durSec = (j.updatedAt.getTime() - j.createdAt.getTime()) / 1000;
+    // Same in-flight inclusion as the GPU/CPU-hours tile above so the
+    // daily chart and the headline tile stay consistent.
+    const isTerminal = j.status === "COMPLETED" || j.status === "FAILED" || j.status === "CANCELLED";
+    const isLive = j.status === "RUNNING";
+    if (!isTerminal && !isLive) continue;
+    const startMs = Math.max(j.createdAt.getTime(), since7d.getTime());
+    const endMs = isTerminal ? j.updatedAt.getTime() : now.getTime();
+    const durSec = (endMs - startMs) / 1000;
     if (durSec <= 0) continue;
-    const { gpus, cpus } = parseJobGresCpus(j.script);
-    // Bucket by the job's end date.
-    const end = new Date(j.updatedAt);
-    end.setHours(0, 0, 0, 0);
-    const slot = dayHours.find((d) => d.epoch === end.getTime());
+    const { cpus } = parseJobGresCpus(j.script);
+    const gpus = gpusForJob(j);
+    const bucketDate = new Date(endMs);
+    bucketDate.setHours(0, 0, 0, 0);
+    const slot = dayHours.find((d) => d.epoch === bucketDate.getTime());
     if (slot) {
       slot.gpu += (gpus * durSec) / 3600;
       slot.cpu += (cpus * durSec) / 3600;
@@ -250,11 +379,14 @@ export default async function DashboardPage() {
         </p>
       </div>
 
-      {/* ---------- KPI stat row ---------- */}
+      {/* ---------- KPI stat row ----------
+          The first three tiles are CLUSTER-wide (live queue snapshot —
+          useful before submitting). "Your jobs (24h)" / success / median
+          duration are scoped to the signed-in user. */}
       <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
-        <StatCard label="Running now" value={running} tone={running > 0 ? "positive" : "muted"} />
-        <StatCard label="Queued" value={queued} tone={queued > 0 ? "warning" : "muted"} />
-        <StatCard label="Jobs (24h)" value={jobs24h.length} />
+        <StatCard label="Running (cluster)" value={running} tone={running > 0 ? "positive" : "muted"} />
+        <StatCard label="Queued (cluster)" value={queued} tone={queued > 0 ? "warning" : "muted"} />
+        <StatCard label={isAdmin ? "Jobs (24h)" : "Your jobs (24h)"} value={jobs24h.length} />
         <StatCard
           label="Success rate (24h)"
           value={successRate === null ? "—" : `${successRate}%`}
@@ -285,7 +417,7 @@ export default async function DashboardPage() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Status breakdown</CardTitle>
+            <CardTitle className="text-sm font-medium">Status breakdown (cluster, 24h)</CardTitle>
           </CardHeader>
           <CardContent>
             <JobsStatusDonut
