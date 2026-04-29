@@ -26,7 +26,9 @@ wraps the day-to-day operations in a single web UI:
   and flip accounting / scheduling modes without shelling into the controller.
 - **For users** — browse NFS + object storage, submit batch jobs from a form or
   raw editor (with ready-to-run examples), save reusable templates, watch job
-  output live, and read an in-app "Learn Slurm" guide.
+  output live, expose a running job's HTTP/WebSocket service through Aura
+  (Jupyter, vLLM OpenAPI, TensorBoard, …) via a per-job reverse proxy, and
+  read an in-app "Learn Slurm" guide.
 - **For on-call** — one-click node diagnostics (ping, port probes, chrony,
   slurmd status, recent logs), a **Fix** button that resumes stuck CG/DRAIN
   nodes, a **Reset Queue** button that scancels zombie pending jobs, a
@@ -195,9 +197,10 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 - **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. Per-row **Restart** button on FAILED jobs does a fresh `sbatch` of the stored script through a background task and opens a live log dialog — footer flips to a **Go to job `<id>`** deep-link once the new job row is created. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
 - **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line. **Resource availability gate** in form mode polls `/resources` and disables the Submit button (with an amber per-resource shortage list) when the request exceeds free CPUs / GPUs / memory cluster-wide — saves a round-trip to `PD: Resources` queue limbo.
 - **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
-- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. **Dependencies** tab renders the local DAG (parents → this job → children) parsed from `Dependency=afterok:N,afterany:M` plus a `squeue`/`sacct` reverse scan for downstream jobs; deep-links to other Aura Job rows when the Slurm id maps. **Expose metrics** tab toggles Prometheus scrape on a per-job port (e.g. vLLM's `:8000/metrics`) — saving runs a pre-flight probe and refuses unscrapable ports. On `FAILED` / `CANCELLED` jobs, an inline **error explainer** above the tabs pattern-matches stderr / output / Slurm Info against ~20 well-known failure modes (cgroup OOM, CUDA OOM, time-limit, NVIDIA XID 79 / ECC / clocking, NCCL / Gloo init, partition / QoS / Assoc limits, Munge auth, NFS stale, driver mismatch, ssh publickey, …) and explains each in plain English with a `user fix` vs `ops` tag and a concrete next step. Cancel with confirmation dialog.
+- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. **Dependencies** tab renders the local DAG (parents → this job → children) parsed from `Dependency=afterok:N,afterany:M` plus a `squeue`/`sacct` reverse scan for downstream jobs; deep-links to other Aura Job rows when the Slurm id maps. **Expose metrics** tab toggles Prometheus scrape on a per-job port (e.g. vLLM's `:8000/metrics`) — saving runs a pre-flight probe and refuses unscrapable ports. **Proxy** tab toggles a per-job HTTP+WebSocket reverse proxy at `/job-proxy/<clusterId>/<jobId>/*` so users can hit a running job's web UI / API directly from a browser tab — see [Job proxy](#job-proxy) for details. Both running-only tabs are disabled when the job isn't `RUNNING`. On `FAILED` / `CANCELLED` jobs, an inline **error explainer** above the tabs pattern-matches stderr / output / Slurm Info against ~20 well-known failure modes (cgroup OOM, CUDA OOM, time-limit, NVIDIA XID 79 / ECC / clocking, NCCL / Gloo init, partition / QoS / Assoc limits, Munge auth, NFS stale, driver mismatch, ssh publickey, …) and explains each in plain English with a `user fix` vs `ops` tag and a concrete next step. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
 - **Metrics** — six native Recharts panels (GPU utilization, GPU memory %, GPU temp, GPU power, host CPU %, host memory %) with 5m / 15m / 1h / 6h / 24h range selector and 30 s auto-refresh. PromQL queries are union'd across DCGM and `nvidia_smi` exporter metric names so either mode renders. **Open Grafana** button reverse-proxies the cluster's Grafana UI through this app at `/grafana-proxy/<clusterId>/` (no iframe — Grafana served on Aura's origin) — one-shot SSH local port-forward per cluster, basic-auth injected server-side using the rotating admin password, no Grafana login screen.
+- **Proxies** — cluster-level listing of every job that has the **Proxy** tab toggled on. Cards show job name + optional label (e.g. "Jupyter", "vLLM"), Slurm id, partition, submitter, the proxy URL, an **Open** button (disabled when the job isn't `RUNNING`), and a trash button to remove the proxy via a confirmation dialog. Auto-refreshes every 10 s. See [Job proxy](#job-proxy) for the underlying mechanism.
 - **Profile** (`/profile`) — your identity card, Linux account (copy-to-clipboard for username / UID / GID), cluster provisioning table, and activity totals (jobs submitted, running, templates saved). Local-login accounts can change their own password here.
 - **Learn Slurm** (`/explain`) — 16-section practical guide to Slurm concepts, commands, and where each one lives in SlurmUI.
 
@@ -369,6 +372,60 @@ node --test --test-reporter=spec web/test/api-v1.test.mjs
 Route handlers get their coverage through the integration test — they
 `import` from `next/server`, which can't be loaded under a vanilla
 `node:test` process without a Next-aware runner.
+
+### Job proxy
+
+Per-job HTTP + WebSocket reverse proxy at
+`/job-proxy/<clusterId>/<jobId>/*` so users can reach a running job's web
+UI directly from a browser. Generic — works for vLLM's OpenAPI docs,
+Jupyter, TensorBoard, MLflow, Streamlit, custom FastAPI / Flask / Express
+apps. Toggle from the **Proxy** tab on the job detail page (port +
+optional label); listing on the cluster's **Proxies** tab.
+
+Network path: workers usually live on a private network only the
+controller can reach, so the web server can't TCP-connect to
+`<workerIP>:<port>` directly. Aura solves this with a per-`(clusterId,
+jobId)` SSH local port-forward (`ssh -N -L <localport>:<workerIP>:<port>`)
+through the controller — same pattern as the Grafana proxy. The HTTP
+route fetches `http://127.0.0.1:<localport>/<path>`; the WebSocket
+upgrade hook in `server.ts` opens a raw socket to the same local port and
+pipes both directions. Tunnels are cached in-memory and rebuilt lazily on
+socket-level errors.
+
+Path semantics:
+
+- The `/job-proxy/<clusterId>/<jobId>` prefix is **stripped** before
+  forwarding upstream — `/job-proxy/.../docs` arrives at the service as
+  `/docs`. Matches the convention most lightweight services expect (and
+  what vLLM ships with — there's no `--root-path` flag).
+- `X-Forwarded-Prefix: /job-proxy/<clusterId>/<jobId>` is sent so prefix-
+  aware frameworks (FastAPI `root_path` with proxy headers, Werkzeug,
+  Spring's `ForwardedHeaderFilter`) emit correctly-prefixed absolute
+  links.
+- HTML response bodies have absolute-path quoted strings (`href="/foo"`,
+  `url: "/openapi.json"`) rewritten to include the prefix so the
+  browser's next request lands back at the proxy.
+- JSON responses with an `openapi` (3.x) or `swagger` (2.0) field get a
+  `servers: [{ url: "/job-proxy/<clusterId>/<jobId>" }]` injected (or
+  `basePath` for Swagger 2.0) so Swagger UI's "Try it out" curl examples
+  build URLs against the proxy instead of the page origin.
+- 3xx `Location` headers pointing at absolute paths are rewritten the
+  same way.
+
+Auth: ADMIN, the job submitter, or any active `ClusterUser` member of
+the same cluster. The session JWT is decoded directly in the WS upgrade
+hook (NextAuth doesn't offer a route-handler equivalent for raw upgrades).
+
+The Proxy and Expose-metrics tabs both **disable themselves** when the
+job isn't `RUNNING` — saving a port for a non-running job has no useful
+effect.
+
+> **Dev caveat** — `docker-compose.dev.yml` runs `next dev`, which
+> bypasses the custom `server.ts` entrypoint. The HTTP side of the
+> proxy works in dev as-is; WebSocket upgrades only fire under the
+> custom server. Switch the dev `command` to `npm run dev:custom`
+> (`tsx server.ts`) when you need to test WS proxying locally —
+> production images already use `server.ts`.
 
 ### Observability
 
