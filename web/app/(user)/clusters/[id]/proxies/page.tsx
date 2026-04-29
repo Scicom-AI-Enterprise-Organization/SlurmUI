@@ -1,0 +1,283 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { JobStatusBadge } from "@/components/jobs/job-status-badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { ExternalLink, RefreshCw, Globe, Trash2, Loader2 } from "lucide-react";
+import { toast } from "sonner";
+
+interface ProxyItem {
+  id: string;
+  slurmJobId: number | null;
+  jobName: string;
+  partition: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  proxyPort: number;
+  proxyName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  user: { id: string; email: string; name: string | null; unixUsername: string | null } | null;
+}
+
+export default function ProxiesPage() {
+  const { id } = useParams<{ id: string }>();
+  const [proxies, setProxies] = useState<ProxyItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<ProxyItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const removeProxy = async (item: ProxyItem) => {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/clusters/${id}/jobs/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxyPort: null, proxyName: null }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error("Couldn't remove proxy", {
+          description: d.error ?? `HTTP ${res.status}`,
+        });
+        return;
+      }
+      setConfirmDelete(null);
+      await fetchProxies();
+    } catch (e) {
+      toast.error("Couldn't remove proxy", {
+        description: e instanceof Error ? e.message : "Network error",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const fetchProxies = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/clusters/${id}/proxies`);
+      const d = await res.json();
+      if (!res.ok) {
+        setError(d.error ?? `HTTP ${res.status}`);
+        setProxies([]);
+        return;
+      }
+      setProxies(d.proxies ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchProxies(); }, [id]);
+
+  // Auto-refresh every 10s so a job flipping to RUNNING shows up without
+  // the user having to click around. Lightweight read; no SSH involved.
+  useEffect(() => {
+    const t = setInterval(fetchProxies, 10000);
+    return () => clearInterval(t);
+  }, [id]);
+
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const running = proxies.filter((p) => p.status === "RUNNING");
+  const other = proxies.filter((p) => p.status !== "RUNNING");
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Proxies</h1>
+          <p className="text-sm text-muted-foreground">
+            Per-job HTTP/WebSocket reverse proxies. Set a port on a job&apos;s{" "}
+            <strong>Proxy</strong> tab to expose it here.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={fetchProxies} disabled={loading}>
+          <RefreshCw className={`mr-2 h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {!loading && proxies.length === 0 && !error && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-16 text-center text-muted-foreground gap-3">
+          <Globe className="h-10 w-10 opacity-40" />
+          <p className="text-base font-medium">No proxies configured</p>
+          <p className="max-w-md text-sm">
+            Open a job&apos;s detail page and use the <strong>Proxy</strong> tab to expose its
+            HTTP/WebSocket service through Aura. Useful for Jupyter, TensorBoard, MLflow,
+            Streamlit, custom FastAPI/Flask apps — anything that speaks HTTP on a known port.
+          </p>
+        </div>
+      )}
+
+      {running.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            Running ({running.length})
+          </h2>
+          <div className="grid gap-3 md:grid-cols-2">
+            {running.map((p) => (
+              <ProxyCard
+                key={p.id}
+                clusterId={id}
+                item={p}
+                origin={origin}
+                onDelete={() => setConfirmDelete(p)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {other.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            Inactive ({other.length})
+          </h2>
+          <div className="grid gap-3 md:grid-cols-2">
+            {other.map((p) => (
+              <ProxyCard
+                key={p.id}
+                clusterId={id}
+                item={p}
+                origin={origin}
+                onDelete={() => setConfirmDelete(p)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      <Dialog open={!!confirmDelete} onOpenChange={(o) => { if (!o && !deleting) setConfirmDelete(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove proxy?</DialogTitle>
+            <DialogDescription>
+              Clears the proxy port from{" "}
+              <span className="font-medium text-foreground">
+                {confirmDelete?.proxyName || confirmDelete?.jobName}
+              </span>
+              . The job itself keeps running — only the{" "}
+              <code className="rounded bg-muted px-1">/job-proxy/&hellip;</code> URL will stop
+              working. You can re-enable it from the job&apos;s Proxy tab.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDelete(null)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => confirmDelete && removeProxy(confirmDelete)}
+              disabled={deleting}
+            >
+              {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              Remove proxy
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function ProxyCard({
+  clusterId,
+  item,
+  origin,
+  onDelete,
+}: {
+  clusterId: string;
+  item: ProxyItem;
+  origin: string;
+  onDelete: () => void;
+}) {
+  const url = `${origin}/job-proxy/${clusterId}/${item.id}/`;
+  const isRunning = item.status === "RUNNING";
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center justify-between gap-2 text-base">
+          <Link
+            href={`/clusters/${clusterId}/jobs/${item.id}`}
+            className="hover:underline truncate"
+            title={item.jobName}
+          >
+            {item.jobName}
+          </Link>
+          <JobStatusBadge status={item.status} />
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {item.proxyName && (
+            <Badge variant="secondary" className="font-normal">
+              {item.proxyName}
+            </Badge>
+          )}
+          <Badge variant="outline" className="font-mono">
+            :{item.proxyPort}
+          </Badge>
+          <span>partition {item.partition}</span>
+          {item.slurmJobId !== null && <span>Slurm {item.slurmJobId}</span>}
+        </div>
+        {item.user && (
+          <p className="text-xs text-muted-foreground">
+            Submitted by{" "}
+            <span className="font-medium text-foreground">
+              {item.user.name || item.user.unixUsername || item.user.email}
+            </span>
+          </p>
+        )}
+        <div className="flex items-center gap-2">
+          <code className="flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">
+            {url}
+          </code>
+          {isRunning ? (
+            <a href={url} target="_blank" rel="noopener noreferrer">
+              <Button size="sm">
+                <ExternalLink className="mr-2 h-3 w-3" />
+                Open
+              </Button>
+            </a>
+          ) : (
+            <Button size="sm" disabled title="Job isn't running — proxy will return 502">
+              <ExternalLink className="mr-2 h-3 w-3" />
+              Open
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onDelete}
+            title="Remove proxy (keeps the job running)"
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}

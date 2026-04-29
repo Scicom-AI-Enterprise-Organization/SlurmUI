@@ -7,6 +7,7 @@ import { auth } from "./lib/auth";
 import { startHeartbeatMonitor } from "./lib/heartbeat";
 import { startHealthMonitor } from "./lib/health-monitor";
 import { startGitopsJobsMonitor } from "./lib/gitops-jobs";
+import { tryHandleJobProxyUpgrade } from "./lib/job-proxy-ws";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
@@ -31,6 +32,20 @@ app.prepare().then(() => {
 
   server.on("upgrade", async (request, socket, head) => {
     const { pathname, query } = parse(request.url!, true);
+
+    // Per-job HTTP+WS reverse proxy. tryHandleJobProxyUpgrade returns true
+    // when it claimed the connection (matched URL pattern), regardless of
+    // success — auth/upstream errors are written to the client socket.
+    if (pathname && pathname.startsWith("/job-proxy/")) {
+      try {
+        const handled = await tryHandleJobProxyUpgrade(request, socket, head);
+        if (handled) return;
+      } catch (err) {
+        console.error("[job-proxy WS] handler error:", err);
+        socket.destroy();
+        return;
+      }
+    }
 
     if (pathname !== "/api/ws") {
       socket.destroy();

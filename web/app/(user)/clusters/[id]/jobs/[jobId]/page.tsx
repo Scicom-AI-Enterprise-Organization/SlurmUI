@@ -24,6 +24,7 @@ import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 import { ErrorExplainer } from "@/components/jobs/error-explainer";
 import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
 import { ExposeMetricsTab } from "@/components/jobs/expose-metrics-tab";
+import { ProxyTab } from "@/components/jobs/proxy-tab";
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0 B";
@@ -49,7 +50,7 @@ interface JobDetail {
   user?: { email: string; name: string | null; unixUsername: string | null };
 }
 
-const TAB_VALUES = ["output", "stderr", "usage", "info", "deps", "expose"] as const;
+const TAB_VALUES = ["output", "stderr", "usage", "info", "deps", "expose", "proxy"] as const;
 type TabValue = (typeof TAB_VALUES)[number];
 
 export default function JobDetailPage() {
@@ -253,11 +254,13 @@ export default function JobDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  // If the URL asked for ?tab=usage but the job isn't running, fall back
-  // silently to the output tab so the user isn't stuck on an empty panel.
+  // If the URL asked for a running-only tab but the job isn't running,
+  // fall back silently to output so the user isn't stuck on a disabled panel.
   useEffect(() => {
     if (!job) return;
-    if (tab === "usage" && job.status !== "RUNNING") changeTab("output");
+    if (job.status !== "RUNNING" && (tab === "usage" || tab === "expose" || tab === "proxy")) {
+      changeTab("output");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status]);
 
@@ -520,7 +523,20 @@ export default function JobDetailPage() {
           {job.status === "RUNNING" && <TabsTrigger value="usage">Usage</TabsTrigger>}
           <TabsTrigger value="info">Slurm Info</TabsTrigger>
           <TabsTrigger value="deps">Dependencies</TabsTrigger>
-          <TabsTrigger value="expose">Expose metrics</TabsTrigger>
+          <TabsTrigger
+            value="expose"
+            disabled={job.status !== "RUNNING"}
+            title={job.status !== "RUNNING" ? "Job must be RUNNING to expose metrics" : undefined}
+          >
+            Expose metrics
+          </TabsTrigger>
+          <TabsTrigger
+            value="proxy"
+            disabled={job.status !== "RUNNING"}
+            title={job.status !== "RUNNING" ? "Job must be RUNNING to configure a proxy" : undefined}
+          >
+            Proxy
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="output" className="mt-4">
@@ -705,6 +721,16 @@ export default function JobDetailPage() {
             clusterId={clusterId}
             jobId={jobId}
             initialMetricsPort={(job as { metricsPort?: number | null }).metricsPort ?? null}
+          />
+        </TabsContent>
+
+        <TabsContent value="proxy" className="mt-4">
+          <ProxyTab
+            clusterId={clusterId}
+            jobId={jobId}
+            initialProxyPort={(job as { proxyPort?: number | null }).proxyPort ?? null}
+            initialProxyName={(job as { proxyName?: string | null }).proxyName ?? null}
+            jobStatus={job.status}
           />
         </TabsContent>
       </Tabs>

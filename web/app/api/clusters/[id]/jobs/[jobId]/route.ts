@@ -204,7 +204,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const data: { metricsPort?: number | null } = {};
+  const data: { metricsPort?: number | null; proxyPort?: number | null; proxyName?: string | null } = {};
   if ("metricsPort" in body) {
     if (body.metricsPort === null || body.metricsPort === "" || body.metricsPort === undefined) {
       data.metricsPort = null;
@@ -214,6 +214,26 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
         return NextResponse.json({ error: "metricsPort must be a TCP port (1-65535)" }, { status: 400 });
       }
       data.metricsPort = n;
+    }
+  }
+  if ("proxyPort" in body) {
+    if (body.proxyPort === null || body.proxyPort === "" || body.proxyPort === undefined) {
+      data.proxyPort = null;
+      data.proxyName = null;
+    } else {
+      const n = Number(body.proxyPort);
+      if (!Number.isInteger(n) || n <= 0 || n >= 65536) {
+        return NextResponse.json({ error: "proxyPort must be a TCP port (1-65535)" }, { status: 400 });
+      }
+      data.proxyPort = n;
+    }
+  }
+  if ("proxyName" in body) {
+    if (body.proxyName === null || body.proxyName === "" || body.proxyName === undefined) {
+      data.proxyName = null;
+    } else if (typeof body.proxyName === "string") {
+      const s = body.proxyName.trim().slice(0, 64);
+      data.proxyName = s.length > 0 ? s : null;
     }
   }
   if (Object.keys(data).length === 0) {
@@ -230,11 +250,11 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     // a useful hint instead of a stock 500.
     const looksLikeMissingColumn =
       /column .* does not exist|unknown.*field|Unknown argument/i.test(msg) ||
-      /metricsPort/i.test(msg);
+      /metricsPort|proxyPort|proxyName/i.test(msg);
     return NextResponse.json(
       {
         error: looksLikeMissingColumn
-          ? "Database is missing the metricsPort column — run `npx prisma db push` (or restart the web container, which does it on boot)."
+          ? "Database is missing one of the metricsPort / proxyPort columns — run `npx prisma db push` (or restart the web container, which does it on boot)."
           : "Job update failed",
         detail: msg.slice(0, 1500),
       },
@@ -243,26 +263,31 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   await logAudit({
-    action: "job.metrics_port.update",
+    action: "metricsPort" in data ? "job.metrics_port.update" : "job.proxy_port.update",
     entity: "Job",
     entityId: jobId,
-    metadata: { clusterId: id, slurmJobId: job.slurmJobId, metricsPort: data.metricsPort ?? null },
+    metadata: {
+      clusterId: id,
+      slurmJobId: job.slurmJobId,
+      ...("metricsPort" in data ? { metricsPort: data.metricsPort ?? null } : {}),
+      ...("proxyPort" in data ? { proxyPort: data.proxyPort ?? null, proxyName: data.proxyName ?? null } : {}),
+    },
   });
 
-  // Best-effort target refresh — fire and forget. We don't want to block
-  // the UI on an SSH round-trip; the caller can also click "Refresh now"
-  // on the metrics tab. Errors here just mean the next refresh will sweep
-  // them in.
-  (async () => {
-    try {
-      const proto = req.headers.get("x-forwarded-proto") ?? "http";
-      const host = req.headers.get("host") ?? "localhost";
-      await fetch(`${proto}://${host}/api/clusters/${id}/metrics/refresh-targets`, {
-        method: "POST",
-        headers: { cookie: req.headers.get("cookie") ?? "" },
-      });
-    } catch {}
-  })();
+  // Best-effort target refresh — fire and forget, only when metricsPort
+  // actually changed (proxyPort doesn't touch Prometheus).
+  if ("metricsPort" in data) {
+    (async () => {
+      try {
+        const proto = req.headers.get("x-forwarded-proto") ?? "http";
+        const host = req.headers.get("host") ?? "localhost";
+        await fetch(`${proto}://${host}/api/clusters/${id}/metrics/refresh-targets`, {
+          method: "POST",
+          headers: { cookie: req.headers.get("cookie") ?? "" },
+        });
+      } catch {}
+    })();
+  }
 
   return NextResponse.json(updated);
 }

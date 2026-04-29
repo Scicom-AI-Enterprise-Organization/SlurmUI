@@ -11,6 +11,7 @@ const tabs = [
   { label: "Jobs", href: "jobs" },
   { label: "Files", href: "files" },
   { label: "Metrics", href: "metrics" },
+  { label: "Proxies", href: "proxies" },
 ];
 
 export default function ClusterLayout({ children }: { children: React.ReactNode }) {

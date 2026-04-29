@@ -95,6 +95,13 @@ model Job {
   // expose Prometheus metrics on a known port. Refreshed via
   // /api/clusters/[id]/metrics/refresh-targets after status changes.
   metricsPort Int?
+  // When set, the web server reverse-proxies HTTP+WebSocket traffic from
+  // /job-proxy/<clusterId>/<jobId>/* to <jobNode>:<proxyPort>/*. Generic —
+  // works for Jupyter, TensorBoard, MLflow, FastAPI, anything that speaks
+  // HTTP/WS on a known port. proxyName is a free-form label shown on the
+  // cluster Proxies tab (e.g. "Jupyter", "TensorBoard").
+  proxyPort   Int?
+  proxyName   String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 
