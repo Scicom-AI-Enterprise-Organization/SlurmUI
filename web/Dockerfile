@@ -34,6 +34,12 @@ COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/server.ts ./server.ts
 COPY --from=builder /app/lib ./lib
 
+# Copy hand-rolled Grafana dashboards (vllm-grafana-classic.json,
+# -v1.json, -v2.json). Read at deploy time by tryReadDashboard() and
+# baked into the cluster's Grafana via the deploy script. Not part of
+# .next/standalone so it must be copied explicitly.
+COPY --from=builder /app/dashboards ./dashboards
+
 # Install tsx for running TypeScript server in production
 RUN npm install tsx
 
