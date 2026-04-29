@@ -90,6 +90,11 @@ model Job {
   // can detect content changes and skip / cancel-resubmit accordingly.
   sourceRef  String?
   sourceName String?
+  // When set, Aura tells Prometheus to scrape <jobNode>:<metricsPort>/metrics
+  // for every node the job runs on. Used for vLLM and similar services that
+  // expose Prometheus metrics on a known port. Refreshed via
+  // /api/clusters/[id]/metrics/refresh-targets after status changes.
+  metricsPort Int?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

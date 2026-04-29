@@ -208,8 +208,51 @@ async function handle(req: NextRequest, clusterId: string, pathSegs: string[]) {
     const kl = k.toLowerCase();
     // Strip hop-by-hop / encoding headers — Next will set them as needed.
     if (kl === "content-encoding" || kl === "content-length" || kl === "transfer-encoding" || kl === "connection") return;
+    // forEach folds multiple Set-Cookie headers into a single
+    // comma-joined string (which is invalid because Cookie values can
+    // contain commas), so handle them via getSetCookie() below instead.
+    if (kl === "set-cookie") return;
     respHeaders.set(k, v);
   });
+  // Preserve every individual Set-Cookie header (Grafana's session cookie
+  // among them) — without this the browser never gets the session, every
+  // page revalidates against our injected Basic auth, and any flow that
+  // depends on the cookie (login, switch org) silently fails.
+  const setCookies = (upRes.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+  for (const c of setCookies) respHeaders.append("set-cookie", c);
+
+  // Origin rewrite. Grafana bakes `root_url` into HTML/JSON at startup, so
+  // any deploy-time host (e.g. localhost:3001 from a dev deploy) leaks
+  // into the responses. Swap it for the request's actual origin so users
+  // browsing from prod don't get assets / API calls pointing at the dev
+  // origin. Only touches text-y content types — binary assets pass
+  // through verbatim.
+  const bakedRoot = (metrics.grafanaRootUrl ?? "").replace(/\/+$/, "");
+  let bakedOrigin = "";
+  if (bakedRoot) {
+    try { bakedOrigin = new URL(bakedRoot).origin; } catch {}
+  }
+  const reqProto = (req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "")).split(",")[0].trim();
+  const reqHost = (req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "").split(",")[0].trim();
+  const currentOrigin = reqHost ? `${reqProto}://${reqHost}` : "";
+  const ct = (upRes.headers.get("content-type") ?? "").toLowerCase();
+  const rewritable =
+    bakedOrigin && currentOrigin && bakedOrigin !== currentOrigin &&
+    (ct.includes("text/html") ||
+     ct.includes("application/json") ||
+     ct.includes("application/javascript") ||
+     ct.includes("text/javascript") ||
+     ct.includes("text/css"));
+  if (rewritable) {
+    const text = await upRes.text();
+    // Replace bare-origin matches (most common — `<base href="<origin>/grafana-proxy/...">`,
+    // bootstrap config JSON, redirect URLs). Body URLs that are origin-relative
+    // (e.g. `/grafana-proxy/<id>/public/build/foo.js`) already work because the
+    // browser resolves them against its own origin, no rewrite needed.
+    const fixed = text.split(bakedOrigin).join(currentOrigin);
+    return new NextResponse(fixed, { status: upRes.status, headers: respHeaders });
+  }
+
   return new NextResponse(upRes.body, {
     status: upRes.status,
     headers: respHeaders,

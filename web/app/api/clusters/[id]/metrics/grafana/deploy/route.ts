@@ -1,10 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
+
+// vLLM dashboards (classic / v1 / v2) live in web/dashboards/ and are
+// shipped as part of the Next.js build. Read once on module load — the
+// route is a long-lived server component and these don't change without
+// a redeploy. Datasource uid substitution happens later in the install
+// script via sed (same path as the upstream GPU dashboards).
+function tryReadDashboard(name: string): string | null {
+  // process.cwd() is the web/ directory in dev and prod (next start runs
+  // from there). Fall back to ../web/dashboards in case of unusual layouts.
+  for (const base of [process.cwd(), join(process.cwd(), "..")]) {
+    try {
+      return readFileSync(join(base, "dashboards", name), "utf8");
+    } catch {}
+  }
+  return null;
+}
+const VLLM_DASHBOARDS = {
+  "vllm-grafana-classic.json": tryReadDashboard("vllm-grafana-classic.json"),
+  "vllm-grafana-v1.json": tryReadDashboard("vllm-grafana-v1.json"),
+  "vllm-grafana-v2.json": tryReadDashboard("vllm-grafana-v2.json"),
+};
 import {
   mergeMetricsConfig,
   readMetricsConfig,
@@ -82,6 +105,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     ...scrape.map((s) =>
       `      - targets: ['${s.ip}:9400']\n        labels: { instance: '${s.hostname}' }`,
     ),
+    // Dynamic scrape targets for "expose metrics" jobs (e.g. vLLM serving
+    // on :8000). Aura rewrites /etc/prometheus/sd/jobs.json after every
+    // metricsPort change and POSTs /-/reload, so Prometheus picks up
+    // new vLLM jobs within seconds without us regenerating prometheus.yml.
+    "  - job_name: aura-job",
+    "    file_sd_configs:",
+    "      - files:",
+    "          - /etc/prometheus/sd/jobs.json",
+    "        refresh_interval: 30s",
   ].join("\n");
 
   // Resolve aura's external origin from the deploy request so Grafana's
@@ -241,6 +273,104 @@ analytics:
   reporting_enabled: false
 `;
 
+  // The hand-rolled minimal dashboard below is replaced by the three
+  // exported dashboards in web/dashboards/ (classic / v1 / v2 — picked
+  // up at deploy time and shipped via base64). We keep this stub here as
+  // a fallback when the JSON files are missing from the build (e.g. dev
+  // checkout without them). It uses model_name as the templating var so
+  // it's still useful on its own.
+  const vllmDashboard = {
+    title: "vLLM Serving",
+    uid: "aura-vllm",
+    schemaVersion: 39,
+    version: 1,
+    refresh: "30s",
+    time: { from: "now-1h", to: "now" },
+    timepicker: {},
+    tags: ["aura", "vllm"],
+    templating: {
+      list: [
+        {
+          name: "ds",
+          type: "datasource",
+          query: "prometheus",
+          current: { selected: false, text: "Prometheus", value: "prometheus" },
+        },
+        {
+          name: "model_name",
+          type: "query",
+          datasource: { type: "prometheus", uid: "prometheus" },
+          query: { query: "label_values(vllm:num_requests_running, model_name)", refId: "vllm-models" },
+          refresh: 2,
+          includeAll: true,
+          multi: true,
+          current: { selected: true, text: "All", value: "$__all" },
+        },
+      ],
+    },
+    panels: [
+      {
+        id: 1, type: "timeseries", title: "Running requests",
+        gridPos: { x: 0, y: 0, w: 12, h: 7 },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'sum by (model_name) (vllm:num_requests_running{model_name=~"$model_name"})', legendFormat: "{{model_name}}" }],
+      },
+      {
+        id: 2, type: "timeseries", title: "Waiting / pending requests",
+        gridPos: { x: 12, y: 0, w: 12, h: 7 },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'sum by (model_name) (vllm:num_requests_waiting{model_name=~"$model_name"})', legendFormat: "{{model_name}}" }],
+      },
+      {
+        id: 3, type: "timeseries", title: "GPU KV cache usage (%)",
+        gridPos: { x: 0, y: 7, w: 12, h: 7 },
+        fieldConfig: { defaults: { unit: "percentunit", min: 0, max: 1 } },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'avg by (model_name, instance) (vllm:gpu_cache_usage_perc{model_name=~"$model_name"})', legendFormat: "{{model_name}} / {{instance}}" }],
+      },
+      {
+        id: 4, type: "timeseries", title: "Generation throughput (tokens/s)",
+        gridPos: { x: 12, y: 7, w: 12, h: 7 },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'sum by (model_name) (rate(vllm:request_generation_tokens_sum{model_name=~"$model_name"}[1m]))', legendFormat: "{{model_name}}" }],
+      },
+      {
+        id: 5, type: "timeseries", title: "Time-to-first-token p50 / p95 / p99 (s)",
+        gridPos: { x: 0, y: 14, w: 12, h: 7 },
+        fieldConfig: { defaults: { unit: "s" } },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [
+          { refId: "p50", expr: 'histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$model_name"}[5m])))', legendFormat: "p50 / {{model_name}}" },
+          { refId: "p95", expr: 'histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$model_name"}[5m])))', legendFormat: "p95 / {{model_name}}" },
+          { refId: "p99", expr: 'histogram_quantile(0.99, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~"$model_name"}[5m])))', legendFormat: "p99 / {{model_name}}" },
+        ],
+      },
+      {
+        id: 6, type: "timeseries", title: "End-to-end request latency p50 / p95 (s)",
+        gridPos: { x: 12, y: 14, w: 12, h: 7 },
+        fieldConfig: { defaults: { unit: "s" } },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [
+          { refId: "p50", expr: 'histogram_quantile(0.5, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$model_name"}[5m])))', legendFormat: "p50 / {{model_name}}" },
+          { refId: "p95", expr: 'histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$model_name"}[5m])))', legendFormat: "p95 / {{model_name}}" },
+        ],
+      },
+      {
+        id: 7, type: "stat", title: "Models being served",
+        gridPos: { x: 0, y: 21, w: 6, h: 4 },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'count(count by (model_name) (vllm:num_requests_running))' }],
+      },
+      {
+        id: 8, type: "stat", title: "Total running requests",
+        gridPos: { x: 6, y: 21, w: 6, h: 4 },
+        datasource: { type: "prometheus", uid: "prometheus" },
+        targets: [{ refId: "A", expr: 'sum(vllm:num_requests_running)' }],
+      },
+    ],
+  };
+  const vllmDashJson = JSON.stringify(vllmDashboard);
+
   // base64-encode all configs so heredoc quoting / shell expansion never
   // mangles colons, quotes, or backticks. The remote side decodes them
   // verbatim.
@@ -249,6 +379,15 @@ analytics:
   const dsB64 = Buffer.from(datasourcesYaml).toString("base64");
   const dbB64 = Buffer.from(dashboardsYaml).toString("base64");
   const lokiB64 = Buffer.from(lokiYml).toString("base64");
+  const vllmDashB64 = Buffer.from(vllmDashJson).toString("base64");
+
+  // Real vLLM dashboard exports (classic / v1 / v2) shipped from
+  // web/dashboards/. Each one comes from `tryReadDashboard`; missing
+  // entries are silently skipped so a dev checkout without the files
+  // still deploys (falls back to the minimal stub above).
+  const vllmExports = Object.entries(VLLM_DASHBOARDS)
+    .filter(([, json]) => json !== null)
+    .map(([name, json]) => ({ name, b64: Buffer.from(json as string).toString("base64") }));
 
   const target = {
     host: cluster.controllerHost,
@@ -303,9 +442,13 @@ else
   echo "[prometheus] binary already up to date"
 fi
 
-$S mkdir -p /etc/prometheus ${promDataDir}
+$S mkdir -p /etc/prometheus /etc/prometheus/sd ${promDataDir}
 echo "${promB64}" | base64 -d | $S tee /etc/prometheus/prometheus.yml >/dev/null
-$S chown -R prometheus:prometheus ${promDataDir}
+# Initialise the file_sd targets file with an empty array so the
+# first-startup "no such file" warning doesn't show up. /metrics/refresh-
+# targets rewrites this every time a Job's metricsPort changes.
+[ -f /etc/prometheus/sd/jobs.json ] || echo '[]' | $S tee /etc/prometheus/sd/jobs.json >/dev/null
+$S chown -R prometheus:prometheus ${promDataDir} /etc/prometheus/sd
 $S chown prometheus:prometheus /etc/prometheus/prometheus.yml
 
 $S tee /etc/systemd/system/prometheus.service >/dev/null <<UNIT
@@ -466,6 +609,14 @@ $S mkdir -p /etc/grafana \\
 echo "${grafB64}" | base64 -d | $S tee /etc/grafana/grafana.ini >/dev/null
 echo "${dsB64}"   | base64 -d | $S tee /etc/grafana/provisioning/datasources/aura.yaml >/dev/null
 echo "${dbB64}"   | base64 -d | $S tee /etc/grafana/provisioning/dashboards/aura.yaml >/dev/null
+# Real vLLM dashboard exports shipped with the build (web/dashboards/).
+# These reference the victoria-metrics-prom datasource uid; we rewrite to
+# our provisioned "prometheus" uid in the sed pass below alongside the
+# upstream DCGM dashboards. The hand-rolled minimal stub goes alongside
+# them as a fallback (always written so even a partial dashboard outage
+# leaves something useful).
+echo "${vllmDashB64}" | base64 -d | $S tee /etc/grafana/provisioning/dashboards/aura-gpu/vllm-grafana.json >/dev/null
+${vllmExports.map((e) => `echo "${e.b64}" | base64 -d | $S tee /etc/grafana/provisioning/dashboards/aura-gpu/${e.name} >/dev/null`).join("\n")}
 
 # Pull the upstream gpu-metrics-exporter dashboards. Combined works for
 # both DCGM and nvidia_smi exporters; the others target one mode each.
@@ -501,6 +652,8 @@ $S find /etc/grafana/provisioning/dashboards/aura-gpu -name "*.json" -type f -pr
     -e 's/\${DS_LOKI}/prometheus/g' \\
     -e 's/"uid": *"mimir"/"uid": "prometheus"/g' \\
     -e 's/"datasource": *"mimir"/"datasource": "prometheus"/g' \\
+    -e 's/"uid": *"victoria-metrics-prom"/"uid": "prometheus"/g' \\
+    -e 's/"datasource": *"victoria-metrics-prom"/"datasource": "prometheus"/g' \\
     "$f"
 done
 
@@ -647,22 +800,28 @@ exit 0
         }
       },
       onComplete: async (success) => {
+        // Persist the rotated admin password regardless of overall success.
+        // The reset-admin-password CLI runs early in the script, so by the
+        // time anything later fails (Loki probe, dashboard download, …),
+        // Grafana's DB already has the new password. If we ONLY saved on
+        // success, Aura would keep injecting the previous password and
+        // every proxy request would 401 → login screen.
+        try {
+          const fresh = await prisma.cluster.findUnique({ where: { id } });
+          if (fresh) {
+            const next = mergeMetricsConfig(fresh.config, {
+              enabled: true,
+              grafanaAdminPassword: grafanaPassword,
+              grafanaDeployedAt: new Date().toISOString(),
+              grafanaRootUrl: rootUrl,
+            });
+            await prisma.cluster.update({
+              where: { id },
+              data: { config: next as never },
+            });
+          }
+        } catch {}
         if (success) {
-          try {
-            const fresh = await prisma.cluster.findUnique({ where: { id } });
-            if (fresh) {
-              const next = mergeMetricsConfig(fresh.config, {
-                enabled: true,
-                grafanaAdminPassword: grafanaPassword,
-                grafanaDeployedAt: new Date().toISOString(),
-                grafanaRootUrl: rootUrl,
-              });
-              await prisma.cluster.update({
-                where: { id },
-                data: { config: next as never },
-              });
-            }
-          } catch {}
           await logAudit({
             action: "metrics.grafana.deploy",
             entity: "Cluster",

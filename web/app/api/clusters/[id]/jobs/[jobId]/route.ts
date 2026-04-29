@@ -184,3 +184,85 @@ exit 1
 
   return NextResponse.json(updatedJob);
 }
+
+// PATCH /api/clusters/[id]/jobs/[jobId] — partial update. Currently scoped
+// to the metricsPort field (Prometheus scrape opt-in). Only the job's owner
+// or an admin can flip it. Triggers a side-effect rebuild of the cluster's
+// Prometheus file_sd targets (best-effort) so the change shows up without
+// the user clicking Refresh.
+export async function PATCH(req: NextRequest, { params }: RouteParams) {
+  const { id, jobId } = await params;
+  const session = await auth();
+  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const job = await prisma.job.findUnique({ where: { id: jobId } });
+  if (!job || job.clusterId !== id) {
+    return NextResponse.json({ error: "Job not found" }, { status: 404 });
+  }
+  if ((session.user as any).role !== "ADMIN" && job.userId !== session.user.id) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const body = await req.json().catch(() => ({}));
+  const data: { metricsPort?: number | null } = {};
+  if ("metricsPort" in body) {
+    if (body.metricsPort === null || body.metricsPort === "" || body.metricsPort === undefined) {
+      data.metricsPort = null;
+    } else {
+      const n = Number(body.metricsPort);
+      if (!Number.isInteger(n) || n <= 0 || n >= 65536) {
+        return NextResponse.json({ error: "metricsPort must be a TCP port (1-65535)" }, { status: 400 });
+      }
+      data.metricsPort = n;
+    }
+  }
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ error: "no supported fields in body" }, { status: 400 });
+  }
+
+  let updated;
+  try {
+    updated = await prisma.job.update({ where: { id: jobId }, data });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // Most likely culprit when the schema's been bumped but the running
+    // pod's DB hasn't: prisma reports the new column as unknown. Surface
+    // a useful hint instead of a stock 500.
+    const looksLikeMissingColumn =
+      /column .* does not exist|unknown.*field|Unknown argument/i.test(msg) ||
+      /metricsPort/i.test(msg);
+    return NextResponse.json(
+      {
+        error: looksLikeMissingColumn
+          ? "Database is missing the metricsPort column — run `npx prisma db push` (or restart the web container, which does it on boot)."
+          : "Job update failed",
+        detail: msg.slice(0, 1500),
+      },
+      { status: 500 },
+    );
+  }
+
+  await logAudit({
+    action: "job.metrics_port.update",
+    entity: "Job",
+    entityId: jobId,
+    metadata: { clusterId: id, slurmJobId: job.slurmJobId, metricsPort: data.metricsPort ?? null },
+  });
+
+  // Best-effort target refresh — fire and forget. We don't want to block
+  // the UI on an SSH round-trip; the caller can also click "Refresh now"
+  // on the metrics tab. Errors here just mean the next refresh will sweep
+  // them in.
+  (async () => {
+    try {
+      const proto = req.headers.get("x-forwarded-proto") ?? "http";
+      const host = req.headers.get("host") ?? "localhost";
+      await fetch(`${proto}://${host}/api/clusters/${id}/metrics/refresh-targets`, {
+        method: "POST",
+        headers: { cookie: req.headers.get("cookie") ?? "" },
+      });
+    } catch {}
+  })();
+
+  return NextResponse.json(updated);
+}

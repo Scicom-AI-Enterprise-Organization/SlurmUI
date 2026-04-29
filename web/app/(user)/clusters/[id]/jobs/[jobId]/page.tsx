@@ -23,6 +23,7 @@ import { XCircle, RefreshCw, RotateCw, Repeat2 } from "lucide-react";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 import { ErrorExplainer } from "@/components/jobs/error-explainer";
 import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
+import { ExposeMetricsTab } from "@/components/jobs/expose-metrics-tab";
 
 function fmtBytes(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0 B";
@@ -48,7 +49,7 @@ interface JobDetail {
   user?: { email: string; name: string | null; unixUsername: string | null };
 }
 
-const TAB_VALUES = ["output", "stderr", "usage", "info", "deps"] as const;
+const TAB_VALUES = ["output", "stderr", "usage", "info", "deps", "expose"] as const;
 type TabValue = (typeof TAB_VALUES)[number];
 
 export default function JobDetailPage() {
@@ -519,6 +520,7 @@ export default function JobDetailPage() {
           {job.status === "RUNNING" && <TabsTrigger value="usage">Usage</TabsTrigger>}
           <TabsTrigger value="info">Slurm Info</TabsTrigger>
           <TabsTrigger value="deps">Dependencies</TabsTrigger>
+          <TabsTrigger value="expose">Expose metrics</TabsTrigger>
         </TabsList>
 
         <TabsContent value="output" className="mt-4">
@@ -696,6 +698,14 @@ export default function JobDetailPage() {
 
         <TabsContent value="deps" className="mt-4">
           <JobDepsGraph clusterId={clusterId} jobId={jobId} />
+        </TabsContent>
+
+        <TabsContent value="expose" className="mt-4">
+          <ExposeMetricsTab
+            clusterId={clusterId}
+            jobId={jobId}
+            initialMetricsPort={(job as { metricsPort?: number | null }).metricsPort ?? null}
+          />
         </TabsContent>
       </Tabs>
 

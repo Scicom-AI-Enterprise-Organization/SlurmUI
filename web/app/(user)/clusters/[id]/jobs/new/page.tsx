@@ -423,6 +423,15 @@ export default function NewJobPage() {
   const [partitions, setPartitions] = useState<string[]>([]);
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const [availableNodes, setAvailableNodes] = useState<string[]>([]);
+  // Cluster-wide free / total counts populated from /resources. Falls back
+  // to null when the cluster doesn't expose this (e.g. NATS-mode); we
+  // skip the resource-availability check entirely in that case rather than
+  // disabling submit on missing data.
+  const [resourceTotals, setResourceTotals] = useState<{
+    cpuTotal: number; cpuFree: number;
+    memTotalMb: number; memFreeMb: number;
+    gpuTotal: number; gpuFree: number;
+  } | null>(null);
   const [nodesOpen, setNodesOpen] = useState(false);
   const nodelist = selectedNodes.join(",");
   const [templates, setTemplates] = useState<Array<{ id: string; name: string; script: string; partition: string }>>([]);
@@ -490,6 +499,10 @@ export default function NewJobPage() {
       .then((d) => {
         const names = (d.nodes ?? []).map((n: { host: string }) => n.host).filter(Boolean);
         setAvailableNodes(names);
+        // Cluster-wide free / total — used to validate the resource fields
+        // before submit. Reduces the number of "PD: Resources" jobs the
+        // user has to manually scancel after the fact.
+        if (d.totals) setResourceTotals(d.totals);
       })
       .catch(() => { /* endpoint only available on SSH clusters — silently skip */ });
 
@@ -984,9 +997,56 @@ export default function NewJobPage() {
             </TabsContent>
           </Tabs>
 
+          {(() => {
+            // Resource availability check (form mode only — raw-mode users
+            // craft their own #SBATCH and should know what they're asking
+            // for). cpu request = cpus_per_task * ntasks. gpu request is
+            // taken at face value (cluster-wide). memory is per-node in
+            // Slurm but we compare to cluster-wide free as a conservative
+            // sanity bound; a job that exceeds aggregate free can't fit
+            // anywhere.
+            if (mode !== "form" || !resourceTotals) return null;
+            const cpuReq = Math.max(1, ntasks) * Math.max(1, cpusPerTask);
+            const gpuReq = Math.max(0, gpus);
+            const memReqMb = Math.max(0, memoryGb) * 1024;
+            const shortages: string[] = [];
+            if (cpuReq > resourceTotals.cpuFree) {
+              shortages.push(`CPUs: requested ${cpuReq}, only ${resourceTotals.cpuFree} free (${resourceTotals.cpuTotal} total)`);
+            }
+            if (gpuReq > resourceTotals.gpuFree) {
+              shortages.push(`GPUs: requested ${gpuReq}, only ${resourceTotals.gpuFree} free (${resourceTotals.gpuTotal} total)`);
+            }
+            if (memReqMb > resourceTotals.memFreeMb) {
+              shortages.push(`Memory: requested ${memoryGb} GB, only ${(resourceTotals.memFreeMb / 1024).toFixed(1)} GB free`);
+            }
+            if (shortages.length === 0) return null;
+            return (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+                <p className="font-medium">Not enough free resources right now</p>
+                <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs">
+                  {shortages.map((s) => <li key={s}>{s}</li>)}
+                </ul>
+                <p className="mt-2 text-xs text-amber-800/90 dark:text-amber-200/80">
+                  Reduce the request, wait for jobs to finish, or queue anyway by switching to Raw mode.
+                </p>
+              </div>
+            );
+          })()}
           <Button
             onClick={handleSubmit}
-            disabled={gitopsOnly || submitting || !partition || (mode === "form" ? !command.trim() : !rawScript.trim())}
+            disabled={(() => {
+              if (gitopsOnly || submitting || !partition) return true;
+              if (mode === "form" ? !command.trim() : !rawScript.trim()) return true;
+              if (mode === "form" && resourceTotals) {
+                const cpuReq = Math.max(1, ntasks) * Math.max(1, cpusPerTask);
+                const gpuReq = Math.max(0, gpus);
+                const memReqMb = Math.max(0, memoryGb) * 1024;
+                if (cpuReq > resourceTotals.cpuFree) return true;
+                if (gpuReq > resourceTotals.gpuFree) return true;
+                if (memReqMb > resourceTotals.memFreeMb) return true;
+              }
+              return false;
+            })()}
             className="w-full"
           >
             <Send className="mr-2 h-4 w-4" />

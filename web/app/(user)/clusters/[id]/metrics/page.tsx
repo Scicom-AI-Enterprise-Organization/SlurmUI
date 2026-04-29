@@ -97,8 +97,18 @@ async function queryRange(
   });
   const r = await fetch(`/api/clusters/${clusterId}/prometheus/api/v1/query_range?${params}`);
   if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`HTTP ${r.status}: ${text.slice(0, 120)}`);
+    // Tag well-known proxy errors with sentinel codes so the UI can render
+    // a friendly empty-state instead of the raw HTTP body. Anything else
+    // gets surfaced verbatim for debugging.
+    let body: { error?: string } = {};
+    try { body = await r.json(); } catch {}
+    if (r.status === 412 && /metrics disabled/i.test(body.error ?? "")) {
+      throw new Error("__METRICS_DISABLED__");
+    }
+    if (r.status === 412 && /no ssh/i.test(body.error ?? "")) {
+      throw new Error("__NO_SSH__");
+    }
+    throw new Error(body.error ?? `request failed (${r.status})`);
   }
   const d = await r.json();
   if (d.status !== "success") throw new Error(d.error || "query failed");
@@ -143,7 +153,7 @@ export default function UserMetricsPage() {
           next[k] = res.value;
         } else {
           errs[k] = res.reason instanceof Error ? res.reason.message : String(res.reason);
-          if (!firstFatal && /412|disabled|No SSH/i.test(errs[k]!)) firstFatal = errs[k]!;
+          if (!firstFatal && /^__(METRICS_DISABLED|NO_SSH)__$/.test(errs[k]!)) firstFatal = errs[k]!;
         }
       });
       setData(next);
@@ -171,11 +181,20 @@ export default function UserMetricsPage() {
   ]), []);
 
   if (disabled) {
+    // Map the sentinel codes from queryRange to user-facing copy. Anything
+    // else falls back to a generic notice — we deliberately don't surface
+    // raw HTTP bodies / status codes here.
+    const friendly =
+      disabled === "__METRICS_DISABLED__"
+        ? "The metrics stack hasn't been deployed for this cluster yet."
+        : disabled === "__NO_SSH__"
+          ? "This cluster doesn't have SSH connectivity configured, so we can't fetch live metrics."
+          : "Metrics aren't available for this cluster right now.";
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center gap-3">
         <AlertCircle className="h-10 w-10 text-muted-foreground" />
         <p className="text-base font-medium">Metrics not available</p>
-        <p className="text-sm text-muted-foreground max-w-md">{disabled}</p>
+        <p className="text-sm text-muted-foreground max-w-md">{friendly}</p>
         <p className="text-xs text-muted-foreground">
           An admin can enable the metrics stack from the cluster&apos;s Metrics tab.
         </p>
@@ -247,7 +266,14 @@ export default function UserMetricsPage() {
                 </CardHeader>
                 <CardContent>
                   {err ? (
-                    <p className="text-xs text-red-600">{err}</p>
+                    // Hide sentinel codes (already covered by the page-level
+                    // disabled banner) and don't dump raw HTTP bodies into
+                    // the per-card area.
+                    <p className="text-xs text-red-600">
+                      {/^__(METRICS_DISABLED|NO_SSH)__$/.test(err)
+                        ? "Metrics not available."
+                        : err}
+                    </p>
                   ) : points.length === 0 ? (
                     <p className="text-xs text-muted-foreground py-8 text-center">No data</p>
                   ) : (

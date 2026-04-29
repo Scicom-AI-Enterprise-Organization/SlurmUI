@@ -871,11 +871,12 @@ function RootUrlWarning({ baked, clusterId }: { baked?: string; clusterId: strin
   }, [baked]);
   if (!drift) return null;
   return (
-    <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
-      Grafana was deployed with <code className="font-mono">{drift}</code> baked into its <code>root_url</code>;
-      you&apos;re viewing from <code className="font-mono">{typeof window !== "undefined" ? window.location.origin : ""}</code>{" "}
-      so its assets won&apos;t load. Click <strong>Re-deploy</strong> to rewrite the config, or set <code>AURA_PUBLIC_URL</code>{" "}
-      in the prod environment so deploys always bake the right origin. Cluster id: {clusterId.slice(0, 8)}…
+    <p className="mt-1 text-xs text-muted-foreground">
+      Grafana was deployed with <code className="font-mono">{drift}</code> baked into <code>root_url</code>;
+      you&apos;re viewing from <code className="font-mono">{typeof window !== "undefined" ? window.location.origin : ""}</code>.{" "}
+      Aura&apos;s proxy is rewriting responses on the fly, so it works — but for fewer rewrites and
+      cleaner cookie scoping, re-deploy from this origin or set <code>AURA_PUBLIC_URL</code> in prod.
+      Cluster id: {clusterId.slice(0, 8)}…
     </p>
   );
 }
