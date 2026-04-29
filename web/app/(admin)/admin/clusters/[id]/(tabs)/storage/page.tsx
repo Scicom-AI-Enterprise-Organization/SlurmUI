@@ -12,7 +12,7 @@ export default async function StoragePage({ params }: PageProps) {
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) notFound();
 
-  if (cluster.status !== "ACTIVE") return <RequiresBootstrap />;
+  if (cluster.status === "PROVISIONING") return <RequiresBootstrap />;
 
   const config = cluster.config as Record<string, unknown>;
   const storageMounts = (config.storage_mounts ?? []) as any[];

@@ -33,8 +33,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   if (statusFilter) where.status = statusFilter;
   if (partitionFilter) where.partition = partitionFilter;
   if (nameFilter) {
-    // job-name lives inside the stored SBATCH script.
-    where.script = { contains: nameFilter, mode: "insensitive" };
+    // job-name lives inside the stored SBATCH script as `--job-name=<x>`
+    // or `-J <x>`. Anchor to the SBATCH directive so the search matches
+    // the derived name, not arbitrary words in the script body.
+    where.OR = [
+      { script: { contains: `--job-name=${nameFilter}`, mode: "insensitive" } },
+      { script: { contains: `-J ${nameFilter}`, mode: "insensitive" } },
+      { script: { contains: `-J=${nameFilter}`, mode: "insensitive" } },
+    ];
   }
   if (fromFilter || toFilter) {
     const range: Record<string, Date> = {};

@@ -717,9 +717,21 @@ async function scheduleNext(): Promise<void> {
   }, intervalSec * 1000);
 }
 
+// Keep the started-flag on globalThis so it survives Next.js loading the
+// monitor through both `instrumentation.ts` AND the custom `server.ts`
+// entrypoint — a second module-instance would otherwise see `started`
+// reset and arm a duplicate timer, producing two reconcile rows per tick
+// (the audit-log doubling QA reported).
+const STARTED_KEY = "__aura_gitops_jobs_started__";
+declare global {
+  // eslint-disable-next-line no-var
+  var __aura_gitops_jobs_started__: boolean | undefined;
+}
+
 export function startGitopsJobsMonitor(): void {
-  if (started) return;
+  if (started || (globalThis as Record<string, unknown>)[STARTED_KEY]) return;
   started = true;
+  (globalThis as Record<string, unknown>)[STARTED_KEY] = true;
   console.log("[gitops-jobs] monitor armed (off until enabled in settings)");
   // Defer initial run so the server finishes booting and the DB is reachable.
   setTimeout(() => {

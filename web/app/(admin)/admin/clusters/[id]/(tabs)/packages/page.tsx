@@ -12,7 +12,7 @@ export default async function PackagesPage({ params }: PageProps) {
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) notFound();
 
-  if (cluster.status !== "ACTIVE") return <RequiresBootstrap />;
+  if (cluster.status === "PROVISIONING") return <RequiresBootstrap />;
 
   return <PackagesTab clusterId={id} />;
 }

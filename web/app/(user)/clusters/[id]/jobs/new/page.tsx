@@ -405,7 +405,7 @@ export default function NewJobPage() {
   const [jobName, setJobName] = useState("");
   const [nodes, setNodes] = useState(1);
   const [ntasks, setNtasks] = useState(1);
-  const [ntasksPerNode, setNtasksPerNode] = useState(0);
+  const [ntasksPerNode, setNtasksPerNode] = useState(1);
   const [cpusPerTask, setCpusPerTask] = useState(1);
   const [gpus, setGpus] = useState(0);
   const [memoryGb, setMemoryGb] = useState(0);

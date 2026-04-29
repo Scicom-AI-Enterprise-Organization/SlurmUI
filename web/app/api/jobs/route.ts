@@ -28,7 +28,18 @@ export async function GET(req: NextRequest) {
   if (statusFilter) where.status = statusFilter;
   if (partitionFilter) where.partition = partitionFilter;
   if (clusterFilter) where.clusterId = clusterFilter;
-  if (nameFilter) where.script = { contains: nameFilter, mode: "insensitive" };
+  if (nameFilter) {
+    // Job name lives inside the stored SBATCH script as `--job-name=<x>`
+    // or `-J <x>`; we surface it as a derived `name` column. A bare
+    // `script: { contains }` matches the BODY of any script that mentions
+    // the query (e.g. searching "vllm" returns every job whose command
+    // runs vllm regardless of its name). Anchor to the SBATCH directive.
+    where.OR = [
+      { script: { contains: `--job-name=${nameFilter}`, mode: "insensitive" } },
+      { script: { contains: `-J ${nameFilter}`, mode: "insensitive" } },
+      { script: { contains: `-J=${nameFilter}`, mode: "insensitive" } },
+    ];
+  }
   if (fromFilter || toFilter) {
     const range: Record<string, Date> = {};
     if (fromFilter) {

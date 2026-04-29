@@ -187,15 +187,15 @@ and use **Nodes → Add Node** with that VM's IP. Tear everything down with
 | **Queue** | Sortable `squeue` with pending-reason grouping, per-row **hold / release / requeue / terminate** buttons (via sudo `scontrol` / `scancel`, admin-only, audit-logged), `sprio -l` priority breakdown, `sinfo -R` down-node reasons, partition state, `sshare` fairshare, `sacctmgr` QOS limits, and `sdiag` scheduler stats — all via SSH, no agent. |
 | **Reservations** | List/create/delete Slurm reservations (`scontrol create reservation`). Dialog has native datetime pickers for start / end, multiselect for nodes (live `sinfo`) and users (cluster-provisioned, submitted as their unix usernames), partition dropdown, plus a read-only **command preview** textarea showing the exact `scontrol` invocation before it runs. |
 | **QoS** | CRUD over `sacctmgr qos` entries — Name, Priority, MaxJobsPU, MaxSubmitPU, MaxWall, MaxTRESPU, MaxTRESPJ, GrpTRES, GrpJobs, Flags. Edit reuses the same dialog as create; empty fields are left unchanged on edit, `-1` clears a limit. Requires `slurmdbd`. Built-in `normal` QoS is protected from deletion. |
-| **Metrics** | Per-node `node_exporter` (host CPU/RAM/disk/net on `:9100`) + auto-detected GPU exporter on `:9400` — DCGM via docker on bare-metal/VM, [`nvidia_gpu_exporter`](https://github.com/utkuozdemir/nvidia_gpu_exporter) binary in container hosts. Reuses pre-existing exporters when they're already exposed on `0.0.0.0`; rebinds loopback-only listeners. Optional Prometheus + Grafana stack (binary install + systemd, no docker) deployed to the controller or any worker; storage path configurable. Auto-provisions the upstream [gpu-metrics-exporter dashboards](https://github.com/Scicom-AI-Enterprise-Organization/gpu-metrics-exporter/tree/main/dashboards) and a Prometheus datasource. Per-row **Diagnose** (probes both ports, dumps systemd / docker / `nvidia-smi -L`) and per-stack **Prometheus logs** / **Grafana logs** (journalctl tail) viewers. Loopback-only bindings show as an amber `loopback only` badge with a tooltip explaining the scrape failure. |
+| **Metrics** | Per-node `node_exporter` (host CPU/RAM/disk/net on `:9100`) + auto-detected GPU exporter on `:9400` — DCGM via docker on bare-metal/VM, [`nvidia_gpu_exporter`](https://github.com/utkuozdemir/nvidia_gpu_exporter) binary in container hosts. Reuses pre-existing exporters when they're already exposed on `0.0.0.0`; rebinds loopback-only listeners. Optional Prometheus + Grafana stack (binary install + systemd, no docker) deployed to the controller or any worker; storage path and per-stack ports configurable. Optional **Loki + promtail** toggle adds log aggregation alongside the metrics stack — promtail ships systemd journals + `/mnt/shared/*.out` job stdout to Loki with the Slurm jobid extracted as a label. Auto-provisions the upstream [gpu-metrics-exporter dashboards](https://github.com/Scicom-AI-Enterprise-Organization/gpu-metrics-exporter/tree/main/dashboards) plus four vLLM dashboards (classic / v1 / v2 + minimal) shipped from `web/dashboards/`, with their `${DS_PROMETHEUS}` / `mimir` / `victoria-metrics-prom` datasource refs rewritten on deploy. Per-row **Diagnose** (probes both ports, dumps systemd / docker / `nvidia-smi -L`) and a stack-wide **Logs** dropdown (journalctl tail of Prometheus / Grafana / Loki). Loopback-only bindings show as an amber `loopback only` badge with a tooltip explaining the scrape failure. |
 
 ### User-facing pages
 
 - **Dashboard** — last-24h running / completed / failed area chart + status donut; themed via CSS tokens so light/dark/brand switches are automatic.
 - **Jobs** — paginated, URL-synced filters (name, status, partition, cluster, date range). **Reset Queue** button sudo-scancels all PENDING jobs. Per-row **Restart** button on FAILED jobs does a fresh `sbatch` of the stored script through a background task and opens a live log dialog — footer flips to a **Go to job `<id>`** deep-link once the new job row is created. **Cluster resources** panel above the filters shows live free vs total CPU cores, memory (GiB), and GPUs across the cluster, with a per-node breakdown under each resource (sorted by most-free; drained / down nodes struck through).
-- **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line.
+- **Submit Job** — form mode with common `#SBATCH` fields + Command textarea, or raw script. Example buttons: Hello world, Gloo all-reduce (CPU), NCCL all-reduce (GPU), torchrun training, vLLM serving. **Load from template** dropdown under each Examples row — in Form mode it parses the template's `#SBATCH` directives into the fields and drops the remainder into Command; in Raw mode it drops the script verbatim. **Nodes** multiselect pins the job to specific hosts via `--nodelist` (sourced from live `sinfo`). Storage working-dir dropdown pulls from your attached mounts; one-click insert of the Python venv activation line. **Resource availability gate** in form mode polls `/resources` and disables the Submit button (with an amber per-resource shortage list) when the request exceeds free CPUs / GPUs / memory cluster-wide — saves a round-trip to `PD: Resources` queue limbo.
 - **Templates** — save reusable scripts per cluster, re-run with one click, or load into the Submit Job form for tweaks.
-- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. Cancel with confirmation dialog.
+- **Job detail** — live tail of the Slurm output file via a detached background watcher (survives tab close). **Resync state** button re-queries `squeue`/`sacct` and overwrites the DB status (fixes rows stuck after an SSH hiccup, without clobbering when Slurm returns nothing). **Stderr** tab (detects merged vs separate). **Usage** tab for running jobs samples each allocated node and shows per-node CPU cores used, RAM, per-GPU utilization / memory, and top processes scoped to the job via `scontrol listpids` + cgroup fallback — auto-refresh 30 s. **Slurm Info** tab runs `scontrol show job -dd`, `sacct` with full resource fields (MaxRSS, DerivedExitCode, Reason, …), `sprio`, `squeue`, `sinfo`, `scontrol show partition` on demand. **Dependencies** tab renders the local DAG (parents → this job → children) parsed from `Dependency=afterok:N,afterany:M` plus a `squeue`/`sacct` reverse scan for downstream jobs; deep-links to other Aura Job rows when the Slurm id maps. **Expose metrics** tab toggles Prometheus scrape on a per-job port (e.g. vLLM's `:8000/metrics`) — saving runs a pre-flight probe and refuses unscrapable ports. On `FAILED` / `CANCELLED` jobs, an inline **error explainer** above the tabs pattern-matches stderr / output / Slurm Info against ~20 well-known failure modes (cgroup OOM, CUDA OOM, time-limit, NVIDIA XID 79 / ECC / clocking, NCCL / Gloo init, partition / QoS / Assoc limits, Munge auth, NFS stale, driver mismatch, ssh publickey, …) and explains each in plain English with a `user fix` vs `ops` tag and a concrete next step. Cancel with confirmation dialog.
 - **Files** — browse your NFS home plus every attached storage mount via a root dropdown; download files ≤50 MB over SSH.
 - **Metrics** — six native Recharts panels (GPU utilization, GPU memory %, GPU temp, GPU power, host CPU %, host memory %) with 5m / 15m / 1h / 6h / 24h range selector and 30 s auto-refresh. PromQL queries are union'd across DCGM and `nvidia_smi` exporter metric names so either mode renders. **Open Grafana** button reverse-proxies the cluster's Grafana UI through this app at `/grafana-proxy/<clusterId>/` (no iframe — Grafana served on Aura's origin) — one-shot SSH local port-forward per cluster, basic-auth injected server-side using the rotating admin password, no Grafana login screen.
 - **Profile** (`/profile`) — your identity card, Linux account (copy-to-clipboard for username / UID / GID), cluster provisioning table, and activity totals (jobs submitted, running, templates saved). Local-login accounts can change their own password here.
@@ -381,13 +381,40 @@ Route handlers get their coverage through the integration test — they
   pre-existing exporters bound to `0.0.0.0`; rebinds loopback-only listeners.
   Provisions the upstream
   [gpu-metrics-exporter dashboards](https://github.com/Scicom-AI-Enterprise-Organization/gpu-metrics-exporter/tree/main/dashboards)
-  with their `${DS_PROMETHEUS}` / `mimir` references rewritten to the local
-  Prometheus uid. Grafana is reverse-proxied through Aura at
-  `/grafana-proxy/<clusterId>/` over a per-cluster SSH local port-forward
-  (`-tt` + `sleep` keepalive for bastion-mode controllers); Basic auth
-  injected server-side using a rotating admin password so users never see
-  Grafana's login screen. Grafana Live (WebSocket) is disabled at deploy
-  since route handlers can't proxy WS — dashboards refresh on interval.
+  plus four vLLM dashboards (classic / v1 / v2 exports + a hand-rolled
+  minimal one) shipped from `web/dashboards/`, with their
+  `${DS_PROMETHEUS}` / `mimir` / `victoria-metrics-prom` references
+  rewritten to the local Prometheus uid at deploy time. Grafana is
+  reverse-proxied through Aura at `/grafana-proxy/<clusterId>/` over a
+  per-cluster SSH local port-forward (`-tt` + `sleep` keepalive for
+  bastion-mode controllers); Basic auth injected server-side using a
+  rotating admin password so users never see Grafana's login screen. The
+  proxy also rewrites Grafana's baked `root_url` on the fly so a deploy
+  from one origin (e.g. dev `localhost:3001`) still renders correctly when
+  accessed from prod (`https://aura.example.com`). Grafana Live
+  (WebSocket) is disabled at deploy since route handlers can't proxy WS —
+  dashboards refresh on interval.
+- **Optional log aggregation** (Loki + promtail). Toggle in the Metrics
+  tab settings deploys a single-binary Loki on the same stack host (with
+  retention enforced by the compactor) and provisions promtail on every
+  exporter-enabled node, shipping systemd journals (`slurmd`,
+  `slurmctld`) plus job stdout from `/mnt/shared/*.out`. Promtail extracts
+  the Slurm jobid from filenames (`<name>-<id>.out`) so log queries can
+  filter by `{job="slurm-output", jobid="1234"}`. Disabling the toggle
+  and re-deploying sweeps Loki off the stack host AND promtail off every
+  node in one pass.
+- **Per-job Prometheus scrape** ("Expose metrics" tab on the Job detail
+  page). Sets a `metricsPort` on a Job and Aura rebuilds Prometheus's
+  `file_sd_configs` (`/etc/prometheus/sd/jobs.json`) from the DB, hot-
+  reloading via `/-/reload`. Each running node-pair gets labels `job=
+  aura-job`, `aura_jobid`, `slurm_jobid`, `user`, `cluster`. The vLLM
+  dashboards pivot on the vLLM-emitted `model_name` label so multiple
+  replicas of the same model auto-aggregate. A pre-flight probe
+  (`/metrics/refresh-targets` companion endpoint
+  `/jobs/[jobId]/check-port`) curls each running node before saving and
+  refuses unscrapable ports — no permanent red Prometheus targets.
+  Controls are disabled (with a friendly banner explaining why) when the
+  cluster's Prometheus isn't deployed or isn't responding.
 - **Periodic health monitor** (`SLURMUI_HEALTH_INTERVAL_SEC`, default 60 s)
   SSHes to every ACTIVE / DEGRADED cluster, collects `scontrol ping`,
   `sinfo -h -N`, `squeue` with reason & submit time, and per-worker `mountpoint`

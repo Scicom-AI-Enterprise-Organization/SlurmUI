@@ -12,7 +12,7 @@ export default async function PartitionsPage({ params }: PageProps) {
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) notFound();
 
-  if (cluster.status !== "ACTIVE") return <RequiresBootstrap />;
+  if (cluster.status === "PROVISIONING") return <RequiresBootstrap />;
 
   return <PartitionsTab clusterId={id} />;
 }

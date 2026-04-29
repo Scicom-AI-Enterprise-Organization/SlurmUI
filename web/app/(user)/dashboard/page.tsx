@@ -58,8 +58,12 @@ export default async function DashboardPage() {
         script: true, cluster: { select: { id: true, name: true } },
       },
     }),
+    // User-scoped — every other panel on this page filters by userId, so
+    // leaving liveJobs unscoped meant the "Jobs (24h)" tile (user-scope)
+    // and the donut total (cluster-scope, multiplied by 24 hourly buckets)
+    // disagreed wildly. Same scope across the dashboard now.
     prisma.job.findMany({
-      where: { status: { in: ["PENDING", "RUNNING"] } },
+      where: { userId, status: { in: ["PENDING", "RUNNING"] } },
       select: {
         id: true, status: true, createdAt: true, slurmJobId: true,
         cluster: { select: { id: true, name: true } },

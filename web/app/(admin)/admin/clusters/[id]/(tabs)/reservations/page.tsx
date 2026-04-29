@@ -11,6 +11,6 @@ export default async function ReservationsPage({ params }: PageProps) {
   const { id } = await params;
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) notFound();
-  if (cluster.status !== "ACTIVE") return <RequiresBootstrap />;
+  if (cluster.status === "PROVISIONING") return <RequiresBootstrap />;
   return <ReservationsTab clusterId={id} />;
 }

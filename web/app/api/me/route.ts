@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 // Profile endpoint — user fetches their own record + provisioned clusters.
 // Does NOT expose keycloakId (auth-system-internal) or anything scoped to
@@ -28,7 +29,7 @@ export async function GET() {
 
   const clusterUsers = await prisma.clusterUser.findMany({
     where: { userId: user.id },
-    include: { cluster: { select: { id: true, name: true, status: true } } },
+    include: { cluster: { select: { id: true, name: true, status: true, config: true } } },
     orderBy: { provisionedAt: "desc" },
   });
 
@@ -41,10 +42,17 @@ export async function GET() {
   return NextResponse.json({
     user: userSafe,
     hasPassword,
+    // Trust the live probe (config.health.alive) over the DB status
+    // column — the column is updated lazily by the periodic monitor and
+    // can lag the probe by a cycle, which made the Profile page show
+    // ACTIVE clusters as OFFLINE while /api/clusters showed them green.
     clusters: clusterUsers.map((cu) => ({
       id: cu.cluster.id,
       name: cu.cluster.name,
-      clusterStatus: cu.cluster.status,
+      clusterStatus: effectiveClusterStatus({
+        status: cu.cluster.status,
+        config: (cu.cluster.config ?? {}) as Record<string, unknown>,
+      }),
       status: cu.status,
       provisionedAt: cu.provisionedAt,
     })),
