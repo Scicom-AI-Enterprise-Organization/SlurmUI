@@ -366,6 +366,28 @@ echo "Done at $(date)"`,
   --port 8000 \\
   --gpu-memory-utilization 0.85`,
   },
+  jupyter: {
+    jobName: "jupyter-notebook",
+    nodes: 1,
+    ntasks: 1,
+    ntasksPerNode: 1,
+    cpusPerTask: 1,
+    gpus: 0,
+    memoryGb: 1,
+    time: "0",
+    // Token + XSRF + origin checks are all relaxed because access is
+    // gated by Aura's per-job proxy auth — turn the Proxy tab on after
+    // submit and pick port 8888. Bring your own venv: `source ...`
+    // before the jupyter line if you've installed a Python toolchain
+    // under Settings → Python.
+    command: `jupyter notebook \\
+  --ip=0.0.0.0 \\
+  --NotebookApp.disable_check_xsrf=True \\
+  --NotebookApp.token='' \\
+  --NotebookApp.allow_origin='*' \\
+  --NotebookApp.allow_remote_access=True \\
+  --no-browser`,
+  },
 } as const;
 
 const RAW_EXAMPLES = {
@@ -504,6 +526,32 @@ vllm serve your-27b-model \\
   --host 0.0.0.0 \\
   --port 8000 \\
   --gpu-memory-utilization 0.85
+`,
+  jupyter: (partition: string) => `#!/bin/bash
+#SBATCH --job-name=jupyter-notebook
+#SBATCH --partition=${partition || "gpu"}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=1G
+#SBATCH --time=0
+#SBATCH --chdir=/mnt/shared
+
+# If you have a venv set up under Settings -> Python, activate it first:
+#   source /opt/aura-venv/bin/activate         # per-node mode
+#   source /mnt/shared/aura-venv/bin/activate  # shared mode
+# Otherwise the system's jupyter (if installed) runs as-is.
+
+# Auth flags relaxed because access is gated by Aura's per-job proxy
+# (Proxy tab on the job detail page, port 8888). The proxy bridges
+# HTTP + WebSocket through the controller's SSH tunnel.
+jupyter notebook \\
+  --ip=0.0.0.0 \\
+  --NotebookApp.disable_check_xsrf=True \\
+  --NotebookApp.token='' \\
+  --NotebookApp.allow_origin='*' \\
+  --NotebookApp.allow_remote_access=True \\
+  --no-browser
 `,
 };
 
@@ -1002,6 +1050,9 @@ export default function NewJobPage() {
                 <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("vllm")}>
                   Serve with vLLM
                 </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("jupyter")}>
+                  Jupyter notebook
+                </Button>
               </div>
 
               {templates.length > 0 && (
@@ -1188,6 +1239,9 @@ export default function NewJobPage() {
                 </Button>
                 <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("vllm")}>
                   Serve with vLLM
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("jupyter")}>
+                  Jupyter notebook
                 </Button>
               </div>
               {templates.length > 0 && (

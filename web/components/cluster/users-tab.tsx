@@ -28,7 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Plus, UserPlus, Trash2, RefreshCw } from "lucide-react";
+import { Loader2, Plus, UserPlus, Trash2, RefreshCw, Link2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface ClusterUserRow {
@@ -66,11 +66,26 @@ export function UsersTab({ clusterId }: UsersTabProps) {
   const [logs, setLogs] = useState<string[]>([]);
   const [logStatus, setLogStatus] = useState<"running" | "success" | "failed">("running");
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState<ClusterUserRow | null>(null);
+  // confirmRemove is a discriminated union — managed rows reuse the existing
+  // /users/<userId> DELETE; unmanaged rows (no Aura User row, only Linux/Slurm
+  // on the controller) hit /slurm-users/<username> which deprovisions by
+  // username with no Prisma lookup.
+  const [confirmRemove, setConfirmRemove] = useState<
+    | { kind: "managed"; row: ClusterUserRow }
+    | { kind: "unmanaged"; username: string; uid: number | null }
+    | null
+  >(null);
   const [removeLogOpen, setRemoveLogOpen] = useState(false);
   const [removeLogs, setRemoveLogs] = useState<string[]>([]);
   const [removeLogStatus, setRemoveLogStatus] = useState<"running" | "success" | "failed">("running");
   const [removeTargetLabel, setRemoveTargetLabel] = useState("");
+  // Adopt-a-Linux-account flow: link an existing controller-side user
+  // to an Aura User row (sets unixUsername/Uid/Gid + ClusterUser=ACTIVE).
+  // Pure DB-side — never touches the controller.
+  const [adoptTarget, setAdoptTarget] = useState<{ username: string; uid: number | null } | null>(null);
+  const [adoptUserId, setAdoptUserId] = useState<string>("");
+  const [adoptSubmitting, setAdoptSubmitting] = useState(false);
+  const [adoptError, setAdoptError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const removeLogRef = useRef<HTMLDivElement>(null);
 
@@ -202,16 +217,58 @@ export function UsersTab({ clusterId }: UsersTabProps) {
     }
   };
 
-  const handleRemove = async (userId: string) => {
+  const handleAdopt = async () => {
+    if (!adoptTarget || !adoptUserId) return;
+    setAdoptSubmitting(true);
+    setAdoptError(null);
+    try {
+      const res = await fetch(
+        `/api/clusters/${clusterId}/slurm-users/${encodeURIComponent(adoptTarget.username)}/adopt`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: adoptUserId }),
+        },
+      );
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setAdoptError(d.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      toast.success(`Linked ${adoptTarget.username} to Aura user`);
+      setAdoptTarget(null);
+      setAdoptUserId("");
+      refresh();
+    } catch (e) {
+      setAdoptError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setAdoptSubmitting(false);
+    }
+  };
+
+  const handleRemove = async () => {
     const target = confirmRemove;
+    if (!target) return;
     setConfirmRemove(null);
-    setRemoving(userId);
-    setRemoveTargetLabel(target?.user.name ?? target?.user.email ?? "user");
+
+    // The endpoint differs between managed and unmanaged. Display label
+    // (the dialog title) is also computed differently — for unmanaged
+    // rows we only have the Linux username.
+    const url = target.kind === "managed"
+      ? `/api/clusters/${clusterId}/users/${target.row.user.id}`
+      : `/api/clusters/${clusterId}/slurm-users/${encodeURIComponent(target.username)}`;
+    const removingKey = target.kind === "managed" ? target.row.user.id : `unm:${target.username}`;
+    const label = target.kind === "managed"
+      ? (target.row.user.name ?? target.row.user.email ?? "user")
+      : `${target.username} (unmanaged)`;
+
+    setRemoving(removingKey);
+    setRemoveTargetLabel(label);
     setRemoveLogs(["[aura] Removing user from cluster..."]);
     setRemoveLogStatus("running");
     setRemoveLogOpen(true);
 
-    const res = await fetch(`/api/clusters/${clusterId}/users/${userId}`, { method: "DELETE" });
+    const res = await fetch(url, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Failed" }));
       setRemoveLogs((p) => [...p, `[error] ${err.error ?? "Failed to remove user"}`]);
@@ -421,21 +478,48 @@ export function UsersTab({ clusterId }: UsersTabProps) {
                       <TableCell className="font-mono text-xs">{s.defaultAccount || "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{s.admin || "—"}</TableCell>
                       <TableCell>
-                        {cu ? (
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            title="Remove user"
-                            onClick={() => setConfirmRemove(cu)}
-                            disabled={removing === cu.user.id}
-                          >
-                            {removing === cu.user.id
-                              ? <Loader2 className="h-4 w-4 animate-spin" />
-                              : <Trash2 className="h-4 w-4 text-destructive" />}
-                          </Button>
-                        ) : (
-                          <span className="text-[10px] text-muted-foreground">—</span>
-                        )}
+                        {(() => {
+                          // Both managed and unmanaged rows are removable. The
+                          // unmanaged path skips the Aura DB and only acts on
+                          // the controller (`userdel` + `sacctmgr delete`).
+                          // Unmanaged rows also get an Adopt button to link
+                          // them to an existing Aura user (DB-only, no SSH).
+                          const removeKey = cu ? cu.user.id : `unm:${s.user}`;
+                          const isRemoving = removing === removeKey;
+                          return (
+                            <div className="flex items-center gap-1">
+                              {!cu && s.linuxPresent && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  title="Adopt — link this Linux account to an Aura user"
+                                  onClick={() => {
+                                    setAdoptTarget({ username: s.user, uid: s.uid });
+                                    setAdoptUserId("");
+                                    setAdoptError(null);
+                                  }}
+                                >
+                                  <Link2 className="h-4 w-4" />
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                title={cu ? "Remove user" : "Remove unmanaged user (no Aura DB row)"}
+                                onClick={() => setConfirmRemove(
+                                  cu
+                                    ? { kind: "managed", row: cu }
+                                    : { kind: "unmanaged", username: s.user, uid: s.uid },
+                                )}
+                                disabled={isRemoving}
+                              >
+                                {isRemoving
+                                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                                  : <Trash2 className="h-4 w-4 text-destructive" />}
+                              </Button>
+                            </div>
+                          );
+                        })()}
                       </TableCell>
                     </TableRow>
                   );
@@ -446,22 +530,83 @@ export function UsersTab({ clusterId }: UsersTabProps) {
         </CardContent>
       </Card>
 
+      {/* Adopt-an-unmanaged-user dialog */}
+      <Dialog open={!!adoptTarget} onOpenChange={(o) => { if (!o && !adoptSubmitting) { setAdoptTarget(null); setAdoptError(null); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Adopt Linux user</DialogTitle>
+            <DialogDescription>
+              Link the Linux account{" "}
+              <code className="font-mono">{adoptTarget?.username}</code>
+              {adoptTarget?.uid !== null && adoptTarget?.uid !== undefined ? ` (uid ${adoptTarget.uid})` : ""}{" "}
+              to an Aura user. This only updates Aura&apos;s database — the controller is read-only here. After
+              adoption, the linked user can submit jobs and access this cluster as if they had been provisioned by Aura.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <label className="text-xs font-medium">Aura user</label>
+            <Select value={adoptUserId} onValueChange={setAdoptUserId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Pick an Aura user…" />
+              </SelectTrigger>
+              <SelectContent>
+                {allUsers
+                  .slice()
+                  .sort((a, b) => (a.email ?? "").localeCompare(b.email ?? ""))
+                  .map((u) => (
+                    <SelectItem key={u.id} value={u.id}>
+                      {u.name ? `${u.name} <${u.email}>` : u.email}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+            {adoptError && (
+              <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {adoptError}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAdoptTarget(null)} disabled={adoptSubmitting}>
+              Cancel
+            </Button>
+            <Button onClick={handleAdopt} disabled={!adoptUserId || adoptSubmitting}>
+              {adoptSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Link2 className="mr-2 h-4 w-4" />}
+              Adopt
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Remove user confirmation dialog */}
       <Dialog open={!!confirmRemove} onOpenChange={(o) => { if (!o) setConfirmRemove(null); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Remove user from cluster?</DialogTitle>
             <DialogDescription>
-              This will remove the Linux user <strong>{confirmRemove?.user.name ?? confirmRemove?.user.email}</strong> from
-              the controller and all worker nodes, along with their Slurm accounting records.
-              The NFS home directory is preserved so their data is not lost.
+              {confirmRemove?.kind === "managed" ? (
+                <>
+                  This will remove the Linux user{" "}
+                  <strong>{confirmRemove.row.user.name ?? confirmRemove.row.user.email}</strong>{" "}
+                  from the controller and all worker nodes, along with their Slurm accounting records.
+                  The NFS home directory is preserved so their data is not lost.
+                </>
+              ) : confirmRemove?.kind === "unmanaged" ? (
+                <>
+                  This Linux user (<strong>{confirmRemove.username}</strong>
+                  {confirmRemove.uid !== null ? `, uid ${confirmRemove.uid}` : ""})
+                  exists on the controller but isn&apos;t tracked in Aura&apos;s database. Remove
+                  will run <code>userdel</code> + <code>sacctmgr delete</code> on the controller and every
+                  worker, identical to the managed flow. The NFS home directory is preserved.
+                </>
+              ) : null}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button variant="destructive" onClick={() => confirmRemove && handleRemove(confirmRemove.user.id)}>
+            <Button variant="destructive" onClick={() => handleRemove()}>
               <Trash2 className="mr-2 h-4 w-4" />
               Remove
             </Button>

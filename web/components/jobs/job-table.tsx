@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { JobStatusBadge } from "./job-status-badge";
 
@@ -38,6 +38,11 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
   const [busyId, setBusyId] = useState<string | null>(null);
   // API errors surface in a dialog so the table itself stays quiet.
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null);
+  // Both Rerun and Cancel run a confirmation dialog first — these are
+  // both irreversible-ish (Cancel sends scancel; Rerun queues a fresh
+  // sbatch that consumes credit + leaves an extra Job row) and an
+  // accidental click would be annoying.
+  const [confirm, setConfirm] = useState<{ kind: "rerun" | "cancel"; job: Job } | null>(null);
 
   // Fresh sbatch of the stored script — works regardless of the original job's
   // status, so there's one "rerun" code path for every row.
@@ -73,6 +78,14 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
     } finally {
       setBusyId(null);
     }
+  };
+
+  const runConfirmed = async () => {
+    if (!confirm) return;
+    const { kind, job } = confirm;
+    setConfirm(null);
+    if (kind === "rerun") await rerun(job);
+    else await cancel(job);
   };
 
   if (jobs.length === 0) {
@@ -132,7 +145,7 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => rerun(job)}
+                  onClick={() => setConfirm({ kind: "rerun", job })}
                   disabled={busyId === job.id}
                   title="Rerun this job (fresh sbatch of the same script)"
                 >
@@ -145,7 +158,7 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => cancel(job)}
+                  onClick={() => setConfirm({ kind: "cancel", job })}
                   disabled={busyId === job.id || !isActive(job.status)}
                   title={
                     isActive(job.status)
@@ -172,6 +185,47 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
           </pre>
           <DialogFooter>
             <Button variant="outline" onClick={() => setErrorDialog(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!confirm} onOpenChange={(o) => { if (!o) setConfirm(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {confirm?.kind === "cancel" ? "Cancel this job?" : "Rerun this job?"}
+            </DialogTitle>
+            <DialogDescription>
+              {confirm?.kind === "cancel" ? (
+                <>
+                  This will send <code>scancel</code> to Slurm for{" "}
+                  <strong>{confirm.job.name ?? confirm.job.id.slice(0, 8)}</strong>
+                  {confirm.job.slurmJobId !== null ? ` (Slurm ${confirm.job.slurmJobId})` : ""}
+                  . Any partial output already written is preserved.
+                </>
+              ) : confirm?.kind === "rerun" ? (
+                <>
+                  Submits a fresh <code>sbatch</code> of the stored script for{" "}
+                  <strong>{confirm.job.name ?? confirm.job.id.slice(0, 8)}</strong>. Creates a
+                  new Job row with a new Slurm ID; the original row stays as history. Any
+                  currently-running job for this row is <em>not</em> cancelled — cancel it first
+                  if that&apos;s what you want.
+                </>
+              ) : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirm(null)}>Cancel</Button>
+            <Button
+              variant={confirm?.kind === "cancel" ? "destructive" : "default"}
+              onClick={runConfirmed}
+            >
+              {confirm?.kind === "cancel" ? (
+                <><XCircle className="mr-2 h-4 w-4" />Cancel job</>
+              ) : (
+                <><Repeat2 className="mr-2 h-4 w-4" />Rerun</>
+              )}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
