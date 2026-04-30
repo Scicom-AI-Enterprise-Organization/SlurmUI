@@ -177,14 +177,24 @@ export async function tryHandleJobProxyUpgrade(
   // Build the headers the WS client should forward upstream. Host is
   // replaced; hop-by-hop + WS handshake headers are stripped so `ws`
   // re-issues them with a fresh Sec-WebSocket-Key/Accept pair.
+  //
+  // Origin rewriting: many upstream services (code-server, JupyterLab in
+  // strict mode) enforce `Origin` matches `Host` on WS upgrades. We're
+  // changing Host to the local tunnel target, so we have to rewrite
+  // Origin to match — otherwise upstream returns 403 and the browser
+  // sees a 1006 abnormal close.
+  const upstreamHost = `127.0.0.1:${localPort}`;
   const fwdHeaders: Record<string, string | string[]> = {
-    Host: `127.0.0.1:${localPort}`,
+    Host: upstreamHost,
   };
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined) continue;
-    if (WS_HOP_BY_HOP.has(k.toLowerCase())) continue;
+    const kl = k.toLowerCase();
+    if (WS_HOP_BY_HOP.has(kl)) continue;
+    if (kl === "origin") continue; // overridden below
     fwdHeaders[k] = v;
   }
+  fwdHeaders.Origin = `http://${upstreamHost}`;
 
   // Preserve client-requested Sec-WebSocket-Protocol so the upstream sees
   // the same subprotocol list (Jupyter sometimes uses subprotocols for

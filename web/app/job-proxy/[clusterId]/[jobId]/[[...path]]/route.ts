@@ -28,6 +28,7 @@ import { dropJobTunnel, getJobTunnel } from "@/lib/job-tunnel";
 import {
   HTTP_HOP_BY_HOP,
   HTTP_RESP_STRIP,
+  injectBaseHref,
   injectOpenApiServers,
   rewriteHtmlAbsolutePaths,
   rewriteLocationHeader,
@@ -70,6 +71,37 @@ async function authorize(clusterId: string, jobId: string) {
 async function handle(req: NextRequest, clusterId: string, jobId: string) {
   const authz = await authorize(clusterId, jobId);
   if (!authz.ok) return NextResponse.json({ error: "Forbidden" }, { status: authz.status });
+
+  // Trailing-slash redirect for the proxy root. Without a trailing slash,
+  // upstream services (code-server, JupyterLab) compute their JS base URL
+  // from `window.location.pathname` and drop the last segment — so
+  // `/job-proxy/<c>/<j>` becomes base `/job-proxy/<c>/`, and dynamic
+  // imports like `<base>/stable-X/foo.js` resolve to
+  // `/job-proxy/<c>/stable-X/foo.js` (missing `<j>`) → 404 storm.
+  //
+  // We need `skipTrailingSlashRedirect: true` in next.config.mjs for this
+  // to not loop with Next's default trailing-slash strip.
+  if (req.method === "GET" && req.nextUrl.pathname === `/job-proxy/${clusterId}/${jobId}`) {
+    // Use a path-only Location so the browser resolves it against the
+    // request's actual origin. `req.nextUrl` carries the server's bind
+    // host (often 0.0.0.0 under Docker host-net), which the browser
+    // can't dial — produces a redirect the user can't follow.
+    //
+    // `Cache-Control: no-store` is critical: 308 (Permanent Redirect) is
+    // cacheable indefinitely per RFC 7538, and browsers DO cache them to
+    // disk. If we ever ship a buggy redirect target, users would be
+    // stuck on the cached version even after the bug is fixed — they'd
+    // have to "Disable cache" in DevTools to escape. no-store keeps the
+    // proxy redirect server-driven so we can iterate.
+    const search = req.nextUrl.search ?? "";
+    return new NextResponse(null, {
+      status: 308,
+      headers: {
+        Location: `/job-proxy/${clusterId}/${jobId}/${search}`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
 
   const resolved = await resolveJobProxyTarget(clusterId, jobId);
   if (!resolved.ok) {
@@ -192,6 +224,12 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
     const kl = k.toLowerCase();
     if (HTTP_RESP_STRIP.has(kl)) return;
     if (kl === "set-cookie") return;
+    // Strip CSP/CSP-Report-Only — upstream services like code-server pin
+    // inline-script sha256 hashes that we can't preserve through path /
+    // header rewriting. Aura's per-job proxy is already auth-gated and
+    // the upstream is the user's own job, so dropping CSP doesn't widen
+    // the trust boundary in any meaningful way.
+    if (kl === "content-security-policy" || kl === "content-security-policy-report-only") return;
     respHeaders.set(k, v);
   });
   // Diagnostic: surface the exact path + status we got from upstream so the
@@ -225,7 +263,12 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
   const ct = (upRes.headers.get("content-type") ?? "").toLowerCase();
   if (ct.includes("text/html")) {
     const text = await upRes.text();
-    return new NextResponse(rewriteHtmlAbsolutePaths(text, proxyPrefix), {
+    // Two passes: inject `<base>` so the browser anchors relative URLs
+    // to the proxy prefix (fixes trailing-slash drift), THEN rewrite
+    // absolute-path attributes. Order matters — `<base>` injection looks
+    // for `<head>`, which the rewriter never touches.
+    const withBase = injectBaseHref(text, proxyPrefix);
+    return new NextResponse(rewriteHtmlAbsolutePaths(withBase, proxyPrefix), {
       status: upRes.status,
       headers: respHeaders,
     });

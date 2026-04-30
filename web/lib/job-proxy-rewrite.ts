@@ -49,17 +49,40 @@ export function parseCookies(header: string | undefined): Record<string, string>
  * Rewrite quoted absolute paths in HTML so they round-trip through the
  * proxy. Targets `"/foo"` and `'/foo'` style quoted strings, skips
  * protocol-relative `"//cdn"` and already-prefixed paths.
+ *
+ * Inline-content rule: we rewrite the OPENING tag's attributes of every
+ * `<script>` and `<style>` element (so external `src=` / `href=` paths
+ * go through the proxy) but leave the BODY of those elements alone.
+ * Reason: when upstream sets `Content-Security-Policy` with `script-src`
+ * sha256-hashes (code-server, JupyterLab, anything CSP-aware), mutating
+ * inline-script content invalidates the hash and the browser refuses to
+ * run it. Path-rewriting attribute strings is harmless; rewriting JS
+ * string literals isn't.
  */
 export function rewriteHtmlAbsolutePaths(html: string, proxyPrefix: string): string {
-  // The leading slash of the path is consumed by `\/` before the lookahead
-  // runs, so the lookahead checks against the path SANS its first slash.
-  // Drop the leading `/` from the prefix here for the same reason — using
-  // the full prefix-with-slash inside the lookahead would never match and
-  // the rewriter would re-prefix already-prefixed paths.
   const tail = proxyPrefix.startsWith("/") ? proxyPrefix.slice(1) : proxyPrefix;
   const escapedTail = tail.replace(/\//g, "\\/");
   const re = new RegExp(`(["'])(\\/(?!\\/)(?!${escapedTail}(?:\\/|\\1))[^"']*)\\1`, "g");
-  return html.replace(re, (_m, q: string, p: string) => `${q}${proxyPrefix}${p}${q}`);
+  const rewrite = (s: string) =>
+    s.replace(re, (_m, q: string, p: string) => `${q}${proxyPrefix}${p}${q}`);
+
+  // For each <script>...</script> or <style>...</style>:
+  //   rewrite the opening tag (its attributes) and closing tag,
+  //   leave the body untouched.
+  // For everything else: rewrite normally.
+  const blockRe = /(<(?:script|style)\b[^>]*>)([\s\S]*?)(<\/(?:script|style)>)/gi;
+  let result = "";
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(html)) !== null) {
+    result += rewrite(html.slice(lastIdx, m.index));
+    result += rewrite(m[1]); // opening tag: src=/href= attrs need prefixing
+    result += m[2];          // body: skip — CSP hashes depend on this
+    result += m[3];          // closing tag
+    lastIdx = m.index + m[0].length;
+  }
+  result += rewrite(html.slice(lastIdx));
+  return result;
 }
 
 /**
@@ -115,6 +138,34 @@ export function rewriteSetCookiePath(setCookie: string, proxyPrefix: string): st
         ? `${lead}${p}`
         : `${lead}${proxyPrefix}${p === "/" ? "/" : p}`,
   );
+}
+
+/**
+ * Force a `<base href="<proxyPrefix>/">` into the HTML so relative URL
+ * resolution is anchored to the proxy prefix, not the page URL. Without
+ * this, code-server / any framework emitting relative asset paths
+ * (`<link href="static/foo.css">`) gets bitten by the trailing-slash
+ * problem — page URL `/job-proxy/<c>/<j>` (no slash) means the browser
+ * drops `<j>` like a filename and resolves to `/job-proxy/<c>/static/...`.
+ *
+ * Strategy: if the HTML has an existing `<base>` tag in `<head>`, replace
+ * it. Otherwise, insert a fresh one immediately after `<head>` (or at
+ * the very start if there's no `<head>`). The browser uses the first
+ * `<base>` it sees, so this is reliable.
+ */
+export function injectBaseHref(html: string, proxyPrefix: string): string {
+  const baseTag = `<base href="${proxyPrefix}/">`;
+  // Replace any existing <base ...> with ours.
+  if (/<base\b[^>]*>/i.test(html)) {
+    return html.replace(/<base\b[^>]*>/i, baseTag);
+  }
+  // No existing base — insert right after the opening <head>.
+  if (/<head\b[^>]*>/i.test(html)) {
+    return html.replace(/<head\b[^>]*>/i, (m) => `${m}${baseTag}`);
+  }
+  // No <head> either (rare — service-worker shells, error pages). Inject
+  // before the first tag that looks like body content.
+  return baseTag + html;
 }
 
 /** Set of request headers we never forward upstream. Hop-by-hop + headers

@@ -388,6 +388,37 @@ echo "Done at $(date)"`,
   --NotebookApp.allow_remote_access=True \\
   --no-browser`,
   },
+  codeServer: {
+    jobName: "code-server",
+    nodes: 1,
+    ntasks: 1,
+    ntasksPerNode: 1,
+    cpusPerTask: 1,
+    gpus: 0,
+    memoryGb: 1,
+    time: "0",
+    // Browser-based VS Code. The official installer's `--method=standalone`
+    // drops the binary at $HOME/.local/bin/code-server (no sudo needed) so
+    // it works under any Slurm user. Auth is `none` because Aura's per-job
+    // proxy gates access — turn on the Proxy tab and set port 8080.
+    command: `echo "[aura] HOME=$HOME"
+echo "[aura] PATH=$PATH"
+echo "[aura] who am i: $(id -un) (uid=$(id -u))"
+
+# Install for the running user (no sudo needed). Drops the binary at
+# $HOME/.local/bin/code-server and assets at $HOME/.local/lib/code-server.
+curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone
+
+# Make sure ~/.local/bin is on PATH for this shell.
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "[aura] code-server installed at: $(command -v code-server)"
+ls -la "$HOME/.local/bin/code-server" || true
+
+# Bind on all interfaces so Aura's per-job proxy (Proxy tab → port 8080)
+# can reach it. --auth none because the proxy itself is auth-gated.
+exec code-server --bind-addr 0.0.0.0:8080 --auth none`,
+  },
 } as const;
 
 const RAW_EXAMPLES = {
@@ -552,6 +583,34 @@ jupyter notebook \\
   --NotebookApp.allow_origin='*' \\
   --NotebookApp.allow_remote_access=True \\
   --no-browser
+`,
+  codeServer: (partition: string) => `#!/bin/bash
+#SBATCH --job-name=code-server
+#SBATCH --partition=${partition || "gpu"}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=1G
+#SBATCH --time=0
+#SBATCH --chdir=/mnt/shared
+
+echo "[aura] HOME=$HOME"
+echo "[aura] PATH=$PATH"
+echo "[aura] who am i: $(id -un) (uid=$(id -u))"
+
+# Install for the running user (no sudo needed). Drops the binary at
+# $HOME/.local/bin/code-server and assets at $HOME/.local/lib/code-server.
+curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone
+
+# Make sure ~/.local/bin is on PATH for this shell.
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "[aura] code-server installed at: $(command -v code-server)"
+ls -la "$HOME/.local/bin/code-server" || true
+
+# Bind on all interfaces so Aura's per-job proxy (Proxy tab → port 8080)
+# can reach it. --auth none because the proxy itself is auth-gated.
+exec code-server --bind-addr 0.0.0.0:8080 --auth none
 `,
 };
 
@@ -1053,6 +1112,9 @@ export default function NewJobPage() {
                 <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("jupyter")}>
                   Jupyter notebook
                 </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("codeServer")}>
+                  code-server (VS Code)
+                </Button>
               </div>
 
               {templates.length > 0 && (
@@ -1242,6 +1304,9 @@ export default function NewJobPage() {
                 </Button>
                 <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("jupyter")}>
                   Jupyter notebook
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("codeServer")}>
+                  code-server (VS Code)
                 </Button>
               </div>
               {templates.length > 0 && (

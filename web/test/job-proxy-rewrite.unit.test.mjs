@@ -20,6 +20,7 @@ const {
   HTTP_HOP_BY_HOP,
   HTTP_RESP_STRIP,
   WS_HOP_BY_HOP,
+  injectBaseHref,
   injectOpenApiServers,
   parseCookies,
   rewriteHtmlAbsolutePaths,
@@ -129,6 +130,55 @@ test("rewriteHtmlAbsolutePaths handles Swagger UI's openapi.json reference", () 
 test("rewriteHtmlAbsolutePaths leaves full URLs alone", () => {
   const html = `<a href="https://example.com/login">`;
   assert.equal(rewriteHtmlAbsolutePaths(html, PREFIX), html);
+});
+
+test("rewriteHtmlAbsolutePaths rewrites <script src=> but NOT inline body", () => {
+  // CSP regression — code-server emits inline scripts whose sha256
+  // hashes are pinned in script-src. Rewriting the body invalidates
+  // the hash and the browser blocks execution. Attributes are fine.
+  const html = `<script src="/static/foo.js"></script><script nonce="x">var u="/api/x"</script>`;
+  const out = rewriteHtmlAbsolutePaths(html, PREFIX);
+  // Attribute on the opening tag IS rewritten:
+  assert.match(out, new RegExp(`src="${PREFIX}/static/foo.js"`));
+  // Body is NOT rewritten — `/api/x` stays exactly as upstream wrote it:
+  assert.match(out, /var u="\/api\/x"/);
+  assert.doesNotMatch(out, new RegExp(`var u="${PREFIX}`));
+});
+
+test("rewriteHtmlAbsolutePaths leaves <style> body alone", () => {
+  const html = `<style>.a{background:url("/img.png")}</style>`;
+  // Inline style body content stays exactly as-is — even though there's
+  // a `url("/img.png")` we'd otherwise rewrite. (External stylesheets
+  // are referenced via <link href="..."> which is a regular attribute
+  // and gets rewritten the normal way.)
+  assert.equal(rewriteHtmlAbsolutePaths(html, PREFIX), html);
+});
+
+// ---------- injectBaseHref ----------
+
+test("injectBaseHref inserts a fresh <base> after <head> when none exists", () => {
+  const html = `<html><head><title>x</title></head><body>y</body></html>`;
+  const out = injectBaseHref(html, PREFIX);
+  assert.match(out, new RegExp(`<head><base href="${PREFIX}/"><title>`));
+});
+
+test("injectBaseHref replaces an existing <base>", () => {
+  const html = `<head><base href="/old/"><title>x</title></head>`;
+  const out = injectBaseHref(html, PREFIX);
+  assert.match(out, new RegExp(`<base href="${PREFIX}/">`));
+  assert.doesNotMatch(out, /<base href="\/old\/">/);
+});
+
+test("injectBaseHref handles HTML without <head>", () => {
+  const html = `<!doctype html><body>x</body>`;
+  const out = injectBaseHref(html, PREFIX);
+  assert.ok(out.startsWith(`<base href="${PREFIX}/">`), "should prepend <base> when no <head>");
+});
+
+test("injectBaseHref preserves <head> attributes when inserting", () => {
+  const html = `<head data-x="1"><title>x</title></head>`;
+  const out = injectBaseHref(html, PREFIX);
+  assert.match(out, new RegExp(`<head data-x="1"><base href="${PREFIX}/">`));
 });
 
 // ---------- injectOpenApiServers ----------

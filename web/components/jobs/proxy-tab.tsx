@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2, Save, ExternalLink, AlertCircle } from "lucide-react";
+import { Loader2, Save, ExternalLink, AlertCircle, Copy } from "lucide-react";
 
 interface Props {
   clusterId: string;
@@ -33,6 +33,9 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"saved" | "disabled" | null>(null);
   const [error, setError] = useState<{ status: number; message: string; raw?: string } | null>(null);
+  // Brief Copy → Check icon swap so the user has visual confirmation
+  // independent of the toast.
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setEnabled(initialProxyPort !== null);
@@ -192,7 +195,33 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
               </span>
             )}
           </div>
-          <div className="rounded bg-muted px-3 py-2 font-mono text-xs break-all">{proxyUrl}</div>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 rounded bg-muted px-3 py-2 font-mono text-xs break-all">
+              {proxyUrl}
+            </code>
+            {/* Copy + floating "Copied" popover, mirroring the
+                /admin/clusters/<id>/metrics grafana password UX. */}
+            <span className="relative inline-flex">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                title="Copy URL"
+                onClick={() => {
+                  navigator.clipboard.writeText(proxyUrl);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+              {copied && (
+                <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[10px] font-sans text-popover-foreground shadow-md">
+                  Copied
+                </span>
+              )}
+            </span>
+          </div>
         </div>
       )}
 

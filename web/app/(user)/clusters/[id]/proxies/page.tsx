@@ -15,7 +15,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { ExternalLink, RefreshCw, Globe, Trash2, Loader2 } from "lucide-react";
+import { ExternalLink, RefreshCw, Globe, Trash2, Loader2, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 interface ProxyItem {
@@ -215,6 +215,9 @@ function ProxyCard({
 }) {
   const url = `${origin}/job-proxy/${clusterId}/${item.id}/`;
   const isRunning = item.status === "RUNNING";
+  // Per-card flag — separate copy state so multiple cards on the same
+  // page don't all flash "Copied" when one is clicked.
+  const [copied, setCopied] = useState(false);
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -254,6 +257,28 @@ function ProxyCard({
           <code className="flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs">
             {url}
           </code>
+          {/* Copy URL — same floating "Copied" popover pattern as the
+              admin Metrics tab + the Job Proxy tab. */}
+          <span className="relative inline-flex">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              title="Copy URL"
+              onClick={() => {
+                navigator.clipboard.writeText(url);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+            {copied && (
+              <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[10px] font-sans text-popover-foreground shadow-md">
+                Copied
+              </span>
+            )}
+          </span>
           {isRunning ? (
             <a href={url} target="_blank" rel="noopener noreferrer">
               <Button size="sm">
