@@ -137,7 +137,11 @@ export async function getJobTunnel(
     "-o", "ServerAliveInterval=30",
     "-o", "ServerAliveCountMax=3",
     "-o", "ExitOnForwardFailure=yes",
-    "-o", "LogLevel=ERROR",
+    // VERBOSE so silent failures (auth handshake, channel rejection) leave
+    // a usable trail in the captured stderr. We surface this in the
+    // "ssh tunnel died" error, which is otherwise unhelpfully empty when
+    // the remote shell exits cleanly with no diagnostic.
+    "-vv",
     ...buildJumpArg(controllerTarget, keyPath, tmpDir),
   ];
   const args = controllerTarget.bastion
@@ -166,8 +170,12 @@ export async function getJobTunnel(
       const onClose = () => {
         if (done) return;
         done = true;
-        const tail = (stderr.slice(-200) || stdout.slice(-200) || "no output").replace(/\s+/g, " ").trim();
-        reject(new Error(`ssh tunnel died: ${tail}`));
+        // With -vv, ssh prints a lot. Keep more of the tail so a real
+        // diagnostic line (auth failure, host unreachable, etc.) survives
+        // the truncation when stderr is dense.
+        const tail = (stderr.slice(-1500) || stdout.slice(-1500) || "no output").trim();
+        const exit = proc.exitCode;
+        reject(new Error(`ssh tunnel died (exit=${exit ?? "?"}): ${tail}`));
       };
       proc.once("close", onClose);
       proc.once("error", onClose);

@@ -97,11 +97,21 @@ services:
     # Host networking so the container can reach Tailscale IPs and all
     # localhost services (postgres, nats, keycloak) directly.
     network_mode: host
-    command: sh -c "npm install && npx prisma generate && npm run dev"
+    # `dev:custom` runs `tsx server.ts`, the same custom entrypoint prod uses.
+    # Plain `next dev` doesn't expose the http.Server upgrade event, so the
+    # /api/ws live-output channel and the /job-proxy/* WebSocket reverse
+    # proxy (Jupyter terminal, etc.) silently 404 under it.
+    command: sh -c "npm install && npx prisma generate && npm run dev:custom"
     environment:
       DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
       NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: any-random-string-for-local-dev
+      # Same value as docker-compose.prod.yml so a session cookie set by
+      # one compose file is still decryptable by the other — browser
+      # cookies aren't port-scoped, so a `localhost` token from :3001 is
+      # also sent to :3000. For real public deploys, override AUTH_SECRET
+      # at the platform level (k8s secret / systemd EnvironmentFile / etc).
+      NEXTAUTH_SECRET: aura-localhost-shared-secret-change-for-prod
+      AUTH_SECRET: aura-localhost-shared-secret-change-for-prod
       KEYCLOAK_ID: aura-web
       KEYCLOAK_SECRET: aura-web-secret
       KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom

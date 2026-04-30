@@ -80,7 +80,13 @@ services:
     environment:
       DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
       NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: any-random-string-for-local-prod
+      # Same value as docker-compose.dev.yml so a session cookie set by
+      # one compose file is still decryptable by the other — browser
+      # cookies aren't port-scoped, so a `localhost` token from :3001 is
+      # also sent to :3000. For real public deploys, override AUTH_SECRET
+      # at the platform level (k8s secret / systemd EnvironmentFile / etc).
+      NEXTAUTH_SECRET: aura-localhost-shared-secret-change-for-prod
+      AUTH_SECRET: aura-localhost-shared-secret-change-for-prod
       KEYCLOAK_ID: aura-web
       KEYCLOAK_SECRET: aura-web-secret
       KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom

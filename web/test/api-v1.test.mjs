@@ -51,7 +51,7 @@ async function req(method, path, body) {
 }
 
 // Context carried across tests (node:test runs them sequentially in file order).
-const ctx = { jobId: null, slurmJobId: null };
+const ctx = { jobId: null, slurmJobId: null, restartJobId: null };
 
 before(async () => {
   // Smoke: base reachable.
@@ -241,6 +241,51 @@ test("GET /api/v1/clusters/:cluster/jobs — status filter is enforced", async (
   for (const j of terminal.data.jobs) {
     assert.equal(j.status, "COMPLETED");
   }
+});
+
+test("GET /api/v1/clusters/:cluster/jobs — pagination metadata is consistent", async () => {
+  const { status, data } = await req("GET", `/api/v1/clusters/${encodeURIComponent(CLUSTER)}/jobs?limit=5&page=1`);
+  assert.equal(status, 200);
+  assert.ok(data.pagination, "missing pagination block");
+  assert.equal(typeof data.pagination.total, "number");
+  assert.equal(typeof data.pagination.pages, "number");
+  assert.ok(data.jobs.length <= 5, "limit not honoured");
+});
+
+// "Restart" semantics on the public API: the v1 surface doesn't expose
+// /resubmit (the user-facing route at app/api/clusters/[id]/jobs/[jobId]/resubmit
+// uses a session cookie, not a Bearer token). For programmatic use the
+// equivalent is "GET the original script, POST a fresh job with the same
+// script + partition" — which is exactly what `submitJob` does internally
+// when the resubmit route is hit. So we cover that flow here.
+test("RESTART: re-submit the same script via /api/v1/clusters/:cluster/jobs", async () => {
+  assert.ok(ctx.jobId, "previous submit didn't set jobId");
+  // Pull the original script.
+  const { status: origStatus, data: orig } = await req("GET", `/api/v1/jobs/${ctx.jobId}`);
+  assert.equal(origStatus, 200);
+  assert.ok(orig.job.script, "original job missing script field");
+
+  // Submit a fresh copy.
+  const { status, data } = await req(
+    "POST",
+    `/api/v1/clusters/${encodeURIComponent(CLUSTER)}/jobs`,
+    { script: orig.job.script, partition: orig.job.partition, name: "v1-restart" },
+  );
+  assert.ok(status === 200 || status === 201, `restart submit failed: ${status} ${JSON.stringify(data)}`);
+  assert.ok(data.id, "restart response missing id");
+  assert.notEqual(data.id, ctx.jobId, "restart returned the SAME job id — should be a new row");
+  assert.ok(data.slurmJobId, "restart response missing slurmJobId");
+  assert.notEqual(data.slurmJobId, ctx.slurmJobId, "restart got the SAME Slurm id — should be a fresh sbatch");
+  ctx.restartJobId = data.id;
+  console.log(`    • restarted as job.id=${data.id} slurmJobId=${data.slurmJobId}`);
+});
+
+test("RESTART: clean up the restart job too", async () => {
+  if (!ctx.restartJobId) return;
+  const { data: before } = await req("GET", `/api/v1/jobs/${ctx.restartJobId}`);
+  if (!before?.job || ["COMPLETED", "FAILED", "CANCELLED"].includes(before.job.status)) return;
+  const { status } = await req("POST", `/api/v1/jobs/${ctx.restartJobId}/cancel`);
+  assert.equal(status, 200);
 });
 
 test("POST /api/v1/jobs/:id/cancel — clean up the test job", async () => {

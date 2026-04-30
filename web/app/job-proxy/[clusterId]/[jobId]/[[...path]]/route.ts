@@ -25,6 +25,15 @@ import { prisma } from "@/lib/prisma";
 import { resolveJobProxyTarget } from "@/lib/job-proxy";
 import { getClusterSshTarget } from "@/lib/ssh-exec";
 import { dropJobTunnel, getJobTunnel } from "@/lib/job-tunnel";
+import {
+  HTTP_HOP_BY_HOP,
+  HTTP_RESP_STRIP,
+  injectOpenApiServers,
+  rewriteHtmlAbsolutePaths,
+  rewriteLocationHeader,
+  rewriteSetCookiePath,
+  stripProxyPrefix,
+} from "@/lib/job-proxy-rewrite";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -92,18 +101,13 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
 
   // Strip the /job-proxy/<clusterId>/<jobId> prefix so the upstream sees
   // its native paths (`/docs`, `/openapi.json`, etc).
-  const prefix = `/job-proxy/${clusterId}/${jobId}`;
-  let stripped = req.nextUrl.pathname;
-  if (stripped.startsWith(prefix)) stripped = stripped.slice(prefix.length) || "/";
-  if (!stripped.startsWith("/")) stripped = "/" + stripped;
-  const fullPath = stripped + (req.nextUrl.search ?? "");
+  const proxyPrefix = `/job-proxy/${clusterId}/${jobId}`;
+  const fullPath = stripProxyPrefix(req.nextUrl.pathname, proxyPrefix) + (req.nextUrl.search ?? "");
   const upstream = `http://127.0.0.1:${localPort}${fullPath}`;
 
   const headers = new Headers();
   req.headers.forEach((v, k) => {
-    const kl = k.toLowerCase();
-    if (kl === "host" || kl === "connection" || kl === "content-length"
-        || kl === "accept-encoding" || kl === "upgrade") return;
+    if (HTTP_HOP_BY_HOP.has(k.toLowerCase())) return;
     headers.set(k, v);
   });
   const proto = req.headers.get("x-forwarded-proto") ?? req.nextUrl.protocol.replace(":", "");
@@ -114,7 +118,7 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
   // Spring's ForwardedHeaderFilter, etc.) the URL prefix the user sees so
   // their emitted absolute links can include it. The upstream still
   // receives the stripped path; this header is purely informational.
-  headers.set("x-forwarded-prefix", `/job-proxy/${clusterId}/${jobId}`);
+  headers.set("x-forwarded-prefix", proxyPrefix);
   // Make undici use a fresh socket per request — the upstream might be a
   // user's hand-rolled server with idiosyncratic keep-alive behaviour.
   headers.set("connection", "close");
@@ -186,70 +190,57 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
   const respHeaders = new Headers();
   upRes.headers.forEach((v, k) => {
     const kl = k.toLowerCase();
-    if (kl === "content-encoding" || kl === "content-length" || kl === "transfer-encoding" || kl === "connection") return;
+    if (HTTP_RESP_STRIP.has(kl)) return;
     if (kl === "set-cookie") return;
     respHeaders.set(k, v);
   });
+  // Diagnostic: surface the exact path + status we got from upstream so the
+  // user can verify what Jupyter / vLLM / whatever actually saw, separate
+  // from any rewriting we do on the way back. Cheap to read in DevTools.
+  respHeaders.set("x-aura-proxy-upstream", `${ip}:${proxyPort}${fullPath}`);
+  respHeaders.set("x-aura-proxy-status", String(upRes.status));
   // Multi-Set-Cookie preservation. Same trick as grafana-proxy — forEach
   // folds them into a comma-joined value which is wrong.
   const setCookies = (upRes.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
-  for (const c of setCookies) respHeaders.append("set-cookie", c);
+
+  // Location header rewriting — must run BEFORE the body-branch returns
+  // below, otherwise a 302 with `Content-Type: text/html` (Jupyter's `/`
+  // → `/tree` redirect, for one) gets caught by the HTML branch and the
+  // unmodified `Location: /tree` reaches the browser, jumping the user
+  // out of the proxy.
+  const rewrittenLoc = rewriteLocationHeader(respHeaders.get("location"), proxyPrefix);
+  if (rewrittenLoc) respHeaders.set("location", rewrittenLoc);
+
+  // Set-Cookie path rewriting. Cookies set with `Path=/specific/sub` won't
+  // be sent for proxied requests under `/job-proxy/...`; prepend the
+  // prefix so the cookie scope still matches.
+  for (const c of setCookies) {
+    respHeaders.append("set-cookie", rewriteSetCookiePath(c, proxyPrefix));
+  }
 
   // Body rewriting for HTML responses. Many services (vLLM/FastAPI's Swagger
-  // UI, simple Flask apps) emit absolute-path URLs like
-  // `url: "/openapi.json"` or `<a href="/login">`. Since we strip the proxy
-  // prefix on the way upstream, those paths bypass the proxy when the
-  // browser resolves them. Rewrite quoted absolute paths in HTML to include
-  // the prefix so the next request lands back here.
-  //
-  // Targets quoted strings starting with a single `/` (excluding `//` for
-  // protocol-relative URLs). Skips paths already prefixed.
-  const proxyPrefix = `/job-proxy/${clusterId}/${jobId}`;
+  // UI, simple Flask apps) emit absolute-path URLs like `url: "/openapi.json"`
+  // or `<a href="/login">`. Since we strip the proxy prefix on the way
+  // upstream, those paths bypass the proxy when the browser resolves them.
   const ct = (upRes.headers.get("content-type") ?? "").toLowerCase();
-  const isHtml = ct.includes("text/html");
-  if (isHtml) {
+  if (ct.includes("text/html")) {
     const text = await upRes.text();
-    const fixed = text.replace(
-      /(["'])(\/(?!\/)(?!job-proxy\/)[^"']*)\1/g,
-      (_m, q: string, p: string) => `${q}${proxyPrefix}${p}${q}`,
-    );
-    return new NextResponse(fixed, { status: upRes.status, headers: respHeaders });
+    return new NextResponse(rewriteHtmlAbsolutePaths(text, proxyPrefix), {
+      status: upRes.status,
+      headers: respHeaders,
+    });
   }
 
-  // OpenAPI / Swagger spec rewriting. Inject `servers` so Swagger UI's
-  // "Try it out" + curl-example feature builds requests against the proxy
-  // prefix instead of the page origin (which would bypass the proxy and
-  // 404). Detect by the `openapi` (3.x) or `swagger` (2.0) top-level field
-  // so we don't blindly mangle every JSON response.
+  // OpenAPI / Swagger spec rewriting — inject `servers` so Swagger UI's
+  // "Try it out" curl examples build requests against the proxy prefix.
   if (ct.includes("application/json")) {
     const text = await upRes.text();
-    try {
-      const obj = JSON.parse(text);
-      if (obj && typeof obj === "object") {
-        if (obj.openapi) {
-          // OpenAPI 3.x — `servers` is an array of {url, description?}.
-          obj.servers = [{ url: proxyPrefix, description: "Aura job proxy" }];
-          return new NextResponse(JSON.stringify(obj), { status: upRes.status, headers: respHeaders });
-        }
-        if (obj.swagger) {
-          // Swagger 2.0 — basePath is the prefix; host is the visible host.
-          obj.basePath = proxyPrefix;
-          const xfHost2 = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-          if (xfHost2) obj.host = xfHost2;
-          return new NextResponse(JSON.stringify(obj), { status: upRes.status, headers: respHeaders });
-        }
-      }
-    } catch {
-      // Non-JSON despite the header — fall through and pass body back.
+    const xfHost2 = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? undefined;
+    const rewritten = injectOpenApiServers(text, proxyPrefix, xfHost2);
+    if (rewritten) {
+      return new NextResponse(rewritten, { status: upRes.status, headers: respHeaders });
     }
     return new NextResponse(text, { status: upRes.status, headers: respHeaders });
-  }
-
-  // For JSON containing a Location-like field (3xx redirects), rewrite the
-  // Location header. Most other content types pass through verbatim.
-  const loc = respHeaders.get("location");
-  if (loc && loc.startsWith("/") && !loc.startsWith("//") && !loc.startsWith(`/job-proxy/`)) {
-    respHeaders.set("location", `/job-proxy/${clusterId}/${jobId}${loc}`);
   }
 
   return new NextResponse(upRes.body, {
