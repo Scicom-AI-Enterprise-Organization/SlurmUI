@@ -50,39 +50,22 @@ export function parseCookies(header: string | undefined): Record<string, string>
  * proxy. Targets `"/foo"` and `'/foo'` style quoted strings, skips
  * protocol-relative `"//cdn"` and already-prefixed paths.
  *
- * Inline-content rule: we rewrite the OPENING tag's attributes of every
- * `<script>` and `<style>` element (so external `src=` / `href=` paths
- * go through the proxy) but leave the BODY of those elements alone.
- * Reason: when upstream sets `Content-Security-Policy` with `script-src`
- * sha256-hashes (code-server, JupyterLab, anything CSP-aware), mutating
- * inline-script content invalidates the hash and the browser refuses to
- * run it. Path-rewriting attribute strings is harmless; rewriting JS
- * string literals isn't.
+ * We rewrite EVERYTHING in the response, including inline `<script>` and
+ * `<style>` bodies — this matters for Jupyter Notebook's
+ * `requirejs.config({ baseUrl: "/static/..." })` and similar setups
+ * where module loaders read URLs out of inline JS string literals.
+ *
+ * Originally I skipped script bodies to preserve `script-src` sha256
+ * hashes pinned by code-server's CSP. That's no longer necessary
+ * because the route handler strips the upstream `Content-Security-Policy`
+ * header (proxy access is already auth-gated). With CSP gone, mutating
+ * the body is safe.
  */
 export function rewriteHtmlAbsolutePaths(html: string, proxyPrefix: string): string {
   const tail = proxyPrefix.startsWith("/") ? proxyPrefix.slice(1) : proxyPrefix;
   const escapedTail = tail.replace(/\//g, "\\/");
   const re = new RegExp(`(["'])(\\/(?!\\/)(?!${escapedTail}(?:\\/|\\1))[^"']*)\\1`, "g");
-  const rewrite = (s: string) =>
-    s.replace(re, (_m, q: string, p: string) => `${q}${proxyPrefix}${p}${q}`);
-
-  // For each <script>...</script> or <style>...</style>:
-  //   rewrite the opening tag (its attributes) and closing tag,
-  //   leave the body untouched.
-  // For everything else: rewrite normally.
-  const blockRe = /(<(?:script|style)\b[^>]*>)([\s\S]*?)(<\/(?:script|style)>)/gi;
-  let result = "";
-  let lastIdx = 0;
-  let m: RegExpExecArray | null;
-  while ((m = blockRe.exec(html)) !== null) {
-    result += rewrite(html.slice(lastIdx, m.index));
-    result += rewrite(m[1]); // opening tag: src=/href= attrs need prefixing
-    result += m[2];          // body: skip — CSP hashes depend on this
-    result += m[3];          // closing tag
-    lastIdx = m.index + m[0].length;
-  }
-  result += rewrite(html.slice(lastIdx));
-  return result;
+  return html.replace(re, (_m, q: string, p: string) => `${q}${proxyPrefix}${p}${q}`);
 }
 
 /**

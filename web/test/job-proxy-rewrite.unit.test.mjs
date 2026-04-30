@@ -132,26 +132,22 @@ test("rewriteHtmlAbsolutePaths leaves full URLs alone", () => {
   assert.equal(rewriteHtmlAbsolutePaths(html, PREFIX), html);
 });
 
-test("rewriteHtmlAbsolutePaths rewrites <script src=> but NOT inline body", () => {
-  // CSP regression — code-server emits inline scripts whose sha256
-  // hashes are pinned in script-src. Rewriting the body invalidates
-  // the hash and the browser blocks execution. Attributes are fine.
-  const html = `<script src="/static/foo.js"></script><script nonce="x">var u="/api/x"</script>`;
+test("rewriteHtmlAbsolutePaths rewrites <script src=> AND inline body", () => {
+  // We rewrite both the attribute on the opening tag AND quoted absolute
+  // paths inside the body. Jupyter's `requirejs.config({baseUrl: "/static"})`
+  // requires this — the route handler strips upstream CSP so the
+  // inline-script-hash concern that previously kept us out of bodies is
+  // moot. See the function doc for why this changed.
+  const html = `<script src="/static/foo.js"></script><script nonce="x">requirejs.config({baseUrl:"/static/"})</script>`;
   const out = rewriteHtmlAbsolutePaths(html, PREFIX);
-  // Attribute on the opening tag IS rewritten:
   assert.match(out, new RegExp(`src="${PREFIX}/static/foo.js"`));
-  // Body is NOT rewritten — `/api/x` stays exactly as upstream wrote it:
-  assert.match(out, /var u="\/api\/x"/);
-  assert.doesNotMatch(out, new RegExp(`var u="${PREFIX}`));
+  assert.match(out, new RegExp(`baseUrl:"${PREFIX}/static/"`));
 });
 
-test("rewriteHtmlAbsolutePaths leaves <style> body alone", () => {
+test("rewriteHtmlAbsolutePaths rewrites <style> body url() too", () => {
   const html = `<style>.a{background:url("/img.png")}</style>`;
-  // Inline style body content stays exactly as-is — even though there's
-  // a `url("/img.png")` we'd otherwise rewrite. (External stylesheets
-  // are referenced via <link href="..."> which is a regular attribute
-  // and gets rewritten the normal way.)
-  assert.equal(rewriteHtmlAbsolutePaths(html, PREFIX), html);
+  const out = rewriteHtmlAbsolutePaths(html, PREFIX);
+  assert.match(out, new RegExp(`url\\("${PREFIX}/img.png"\\)`));
 });
 
 // ---------- injectBaseHref ----------
