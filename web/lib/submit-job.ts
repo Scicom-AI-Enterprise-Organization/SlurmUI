@@ -13,6 +13,7 @@ import type { Job } from "@prisma/client";
 import { prisma } from "./prisma";
 import { logAudit } from "./audit";
 import { sendCommandAndWait, publishCommand } from "./nats";
+import { effectiveClusterStatus } from "./cluster-health";
 import { sshExecScript } from "./ssh-exec";
 import { startJobWatcher } from "./job-watcher";
 
@@ -37,7 +38,10 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
 
   const cluster = await prisma.cluster.findUnique({ where: { id: clusterId } });
   if (!cluster) throw new Error("Cluster not found");
-  if (cluster.status !== "ACTIVE" && cluster.status !== "DEGRADED") {
+  // Trust the latest health probe over the lazily-updated DB column —
+  // see app/api/clusters/[id]/jobs/route.ts for the same reasoning.
+  const eff = effectiveClusterStatus(cluster);
+  if (eff !== "ACTIVE" && eff !== "DEGRADED") {
     throw new Error("Cluster is not accepting jobs");
   }
 

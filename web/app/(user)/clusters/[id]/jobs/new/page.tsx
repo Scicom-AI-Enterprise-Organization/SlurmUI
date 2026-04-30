@@ -30,7 +30,200 @@ import {
 } from "@/components/ui/select";
 import { ScriptEditor } from "@/components/jobs/script-editor";
 import { toast } from "sonner";
-import { Send, Sparkles, ChevronDown, X, Check } from "lucide-react";
+import { Send, Sparkles, ChevronDown, X, Check, AlertTriangle, Info, ServerCrash } from "lucide-react";
+
+// Classify a submit-failure message into a plain-English summary plus a
+// list of suggested next steps. Falls through to a generic "submission
+// failed" with the raw text in the detail block. Patterns are ordered by
+// specificity — first match wins.
+type SubmitErrorKind = "offline" | "auth" | "user" | "sbatch" | "network" | "generic";
+interface ClassifiedError {
+  kind: SubmitErrorKind;
+  title: string;
+  summary: string;
+  hints: string[];
+}
+
+function classifySubmitError(httpStatus: number, raw: string): ClassifiedError {
+  const text = (raw ?? "").toLowerCase();
+
+  if (httpStatus === 0) {
+    return {
+      kind: "network",
+      title: "Couldn't reach Aura",
+      summary: "The browser couldn't talk to the Aura web server. Submit didn't go through.",
+      hints: [
+        "Check your network — VPN, captive portal, or DNS hiccup.",
+        "Try refreshing the page; if it bounces you to /login your session expired.",
+      ],
+    };
+  }
+
+  if (httpStatus === 401) {
+    return {
+      kind: "auth",
+      title: "Session expired",
+      summary: "You're not signed in (or the session cookie has aged out).",
+      hints: ["Reload the page — you'll be redirected to log in again."],
+    };
+  }
+
+  if (httpStatus === 403 && text.includes("provisioned")) {
+    return {
+      kind: "user",
+      title: "You're not provisioned on this cluster",
+      summary: "Your Aura account exists but no Linux user has been created on the cluster yet.",
+      hints: [
+        "Ask a cluster admin to add you on /admin/clusters/<id>/users.",
+        "Check the Profile page — Linux Account row should show username + UID once provisioned.",
+      ],
+    };
+  }
+
+  if (httpStatus === 503 && text.includes("not accepting")) {
+    return {
+      kind: "offline",
+      title: "Cluster is offline",
+      summary: "The latest health probe couldn't reach the cluster controller, so submissions are blocked.",
+      hints: [
+        "Wait ~30 s and try again — a single transient SSH timeout will clear on the next probe.",
+        "If it persists, open the cluster's Admin → SSH tab and click Test connection.",
+        "Ops: check controller reachability (bastion, ProxyJump, sshd, network).",
+      ],
+    };
+  }
+
+  if (text.includes("only accepts jobs submitted via git jobs")) {
+    return {
+      kind: "user",
+      title: "Direct submission disabled on this cluster",
+      summary: "Admin configured this cluster as GitOps-only — UI submissions are rejected.",
+      hints: [
+        "Commit a job manifest to the configured repo under jobs/<name>.yaml.",
+        "Or ask an admin to flip off gitops_only_jobs on the cluster's Configuration tab.",
+      ],
+    };
+  }
+
+  if (text.includes("linux user") && text.includes("does not exist")) {
+    return {
+      kind: "user",
+      title: "Your Linux account is missing on the controller",
+      summary: "Aura tried to sbatch as your Unix user but the controller doesn't know that user yet.",
+      hints: [
+        "Ask an admin to re-provision you from /admin/clusters/<id>/users — provisioning likely failed or got rolled back.",
+        "After re-provision, your username should appear in `getent passwd`.",
+      ],
+    };
+  }
+
+  if (text.includes("invalid partition") || text.includes("partition.*does not exist") || /partition\s+\S+\s+not found/i.test(raw ?? "")) {
+    return {
+      kind: "sbatch",
+      title: "Partition doesn't exist",
+      summary: "Slurm rejected the partition name.",
+      hints: [
+        "Pick a partition from the dropdown (it's populated from live `sinfo`).",
+        "If the partition was just added, the controller may need a `scontrol reconfigure` — admin can do this from the Partitions tab → Apply.",
+      ],
+    };
+  }
+
+  if (text.includes("invalid account") || text.includes("user has no association")) {
+    return {
+      kind: "sbatch",
+      title: "Slurm accounting rejected the job",
+      summary: "Your user has no association with this account/partition in `sacctmgr`.",
+      hints: [
+        "Ask an admin to create the association from the Users → Account tree tab.",
+        "Or run a job without an explicit --account so Slurm picks the default.",
+      ],
+    };
+  }
+
+  if (text.includes("qos") && /(limit|maxjobs|maxsubmit)/i.test(raw ?? "")) {
+    return {
+      kind: "sbatch",
+      title: "Hit a QoS limit",
+      summary: "The cluster's QoS rules cap how many jobs you can run / submit at once.",
+      hints: [
+        "Check your running + pending jobs on the Jobs page; cancel some to free a slot.",
+        "Ask an admin to raise MaxJobsPU / MaxSubmitPU on the QoS tab if the cap is too tight.",
+      ],
+    };
+  }
+
+  if (text.includes("requested time limit is invalid") || /time.*exceeds partition/i.test(raw ?? "")) {
+    return {
+      kind: "sbatch",
+      title: "Time limit out of range",
+      summary: "Either the time format is wrong or it exceeds the partition's MaxTime.",
+      hints: [
+        "Use HH:MM:SS, D-HH:MM:SS, or leave blank for the partition default.",
+        "Lower the time below the partition cap, or pick a different partition.",
+      ],
+    };
+  }
+
+  if (/bad nodelist|invalid nodelist|nodes.*not available/i.test(raw ?? "")) {
+    return {
+      kind: "sbatch",
+      title: "Nodelist not satisfiable",
+      summary: "The nodes you pinned don't exist, are down, or aren't in this partition.",
+      hints: [
+        "Clear the Nodes multiselect and resubmit, or check `sinfo` for state=idle nodes.",
+        "Check Cluster → Nodes — drained / down nodes are flagged there.",
+      ],
+    };
+  }
+
+  if (text.includes("more processors requested than permitted") || /memory.*exceed/i.test(raw ?? "") || /node configuration is not available/i.test(raw ?? "")) {
+    return {
+      kind: "sbatch",
+      title: "No node satisfies the request",
+      summary: "Slurm couldn't find a node with the requested CPUs / memory / GPUs / features.",
+      hints: [
+        "Drop CPUs-per-task / memory / GPUs to fit the smallest node in the partition.",
+        "The Cluster Resources panel above the Jobs table shows per-node capacity.",
+      ],
+    };
+  }
+
+  if (text.includes("munge") || text.includes("authentication failure") || text.includes("auth credential")) {
+    return {
+      kind: "sbatch",
+      title: "Slurm authentication is broken",
+      summary: "The controller couldn't authenticate the sbatch call — usually Munge.",
+      hints: [
+        "Ops: check `systemctl status munge` on every node; restart `slurmd`/`slurmctld` after fixing.",
+        "Aura's Diagnose button on the Nodes tab tests Munge alongside slurmd.",
+      ],
+    };
+  }
+
+  if (text.includes("permission denied (publickey)")) {
+    return {
+      kind: "sbatch",
+      title: "SSH to the controller failed",
+      summary: "Aura's SSH key was rejected by the controller.",
+      hints: [
+        "Ops: check the cluster's SSH key on /admin/clusters/<id>/ssh — make sure the public key is in the controller's `authorized_keys`.",
+        "Bastion mode: confirm the bastion host has the key authorized too.",
+      ],
+    };
+  }
+
+  // Generic fallback — leave the raw error visible.
+  return {
+    kind: "generic",
+    title: httpStatus === 502 ? "Cluster rejected the submission" : "Job submission failed",
+    summary:
+      httpStatus === 502
+        ? "Slurm or the SSH layer returned an error. The full output is below."
+        : `Server returned HTTP ${httpStatus || "(no response)"}.`,
+    hints: [],
+  };
+}
 
 const FORM_EXAMPLES = {
   nccl: {
@@ -408,7 +601,7 @@ export default function NewJobPage() {
   const [ntasksPerNode, setNtasksPerNode] = useState(1);
   const [cpusPerTask, setCpusPerTask] = useState(1);
   const [gpus, setGpus] = useState(0);
-  const [memoryGb, setMemoryGb] = useState(0);
+  const [memoryGb, setMemoryGb] = useState(1);
   const [time, setTime] = useState(""); // e.g. "1-00:00:00" or "" for unlimited
   const [arraySpec, setArraySpec] = useState(""); // e.g. "1-100", "0-99:2", "1-16%4"
   const [command, setCommand] = useState("");
@@ -416,7 +609,17 @@ export default function NewJobPage() {
   // Raw mode state
   const [rawScript, setRawScript] = useState("");
 
-  const [errorDialog, setErrorDialog] = useState<{ title: string; message: string; detail?: string } | null>(null);
+  const [errorDialog, setErrorDialog] = useState<
+    | {
+        title: string;
+        message: string;
+        detail?: string;
+        kind?: SubmitErrorKind;
+        hints?: string[];
+        httpStatus?: number;
+      }
+    | null
+  >(null);
 
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [partition, setPartition] = useState("");
@@ -607,21 +810,30 @@ export default function NewJobPage() {
         router.push(`/clusters/${clusterId}/jobs/${job.id}`);
       } else {
         const err = await res.json().catch(() => ({}));
-        const raw = err.error ?? `Server returned ${res.status}`;
-        // If the message is multi-line (e.g. sbatch stderr), put the first line
-        // in the title summary and the full trace in the detail block.
-        const nlIdx = raw.indexOf("\n");
+        const raw: string = err.error ?? `Server returned ${res.status}`;
+        const detail: string | undefined = err.detail ?? err.stderr ?? err.output ?? (raw.includes("\n") ? raw : undefined);
+        const cls = classifySubmitError(res.status, raw);
         setErrorDialog({
-          title: "Job submission failed",
-          message: nlIdx === -1 ? raw : raw.slice(0, nlIdx),
-          detail: nlIdx === -1 ? err.detail ?? err.stderr ?? err.output : raw,
+          kind: cls.kind,
+          title: cls.title,
+          message: cls.summary,
+          hints: cls.hints,
+          // Always show the raw server message in the details block so the
+          // user can copy it verbatim into a bug report — classification is
+          // best-effort, not authoritative.
+          detail: detail ?? raw,
+          httpStatus: res.status,
         });
       }
     } catch (e) {
+      const cls = classifySubmitError(0, e instanceof Error ? e.message : "");
       setErrorDialog({
-        title: "Job submission failed",
-        message: "Network error — could not reach the cluster API.",
+        kind: cls.kind,
+        title: cls.title,
+        message: cls.summary,
+        hints: cls.hints,
         detail: e instanceof Error ? e.message : undefined,
+        httpStatus: 0,
       });
     } finally {
       setSubmitting(false);
@@ -1058,15 +1270,59 @@ export default function NewJobPage() {
       <Dialog open={!!errorDialog} onOpenChange={(o) => { if (!o) setErrorDialog(null); }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle className="text-destructive">{errorDialog?.title}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              {(() => {
+                const k = errorDialog?.kind ?? "generic";
+                if (k === "offline" || k === "network") return <ServerCrash className="h-5 w-5" />;
+                if (k === "user" || k === "auth") return <Info className="h-5 w-5" />;
+                return <AlertTriangle className="h-5 w-5" />;
+              })()}
+              <span>{errorDialog?.title}</span>
+              {errorDialog?.httpStatus ? (
+                <span className="ml-1 rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-xs font-normal opacity-80">
+                  HTTP {errorDialog.httpStatus}
+                </span>
+              ) : null}
+            </DialogTitle>
             <DialogDescription>{errorDialog?.message}</DialogDescription>
           </DialogHeader>
-          {errorDialog?.detail && (
-            <pre className="max-h-96 overflow-y-auto rounded-md border bg-muted p-3 text-xs font-mono whitespace-pre-wrap">
-              {errorDialog.detail}
-            </pre>
+
+          {errorDialog?.hints && errorDialog.hints.length > 0 && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                Try this
+              </p>
+              <ul className="ml-4 list-disc space-y-1 text-sm">
+                {errorDialog.hints.map((h, i) => (
+                  <li key={i}>{h}</li>
+                ))}
+              </ul>
+            </div>
           )}
-          <DialogFooter>
+
+          {errorDialog?.detail && (
+            <details className="rounded-md border bg-muted/50 text-xs">
+              <summary className="cursor-pointer select-none px-3 py-2 font-medium hover:bg-muted">
+                Server response
+              </summary>
+              <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap p-3 font-mono">
+                {errorDialog.detail}
+              </pre>
+            </details>
+          )}
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            {errorDialog?.detail && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  navigator.clipboard?.writeText(errorDialog.detail ?? "").catch(() => {});
+                  toast.success("Copied to clipboard");
+                }}
+              >
+                Copy details
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setErrorDialog(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>

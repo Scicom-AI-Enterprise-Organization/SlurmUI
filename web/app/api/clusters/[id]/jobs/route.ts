@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { submitJob } from "@/lib/submit-job";
+import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -107,7 +108,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
   }
 
-  if (cluster.status !== "ACTIVE" && cluster.status !== "DEGRADED") {
+  // Use the probe-derived effective status, not the raw column. The DB
+  // status is updated lazily (only flips OFFLINE after 2 consecutive
+  // probe fails), so a single transient SSH timeout in prod can leave
+  // status=OFFLINE in the DB even though the very next probe came back
+  // alive. The UI already shows status from this same helper.
+  const eff = effectiveClusterStatus(cluster);
+  if (eff !== "ACTIVE" && eff !== "DEGRADED") {
     return NextResponse.json({ error: "Cluster is not accepting jobs" }, { status: 503 });
   }
 
