@@ -5,7 +5,11 @@
 // runtime where it is not available" invariant under `tsx server.ts`.
 // `next dev` does this implicitly inside its CLI; the custom server has
 // to bootstrap it itself.
-import "next/dist/server/node-environment";
+//
+// `.js` extension is required because the prod bundle is loaded as ESM
+// by plain `node`, which (unlike tsx) uses strict file resolution. The
+// tsx-driven dev path tolerates the extension just fine.
+import "next/dist/server/node-environment.js";
 
 import { createServer } from "http";
 import { parse } from "url";
