@@ -36,7 +36,7 @@ export interface GitOpsJobsConfig {
   path: string;
   deployKey: string;
   httpsToken: string;
-  /** Reconcile cadence. Clamped to >= 60 seconds. */
+  /** Reconcile cadence. Clamped to >= 180 seconds. */
   intervalSec: number;
   lastReconcileAt?: string;
   lastStatus?: "success" | "failed";
@@ -50,7 +50,7 @@ export const DEFAULT_GITOPS_JOBS_CONFIG: GitOpsJobsConfig = {
   path: "",
   deployKey: "",
   httpsToken: "",
-  intervalSec: 100,
+  intervalSec: 180,
 };
 
 const SETTING_KEY = "gitops_jobs_config";
@@ -67,7 +67,7 @@ export async function loadGitOpsJobsConfig(): Promise<GitOpsJobsConfig> {
 
 export async function saveGitOpsJobsConfig(cfg: GitOpsJobsConfig): Promise<void> {
   // Clamp interval to a sane minimum so the cron can't be set to 0.
-  const safe: GitOpsJobsConfig = { ...cfg, intervalSec: Math.max(100, Math.floor(cfg.intervalSec || 100)) };
+  const safe: GitOpsJobsConfig = { ...cfg, intervalSec: Math.max(180, Math.floor(cfg.intervalSec || 180)) };
   await prisma.setting.upsert({
     where: { key: SETTING_KEY },
     create: { key: SETTING_KEY, value: JSON.stringify(safe) },
@@ -710,7 +710,7 @@ async function tick(): Promise<void> {
 async function scheduleNext(): Promise<void> {
   // Re-read config each time so interval changes apply without a restart.
   const cfg = await loadGitOpsJobsConfig().catch(() => DEFAULT_GITOPS_JOBS_CONFIG);
-  const intervalSec = Math.max(100, cfg.intervalSec || 100);
+  const intervalSec = Math.max(180, cfg.intervalSec || 180);
   tickHandle = setTimeout(async () => {
     await tick();
     scheduleNext();

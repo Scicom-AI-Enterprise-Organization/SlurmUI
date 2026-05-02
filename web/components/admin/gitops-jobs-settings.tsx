@@ -33,7 +33,7 @@ const DEFAULT: Config = {
   path: "",
   deployKey: "",
   httpsToken: "",
-  intervalSec: 100,
+  intervalSec: 180,
 };
 
 interface LastRun {
@@ -233,7 +233,7 @@ export function GitopsJobsSettings() {
           <div>
             <Label htmlFor="gj-enabled" className="font-medium">Enabled</Label>
             <p className="text-xs text-muted-foreground">
-              When on, the server ticks every <code>{Math.max(100, cfg.intervalSec)}s</code> and reconciles.
+              When on, the server ticks every <code>{Math.max(180, cfg.intervalSec)}s</code> and reconciles.
             </p>
           </div>
           <Switch
@@ -266,9 +266,9 @@ export function GitopsJobsSettings() {
             <Input
               id="gj-interval"
               type="number"
-              min={100}
+              min={180}
               value={cfg.intervalSec}
-              onChange={(e) => setCfg({ ...cfg, intervalSec: parseInt(e.target.value || "100", 10) })}
+              onChange={(e) => setCfg({ ...cfg, intervalSec: parseInt(e.target.value || "180", 10) })}
             />
           </div>
         </div>

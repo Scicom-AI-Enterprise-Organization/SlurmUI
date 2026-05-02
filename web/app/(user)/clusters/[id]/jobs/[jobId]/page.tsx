@@ -19,7 +19,8 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { XCircle, RefreshCw, RotateCw, Repeat2 } from "lucide-react";
+import { XCircle, RefreshCw, RotateCw, Repeat2, Pencil, X } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 import { ErrorExplainer } from "@/components/jobs/error-explainer";
 import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
@@ -114,10 +115,17 @@ export default function JobDetailPage() {
   const [restartLogLines, setRestartLogLines] = useState<string[]>([]);
   const [restartLogStatus, setRestartLogStatus] = useState<"streaming" | "complete" | "error">("streaming");
   const [restartJobId, setRestartJobId] = useState<string | null>(null);
+  // Script edit-and-resubmit flow. The textarea is hidden behind an Edit
+  // button to avoid an accidental rerun on a stray keystroke. Save opens
+  // a confirmation dialog that reuses the restart log dialog after submit.
+  const [editingScript, setEditingScript] = useState(false);
+  const [editedScript, setEditedScript] = useState("");
+  const [confirmEditResubmit, setConfirmEditResubmit] = useState(false);
 
-  const handleRestart = async () => {
+  const handleRestart = async (opts?: { script?: string; cancelCurrent?: boolean }) => {
     if (!job) return;
     setConfirmRestart(false);
+    setConfirmEditResubmit(false);
     setRestarting(true);
     setRestartLogLines([]);
     setRestartLogStatus("streaming");
@@ -126,6 +134,8 @@ export default function JobDetailPage() {
     try {
       const res = await fetch(`/api/clusters/${clusterId}/jobs/${job.id}/resubmit`, {
         method: "POST",
+        headers: opts ? { "Content-Type": "application/json" } : {},
+        body: opts ? JSON.stringify(opts) : undefined,
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok || !d.taskId) {
@@ -737,12 +747,71 @@ export default function JobDetailPage() {
 
       <Separator />
 
-      {/* Script */}
+      {/* Script — read-only by default; Edit toggles a textarea. Save
+          opens a confirmation dialog that cancels the running job and
+          resubmits a fresh one with the edited script (handleRestart
+          with cancelCurrent=true). */}
       <div className="space-y-2">
-        <h3 className="font-medium">Script</h3>
-        <ScrollArea className="h-64 rounded-md border">
-          <pre className="p-4 font-mono text-sm">{job.script}</pre>
-        </ScrollArea>
+        <div className="flex items-center justify-between">
+          <h3 className="font-medium">Script</h3>
+          {!editingScript ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setEditedScript(job.script ?? "");
+                setEditingScript(true);
+              }}
+              title="Edit the script — saving will cancel this job and submit a new one"
+            >
+              <Pencil className="mr-2 h-3 w-3" />
+              Edit
+            </Button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setEditingScript(false);
+                  setEditedScript("");
+                }}
+              >
+                <X className="mr-2 h-3 w-3" />
+                Discard
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => setConfirmEditResubmit(true)}
+                disabled={
+                  restarting ||
+                  editedScript.trim() === "" ||
+                  editedScript === job.script
+                }
+                title={
+                  editedScript === job.script
+                    ? "No changes"
+                    : "Cancel this job and resubmit with the edited script"
+                }
+              >
+                <Repeat2 className="mr-2 h-3 w-3" />
+                Save & resubmit
+              </Button>
+            </div>
+          )}
+        </div>
+        {editingScript ? (
+          <Textarea
+            value={editedScript}
+            onChange={(e) => setEditedScript(e.target.value)}
+            spellCheck={false}
+            className="min-h-64 font-mono text-sm"
+          />
+        ) : (
+          <ScrollArea className="h-64 rounded-md border">
+            <pre className="p-4 font-mono text-sm">{job.script}</pre>
+          </ScrollArea>
+        )}
       </div>
 
       {/* Confirm cancel dialog */}
@@ -796,9 +865,50 @@ export default function JobDetailPage() {
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmRestart(false)}>Cancel</Button>
-            <Button onClick={handleRestart} disabled={restarting}>
+            <Button onClick={() => handleRestart()} disabled={restarting}>
               <Repeat2 className="mr-2 h-4 w-4" />
               Restart
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm Save-edited-script-and-resubmit dialog. Unlike plain
+          Restart, this one explicitly cancels the running job first
+          before submitting the new one — that's the whole point of
+          editing in place. */}
+      <Dialog open={confirmEditResubmit} onOpenChange={setConfirmEditResubmit}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apply edits and resubmit?</DialogTitle>
+            <DialogDescription>
+              {(job?.status === "RUNNING" || job?.status === "PENDING") ? (
+                <>
+                  This will <strong>cancel</strong> the currently {job.status.toLowerCase()} job
+                  {job.slurmJobId ? ` (slurm ${job.slurmJobId})` : ""} and submit a fresh
+                  <code>sbatch</code> with your edits. A new Job row is created; the original
+                  one stays as history. You&apos;ll be redirected to the new job once it has a Slurm id.
+                </>
+              ) : (
+                <>
+                  Submits a fresh <code>sbatch</code> with your edits. Creates a new Job row
+                  with a new Slurm id; this one is already in a terminal state so nothing
+                  needs to be cancelled.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmEditResubmit(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                setEditingScript(false);
+                handleRestart({ script: editedScript, cancelCurrent: true });
+              }}
+              disabled={restarting}
+            >
+              <Repeat2 className="mr-2 h-4 w-4" />
+              Apply &amp; resubmit
             </Button>
           </DialogFooter>
         </DialogContent>
