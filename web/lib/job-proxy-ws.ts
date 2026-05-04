@@ -118,17 +118,33 @@ export async function tryHandleJobProxyUpgrade(
   const tag = `[job-proxy ws ${jobId.slice(0, 8)}]`;
   console.log(`${tag} upgrade ${rawUrl}`);
 
-  const user = await readSession(req);
-  if (!user) {
-    console.log(`${tag} 401 — no decodable session cookie`);
-    writeHttpError(socket, 401, "Unauthorized");
+  // Public-proxy short-circuit (same logic as the HTTP route handler):
+  // when proxyPublic=true on the Job, anyone with the URL gets in,
+  // including unauthenticated browsers.
+  const jobMeta = await prisma.job.findFirst({
+    where: { id: jobId, clusterId },
+    select: { userId: true, proxyPublic: true },
+  });
+  if (!jobMeta) {
+    console.log(`${tag} 404 — job not found`);
+    writeHttpError(socket, 404, "Job not found");
     return true;
   }
-  const allowed = await authorize(clusterId, jobId, user);
-  if (!allowed) {
-    console.log(`${tag} 403 — user=${user.id} role=${user.role} not allowed`);
-    writeHttpError(socket, 403, "Forbidden");
-    return true;
+  if (!jobMeta.proxyPublic) {
+    const user = await readSession(req);
+    if (!user) {
+      console.log(`${tag} 401 — no decodable session cookie`);
+      writeHttpError(socket, 401, "Unauthorized");
+      return true;
+    }
+    const allowed = await authorize(clusterId, jobId, user);
+    if (!allowed) {
+      console.log(`${tag} 403 — user=${user.id} role=${user.role} not allowed`);
+      writeHttpError(socket, 403, "Forbidden");
+      return true;
+    }
+  } else {
+    console.log(`${tag} public proxy — auth bypassed`);
   }
 
   const resolved = await resolveJobProxyTarget(clusterId, jobId);

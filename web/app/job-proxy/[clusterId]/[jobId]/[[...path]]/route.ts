@@ -44,6 +44,18 @@ interface RouteParams {
 }
 
 async function authorize(clusterId: string, jobId: string) {
+  // Public-proxy short-circuit: when the job's `proxyPublic` flag is set,
+  // anyone with the URL gets in — no Aura session required. Used for
+  // sharing notebook / demo / dashboard links with people who don't
+  // have accounts. The toggle defaults to false and is only flippable
+  // by job owners or admins via the Proxy tab.
+  const job = await prisma.job.findFirst({
+    where: { id: jobId, clusterId },
+    select: { userId: true, proxyPublic: true },
+  });
+  if (!job) return { ok: false as const, status: 404 };
+  if (job.proxyPublic) return { ok: true as const };
+
   const session = await auth();
   if (!session?.user) return { ok: false as const, status: 401 };
   const userId = (session.user as { id?: string }).id;
@@ -51,11 +63,6 @@ async function authorize(clusterId: string, jobId: string) {
   if (role === "ADMIN") return { ok: true as const };
   if (!userId) return { ok: false as const, status: 401 };
 
-  const job = await prisma.job.findFirst({
-    where: { id: jobId, clusterId },
-    select: { userId: true },
-  });
-  if (!job) return { ok: false as const, status: 404 };
   if (job.userId === userId) return { ok: true as const };
   // Anyone with ACTIVE ClusterUser membership on the cluster can also view —
   // the proxy is essentially "look at this job's running service", same gate
@@ -151,15 +158,17 @@ async function handle(req: NextRequest, clusterId: string, jobId: string) {
   // their emitted absolute links can include it. The upstream still
   // receives the stripped path; this header is purely informational.
   headers.set("x-forwarded-prefix", proxyPrefix);
-  // Make undici use a fresh socket per request — the upstream might be a
-  // user's hand-rolled server with idiosyncratic keep-alive behaviour.
-  headers.set("connection", "close");
+  // Allow undici to pool/keep-alive the local-tunnel socket. Each in-
+  // flight TCP through `ssh -L` is a separate SSH channel and most
+  // bastion sshd configs cap MaxSessions at 10 — Jupyter Notebook 6
+  // loads 30+ assets in parallel on the first tree page hit, which
+  // exhausts the channel pool and produces 502s on the overflow.
+  // Reusing one TCP for many HTTP requests keeps channel count bounded.
 
-  const init: RequestInit & { keepalive?: boolean } = {
+  const init: RequestInit = {
     method: req.method,
     headers,
     redirect: "manual",
-    keepalive: false,
   };
   if (req.method !== "GET" && req.method !== "HEAD") {
     const body = await req.arrayBuffer();

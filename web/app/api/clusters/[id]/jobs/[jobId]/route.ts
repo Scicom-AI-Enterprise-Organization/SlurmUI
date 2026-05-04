@@ -204,7 +204,12 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json().catch(() => ({}));
-  const data: { metricsPort?: number | null; proxyPort?: number | null; proxyName?: string | null } = {};
+  const data: {
+    metricsPort?: number | null;
+    proxyPort?: number | null;
+    proxyName?: string | null;
+    proxyPublic?: boolean;
+  } = {};
   if ("metricsPort" in body) {
     if (body.metricsPort === null || body.metricsPort === "" || body.metricsPort === undefined) {
       data.metricsPort = null;
@@ -235,6 +240,9 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       const s = body.proxyName.trim().slice(0, 64);
       data.proxyName = s.length > 0 ? s : null;
     }
+  }
+  if ("proxyPublic" in body) {
+    data.proxyPublic = body.proxyPublic === true;
   }
   if (Object.keys(data).length === 0) {
     return NextResponse.json({ error: "no supported fields in body" }, { status: 400 });

@@ -11,6 +11,7 @@ interface Props {
   jobId: string;
   initialProxyPort: number | null;
   initialProxyName: string | null;
+  initialProxyPublic: boolean;
   jobStatus: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 }
 
@@ -24,12 +25,13 @@ interface Props {
  * --ServerApp.base_url=...) so its emitted absolute links round-trip
  * through the proxy correctly.
  */
-export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName, jobStatus }: Props) {
+export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName, initialProxyPublic, jobStatus }: Props) {
   const [enabled, setEnabled] = useState(initialProxyPort !== null);
   const [port, setPort] = useState<string>(
     initialProxyPort !== null ? String(initialProxyPort) : "8888",
   );
   const [name, setName] = useState<string>(initialProxyName ?? "");
+  const [isPublic, setIsPublic] = useState(initialProxyPublic);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"saved" | "disabled" | null>(null);
   const [error, setError] = useState<{ status: number; message: string; raw?: string } | null>(null);
@@ -41,13 +43,14 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
     setEnabled(initialProxyPort !== null);
     if (initialProxyPort !== null) setPort(String(initialProxyPort));
     setName(initialProxyName ?? "");
-  }, [initialProxyPort, initialProxyName]);
+    setIsPublic(initialProxyPublic);
+  }, [initialProxyPort, initialProxyName, initialProxyPublic]);
 
   const proxyUrl = typeof window !== "undefined"
     ? `${window.location.origin}/job-proxy/${clusterId}/${jobId}/`
     : `/job-proxy/${clusterId}/${jobId}/`;
 
-  const save = async (newEnabled: boolean, newPort: number | null, newName: string | null) => {
+  const save = async (newEnabled: boolean, newPort: number | null, newName: string | null, newPublic: boolean) => {
     setSaving(true);
     setError(null);
     try {
@@ -57,6 +60,11 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
         body: JSON.stringify({
           proxyPort: newEnabled ? newPort : null,
           proxyName: newEnabled ? (newName ?? null) : null,
+          // proxyPublic is independent — make it sticky even when the
+          // proxy is disabled so flipping the proxy back on doesn't lose
+          // the prior public/private choice. (We could clear it on
+          // disable, but admins find that surprising.)
+          proxyPublic: newEnabled ? newPublic : false,
         }),
       });
       const text = await res.text();
@@ -81,7 +89,8 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
   const dirty =
     enabled !== (initialProxyPort !== null) ||
     (enabled && Number(port) !== (initialProxyPort ?? -1)) ||
-    (enabled && name !== (initialProxyName ?? ""));
+    (enabled && name !== (initialProxyName ?? "")) ||
+    (enabled && isPublic !== initialProxyPublic);
 
   return (
     <div className="space-y-4">
@@ -150,6 +159,25 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
             disabled={!enabled || saving}
           />
         </div>
+        <div>
+          <Label className="text-xs">Access</Label>
+          <label className="mt-1 flex h-10 cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={isPublic}
+              disabled={!enabled || saving}
+              onChange={(e) => { setIsPublic(e.target.checked); setSaveStatus(null); }}
+            />
+            <span className="text-sm">
+              <span className="font-medium">Public</span>{" "}
+              <span className="text-muted-foreground">
+                — anyone with the URL can use this proxy without an Aura account.
+                Off by default; sign-in is required.
+              </span>
+            </span>
+          </label>
+        </div>
         <Button
           variant="outline"
           onClick={() => {
@@ -158,7 +186,7 @@ export function ProxyTab({ clusterId, jobId, initialProxyPort, initialProxyName,
               setError({ status: 0, message: "Port must be 1-65535." });
               return;
             }
-            save(enabled, enabled ? p : null, enabled ? (name.trim() || null) : null);
+            save(enabled, enabled ? p : null, enabled ? (name.trim() || null) : null, isPublic);
           }}
           disabled={saving || !dirty}
           title={dirty ? "Persist this state" : "No unsaved changes"}

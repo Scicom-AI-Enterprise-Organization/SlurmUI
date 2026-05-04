@@ -164,6 +164,13 @@ export async function getJobTunnel(
   proc.stdout?.on("data", append("out"));
   proc.stderr?.on("data", append("err"));
 
+  // Listen-budget: bastion-mode handshakes (login banner + interactive
+  // PTY warmup + sleep exec) routinely take 10-25s on first connect even
+  // when everything is healthy. Direct (non-bastion) connects come up in
+  // <2s on a normal LAN. Be generous either way — a failure is loud
+  // (the proc.error / proc.close handlers fire).
+  const listenBudgetMs = controllerTarget.bastion ? 30_000 : 15_000;
+
   const ready = (async () => {
     await new Promise<void>((resolve, reject) => {
       let done = false;
@@ -179,9 +186,21 @@ export async function getJobTunnel(
       };
       proc.once("close", onClose);
       proc.once("error", onClose);
-      waitForListen(localPort, 10000)
+      waitForListen(localPort, listenBudgetMs)
         .then(() => { if (!done) { done = true; proc.removeListener("close", onClose); resolve(); } })
-        .catch((e) => { if (!done) { done = true; proc.removeListener("close", onClose); reject(e); } });
+        .catch((e) => {
+          if (done) return;
+          done = true;
+          proc.removeListener("close", onClose);
+          // The "tunnel never came up" message is unhelpful by itself —
+          // include the captured -vv stderr tail so we can see whether
+          // ssh got stuck at handshake / auth / banner / port forward.
+          // Also kill the lingering proc so we don't leak it.
+          try { proc.kill("SIGTERM"); } catch {}
+          const tail = (stderr.slice(-1500) || stdout.slice(-1500) || "(no ssh output)").trim();
+          const detail = e instanceof Error ? e.message : String(e);
+          reject(new Error(`${detail} (after ${listenBudgetMs}ms; ssh -vv tail: ${tail})`));
+        });
     });
   })();
 

@@ -26,6 +26,7 @@ interface ProxyItem {
   status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   proxyPort: number;
   proxyName: string | null;
+  proxyPublic: boolean;
   createdAt: string;
   updatedAt: string;
   user: { id: string; email: string; name: string | null; unixUsername: string | null } | null;
@@ -38,6 +39,29 @@ export default function ProxiesPage() {
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ProxyItem | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Per-card toggle for the public/private flag. Optimistic update so
+  // the switch flips immediately; the periodic refetch will reconcile
+  // if the PATCH actually fails.
+  const togglePublic = async (item: ProxyItem, makePublic: boolean) => {
+    setProxies((prev) => prev.map((p) => (p.id === item.id ? { ...p, proxyPublic: makePublic } : p)));
+    try {
+      const res = await fetch(`/api/clusters/${id}/jobs/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxyPublic: makePublic }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        toast.error("Couldn't update public access", { description: d.error ?? `HTTP ${res.status}` });
+        // Roll back the optimistic flip.
+        setProxies((prev) => prev.map((p) => (p.id === item.id ? { ...p, proxyPublic: !makePublic } : p)));
+      }
+    } catch (e) {
+      toast.error("Couldn't update public access", { description: e instanceof Error ? e.message : "Network error" });
+      setProxies((prev) => prev.map((p) => (p.id === item.id ? { ...p, proxyPublic: !makePublic } : p)));
+    }
+  };
 
   const removeProxy = async (item: ProxyItem) => {
     setDeleting(true);
@@ -144,6 +168,7 @@ export default function ProxiesPage() {
                 item={p}
                 origin={origin}
                 onDelete={() => setConfirmDelete(p)}
+                onTogglePublic={(makePublic) => togglePublic(p, makePublic)}
               />
             ))}
           </div>
@@ -163,6 +188,7 @@ export default function ProxiesPage() {
                 item={p}
                 origin={origin}
                 onDelete={() => setConfirmDelete(p)}
+                onTogglePublic={(makePublic) => togglePublic(p, makePublic)}
               />
             ))}
           </div>
@@ -207,11 +233,13 @@ function ProxyCard({
   item,
   origin,
   onDelete,
+  onTogglePublic,
 }: {
   clusterId: string;
   item: ProxyItem;
   origin: string;
   onDelete: () => void;
+  onTogglePublic: (makePublic: boolean) => void;
 }) {
   const url = `${origin}/job-proxy/${clusterId}/${item.id}/`;
   const isRunning = item.status === "RUNNING";
@@ -242,9 +270,25 @@ function ProxyCard({
           <Badge variant="outline" className="font-mono">
             :{item.proxyPort}
           </Badge>
+          {item.proxyPublic && (
+            <Badge className="bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-100">
+              Public
+            </Badge>
+          )}
           <span>partition {item.partition}</span>
           {item.slurmJobId !== null && <span>Slurm {item.slurmJobId}</span>}
         </div>
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            className="h-3.5 w-3.5"
+            checked={item.proxyPublic}
+            onChange={(e) => onTogglePublic(e.target.checked)}
+          />
+          <span>
+            Public access — anyone with the URL can use this proxy without an Aura account
+          </span>
+        </label>
         {item.user && (
           <p className="text-xs text-muted-foreground">
             Submitted by{" "}
@@ -280,26 +324,30 @@ function ProxyCard({
             )}
           </span>
           {isRunning ? (
-            <a href={url} target="_blank" rel="noopener noreferrer">
-              <Button size="sm">
-                <ExternalLink className="mr-2 h-3 w-3" />
-                Open
+            <a href={url} target="_blank" rel="noopener noreferrer" title="Open proxy">
+              <Button size="icon" variant="ghost" className="h-8 w-8">
+                <ExternalLink className="h-3.5 w-3.5" />
               </Button>
             </a>
           ) : (
-            <Button size="sm" disabled title="Job isn't running — proxy will return 502">
-              <ExternalLink className="mr-2 h-3 w-3" />
-              Open
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8"
+              disabled
+              title="Job isn't running — proxy will return 502"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
             </Button>
           )}
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
             onClick={onDelete}
             title="Remove proxy (keeps the job running)"
-            className="text-muted-foreground hover:text-destructive"
+            className="h-8 w-8 text-muted-foreground hover:text-destructive"
           >
-            <Trash2 className="h-3 w-3" />
+            <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
       </CardContent>

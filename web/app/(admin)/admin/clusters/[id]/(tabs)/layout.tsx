@@ -12,6 +12,7 @@ import { Separator } from "@/components/ui/separator";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Server, Settings, Briefcase } from "lucide-react";
+import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 interface LayoutProps {
   params: Promise<{ id: string }>;
@@ -92,7 +93,17 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
 
       <Separator />
 
-      <ClusterTabs clusterId={id} isActive={cluster.status === "ACTIVE"} />
+      {/* Same probe-vs-DB-column reasoning as the Configuration page —
+          trust the latest health probe so a transient SSH miss doesn't
+          make admin tabs disappear and force a refresh. ACTIVE or
+          DEGRADED both mean the controller is reachable. */}
+      <ClusterTabs
+        clusterId={id}
+        isActive={(() => {
+          const eff = effectiveClusterStatus(cluster);
+          return eff === "ACTIVE" || eff === "DEGRADED";
+        })()}
+      />
       {children}
     </div>
   );

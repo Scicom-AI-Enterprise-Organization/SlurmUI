@@ -740,6 +740,7 @@ export default function JobDetailPage() {
             jobId={jobId}
             initialProxyPort={(job as { proxyPort?: number | null }).proxyPort ?? null}
             initialProxyName={(job as { proxyName?: string | null }).proxyName ?? null}
+            initialProxyPublic={(job as { proxyPublic?: boolean }).proxyPublic ?? false}
             jobStatus={job.status}
           />
         </TabsContent>

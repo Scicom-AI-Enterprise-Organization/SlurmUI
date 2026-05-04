@@ -102,6 +102,11 @@ model Job {
   // cluster Proxies tab (e.g. "Jupyter", "TensorBoard").
   proxyPort   Int?
   proxyName   String?
+  // When true, anyone with the /job-proxy/<clusterId>/<jobId>/* URL can
+  // hit the proxy without an Aura session — used for sharing a notebook /
+  // demo / dashboard with people who don't have accounts. Off by default;
+  // the URL is unguessable enough to be safe with this opt-in.
+  proxyPublic Boolean @default(false)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

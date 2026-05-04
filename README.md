@@ -69,7 +69,7 @@ minute, click the same button and reattach to the live log. Every task has a
 ### Run it on Linux
 
 ```bash
-git clone https://github.com/your-org/aura.git
+git clone https://github.com/Scicom-AI-Enterprise-Organization/SlurmUI
 cd aura
 docker compose -f docker-compose.dev.yml up --build
 ```

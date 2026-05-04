@@ -59,6 +59,11 @@ export const config = {
     // Exclude /api/v1/* — those endpoints accept Bearer tokens (see
     // lib/api-auth.ts) and do their own role checks, so the session-cookie
     // gate below would wrongly 401 token-authenticated callers.
-    "/((?!_next/static|_next/image|favicon.ico|public|api/health|api/install|api/metrics|api/v1|login|invite|reset|api/invites/by-token|api/password-reset/by-token).*)",
+    //
+    // /job-proxy/* is also excluded: the route handler itself checks
+    // `Job.proxyPublic` before falling back to session auth, so we must
+    // NOT redirect unauth users to /login here — that'd defeat the
+    // public-proxy toggle.
+    "/((?!_next/static|_next/image|favicon.ico|public|api/health|api/install|api/metrics|api/v1|login|invite|reset|api/invites/by-token|api/password-reset/by-token|job-proxy).*)",
   ],
 };

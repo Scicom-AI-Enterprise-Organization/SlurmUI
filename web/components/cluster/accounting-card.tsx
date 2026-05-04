@@ -11,7 +11,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 
 interface AccountingCardProps {
   clusterId: string;
@@ -30,6 +30,11 @@ interface AccountingState {
 export function AccountingCard({ clusterId }: AccountingCardProps) {
   const [state, setState] = useState<AccountingState | null>(null);
   const [loading, setLoading] = useState(false);
+  // Track fetch failures separately from null so we can show "Retry"
+  // instead of an ambiguous "Unable to read" — the SSH probe behind
+  // /accounting flaps on cold bastion-mux warmup, so a second try
+  // almost always succeeds.
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [currentMode, setCurrentMode] = useState<"none" | "slurmdbd" | "fifo" | null>(null);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
@@ -40,33 +45,53 @@ export function AccountingCard({ clusterId }: AccountingCardProps) {
   const [dialogTitle, setDialogTitle] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
-  const fetchState = async () => {
+  const fetchState = async (): Promise<boolean> => {
     setLoading(true);
+    setFetchError(null);
     try {
       const r = await fetch(`/api/clusters/${clusterId}/accounting`);
-      if (r.ok) {
-        const d = await r.json();
-        setState(d);
-        if (d.latestTask && d.latestTask.status === "running") {
-          const taskMode: "none" | "slurmdbd" | "fifo" =
-            d.latestTask.type === "accounting_none" ? "none" :
-            d.latestTask.type === "priority_fifo" ? "fifo" : "slurmdbd";
-          setCurrentMode(taskMode);
-          setDialogTitle(
-            taskMode === "none" ? "Disabling accounting" :
-            taskMode === "fifo" ? "Switching to FIFO priority" :
-            "Enabling slurmdbd accounting"
-          );
-          attachToTask(d.latestTask.id);
-        }
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        setFetchError(e.error ?? `HTTP ${r.status}`);
+        return false;
       }
-    } catch {} finally {
+      const d = await r.json();
+      setState(d);
+      if (d.latestTask && d.latestTask.status === "running") {
+        const taskMode: "none" | "slurmdbd" | "fifo" =
+          d.latestTask.type === "accounting_none" ? "none" :
+          d.latestTask.type === "priority_fifo" ? "fifo" : "slurmdbd";
+        setCurrentMode(taskMode);
+        setDialogTitle(
+          taskMode === "none" ? "Disabling accounting" :
+          taskMode === "fifo" ? "Switching to FIFO priority" :
+          "Enabling slurmdbd accounting"
+        );
+        attachToTask(d.latestTask.id);
+      }
+      return true;
+    } catch (e) {
+      setFetchError(e instanceof Error ? e.message : "Network error");
+      return false;
+    } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchState();
+    let cancelled = false;
+    (async () => {
+      const ok = await fetchState();
+      // First-load retry. The /accounting endpoint SSHes the controller;
+      // a single transient failure (bastion mux warming up, mux pool
+      // saturated) shouldn't drop the entire card. One retry after a
+      // short delay covers >95% of these.
+      if (!ok && !cancelled) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (!cancelled) await fetchState();
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId]);
 
@@ -168,7 +193,26 @@ export function AccountingCard({ clusterId }: AccountingCardProps) {
         </CardHeader>
         <CardContent className="space-y-4 text-sm">
           {loading && !state ? (
-            <p className="text-muted-foreground">Loading...</p>
+            <p className="inline-flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Reading slurm.conf from the controller…
+            </p>
+          ) : !state && fetchError ? (
+            <div className="space-y-2">
+              <div className="flex items-start gap-2 text-amber-700 dark:text-amber-400">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  Couldn&apos;t read the controller&apos;s accounting state — the SSH probe
+                  failed (often a transient bastion-mux warmup). Click Retry; nothing on
+                  the cluster has changed.
+                  <span className="ml-1 text-xs opacity-70">({fetchError})</span>
+                </span>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => fetchState()} disabled={loading}>
+                <RefreshCw className={`mr-2 h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+                Retry
+              </Button>
+            </div>
           ) : state ? (
             <>
               <div className="space-y-1">
