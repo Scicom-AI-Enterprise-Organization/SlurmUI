@@ -31,7 +31,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "port must be 1-65535" }, { status: 400 });
   }
 
-  const job = await prisma.job.findUnique({ where: { id: jobId } });
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: { clusterId: true, userId: true, slurmJobId: true, status: true },
+  });
   if (!job || job.clusterId !== id) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }

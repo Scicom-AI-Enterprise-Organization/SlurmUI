@@ -24,7 +24,15 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const job = await prisma.job.findUnique({ where: { id: jobId } });
+  // Select only the columns we touch — the cached `output` column on this
+  // row can be hundreds of KB to a few MB on jobs with verbose logging
+  // (vLLM debug, etc.), and pulling it in just to authorise the request
+  // wastes the same memory the endpoint is about to allocate again from
+  // the SSH read.
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: { id: true, clusterId: true, userId: true, slurmJobId: true, status: true },
+  });
   if (!job || job.clusterId !== id) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
@@ -36,7 +44,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const offsetParam = url.searchParams.get("offset");
   const limitParam = url.searchParams.get("limit");
   const rangeMode = offsetParam !== null || limitParam !== null;
-  const DEFAULT_CAP = 5 * 1024 * 1024;
+  // Keep the default tail small so a noisy debug log can't blow the
+  // request heap on the first paint. The UI pages older content via
+  // explicit ?offset=&limit= when the user scrolls.
+  const DEFAULT_CAP = 256 * 1024;
   const MAX_LIMIT = 50 * 1024 * 1024;
   const offset = Math.max(0, Number.parseInt(offsetParam ?? "0", 10) || 0);
   const limit = Math.min(
@@ -131,8 +142,8 @@ if [ -n "$OUTFILE" ]; then
   if [ "$RANGE_MODE" = "1" ]; then
     READ_CMD="dd if='$OUTFILE' bs=1M iflag=skip_bytes,count_bytes skip=$OFFSET count=$LIMIT status=none"
   else
-    # Legacy behaviour: last 5 MB.
-    READ_CMD="tail -c 5242880 '$OUTFILE'"
+    # No-range default: last $LIMIT bytes (matches DEFAULT_CAP on the JS side).
+    READ_CMD="tail -c $LIMIT '$OUTFILE'"
   fi
   if [ -n "$NODE" ]; then
     read_remote "$READ_CMD"

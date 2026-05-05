@@ -11,7 +11,10 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const job = await prisma.job.findUnique({ where: { id: jobId } });
+  const job = await prisma.job.findUnique({
+    where: { id: jobId },
+    select: { clusterId: true, userId: true, slurmJobId: true, partition: true },
+  });
   if (!job || job.clusterId !== id) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
