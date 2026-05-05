@@ -1,8 +1,5 @@
 /**
- * Thin re-export — the actual page is the Client Component in
- * `jobs-list-client.tsx`. Keeping this file as a server boundary lets
- * Next route to it without us having to mark the client file as the
- * page entrypoint.
+ * Thin wrapper around the Client Component in `jobs-list-client.tsx`.
  *
  * An earlier version pre-fetched the default jobs payload here and
  * passed it as `initialData`. That was wasted work — the client always
@@ -10,5 +7,14 @@
  * request and pulled the query engine into the RSC render path. Under
  * a tight k8s memory limit the duplicated allocation tipped the heap
  * over and OOM-killed the pod. Removed.
+ *
+ * We can't `export { default } from "./jobs-list-client"` because
+ * Next's page-export type check rejects a default whose props include
+ * anything beyond `params`/`searchParams`. The client component still
+ * declares an optional `initialData` prop, so we wrap it.
  */
-export { default } from "./jobs-list-client";
+import JobListPage from "./jobs-list-client";
+
+export default function JobsListServerPage() {
+  return <JobListPage />;
+}
