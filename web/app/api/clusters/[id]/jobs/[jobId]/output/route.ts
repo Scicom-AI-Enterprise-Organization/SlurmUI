@@ -44,10 +44,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   const offsetParam = url.searchParams.get("offset");
   const limitParam = url.searchParams.get("limit");
   const rangeMode = offsetParam !== null || limitParam !== null;
-  // Keep the default tail small so a noisy debug log can't blow the
-  // request heap on the first paint. The UI pages older content via
-  // explicit ?offset=&limit= when the user scrolls.
-  const DEFAULT_CAP = 256 * 1024;
+  // Default tail size for the "show me the latest output" path. 5 MB is
+  // a balance — big enough that vLLM-style debug logs are readable
+  // without paging, small enough that a handful of concurrent panels
+  // can't blow a 1Gi pod. The DB-side accumulation that used to OOM
+  // prod is bounded separately by the watcher's 256 KB capture cap; the
+  // per-request buffer here was never the OOM cause once the cache was
+  // capped. UI pages older content via explicit ?offset=&limit=.
+  const DEFAULT_CAP = 5 * 1024 * 1024;
   const MAX_LIMIT = 50 * 1024 * 1024;
   const offset = Math.max(0, Number.parseInt(offsetParam ?? "0", 10) || 0);
   const limit = Math.min(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useVisibleInterval } from "@/hooks/use-visible-interval";
 import { useParams, useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -407,7 +407,18 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
       .finally(() => setLoading(false));
   };
 
+  // Skip the very first mount fetch when the server-component seed
+  // already covers the request (URL is in default state). Without this
+  // skip, the page paid for two parallel Prisma stacks per load — the
+  // server pre-fetch then an immediate identical client fetch — which
+  // doubled DB pressure and Node heap. After the first run the ref
+  // flips and the effect behaves normally on filter changes.
+  const skipFirstFetchRef = useRef(urlIsDefault && initialData != null);
   useEffect(() => {
+    if (skipFirstFetchRef.current) {
+      skipFirstFetchRef.current = false;
+      return;
+    }
     fetchJobs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId, page, limit, debouncedName, statusFilter, partitionFilter, fromDate, toDate]);
