@@ -212,6 +212,32 @@ curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
       </Card>
 
       <Card>
+        <CardHeader>
+          <CardTitle>
+            Trim cached job logs — <code>POST /api/v1/admin/maintenance/truncate-job-output</code>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <p>
+            Admin-only. Shrinks every <code>Job.output</code> row down to the last 256 KB
+            and runs <code>VACUUM (ANALYZE) &quot;Job&quot;</code> to reclaim TOAST disk
+            space. Use it after a noisy job (vLLM debug logs, etc.) has bloated the column,
+            or after upgrading from a build whose watcher didn&apos;t cap captured output.
+            Idempotent — rows already at or under the cap are left alone.
+          </p>
+          <CodeBlock>{`curl -s -X POST \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  "${base}/api/v1/admin/maintenance/truncate-job-output" | jq`}</CodeBlock>
+          <p className="text-xs text-muted-foreground">
+            Returns <code>{`{ ok, capBytes, rowsTrimmed, vacuumed, before, after }`}</code>
+            where <code>before</code> / <code>after</code> each report
+            <code>{` { oversizedRows, totalBytes, largestRowBytes, avgRowBytes }`}</code>.
+            Returns <code>403</code> for non-admin tokens.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader><CardTitle>Quick-start: poll until done</CardTitle></CardHeader>
         <CardContent className="space-y-3 text-sm">
           <CodeBlock>{`AURA_TOKEN="aura_xxxxxxxxxxxxxxxxxxxxxxxxxx"
