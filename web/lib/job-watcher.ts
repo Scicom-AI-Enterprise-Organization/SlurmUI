@@ -129,7 +129,10 @@ fi
 ) &
 WATCHER=$!
 
-tail -n +1 -F "$OUTFILE" 2>/dev/null
+# Follow only the last 256 KB on disk — we don't want to stream the
+# entire backlog of a verbose log into Node memory just to throw the
+# old part away. New writes after this point are picked up by -F.
+tail -c 262144 -F "$OUTFILE" 2>/dev/null
 
 wait $WATCHER 2>/dev/null
 
@@ -143,8 +146,25 @@ echo "__AURA_JOB_FINAL__=$FINAL"
   let finalState = "";
   let exitCode = 0;
   let assumedComplete = false;
+  // Sliding tail of recent stdout. Cap in bytes — verbose loggers (vLLM
+  // debug, etc.) will happily emit hundreds of MB over a job's lifetime,
+  // and this watcher used to keep every byte in memory AND write it back
+  // to Postgres every 2s. Now we drop the oldest lines once the buffer
+  // exceeds the cap; the UI gets the live tail, the DB column stays
+  // small, and the heap stops climbing.
+  const CAPTURE_CAP_BYTES = 256 * 1024;
   const captured: string[] = [];
+  let capturedBytes = 0;
   let dirty = false;
+  const pushCaptured = (line: string) => {
+    captured.push(line);
+    capturedBytes += line.length + 1; // +1 for the join separator
+    while (capturedBytes > CAPTURE_CAP_BYTES && captured.length > 1) {
+      const dropped = captured.shift()!;
+      capturedBytes -= dropped.length + 1;
+    }
+    dirty = true;
+  };
 
   // Flush captured output to DB every 2s — cheap enough to keep live-ish.
   const flushInterval = setInterval(async () => {
@@ -193,8 +213,7 @@ echo "__AURA_JOB_FINAL__=$FINAL"
       }
       if (!inTail) return;
       if (line.startsWith("[stderr]")) return;
-      captured.push(line);
-      dirty = true;
+      pushCaptured(line);
     },
     onComplete: async () => {
       clearInterval(flushInterval);
