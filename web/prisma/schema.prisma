@@ -113,6 +113,12 @@ model Job {
   @@index([clusterId])
   @@index([userId])
   @@index([status])
+  // Cover the listing endpoint's `WHERE clusterId=? [AND userId=?] ORDER BY
+  // createdAt DESC LIMIT N` query — without this Postgres has to filter via
+  // the single-col clusterId index then sort the matching rows in memory,
+  // which dominates page-load time on clusters with thousands of jobs.
+  @@index([clusterId, createdAt])
+  @@index([clusterId, userId, createdAt])
   @@unique([clusterId, sourceName])
 }
 

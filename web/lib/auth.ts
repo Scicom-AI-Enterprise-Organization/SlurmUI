@@ -25,6 +25,11 @@ declare module "next-auth" {
 // Note: v5 beta's JWT type is permissive — we just assign string fields on
 // the token and cast back in the session callback.
 
+// In-process TTL cache for User.role lookups. See lib/role-cache.ts —
+// extracted so the TTL contract is unit-testable without NextAuth.
+import { createRoleCache } from "./role-cache";
+const roleCache = createRoleCache<UserRole>({ ttlMs: 30_000 });
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
   pages: {
@@ -111,16 +116,26 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           token.userId = dbUser.id;
         }
       } else if (token.userId) {
-        // Subsequent callbacks (no `user` arg) — re-read role from the DB so
-        // admin-promoted or demoted users see the change on the next page
-        // load instead of waiting for a full sign-out/sign-in cycle.
-        try {
-          const fresh = await prisma.user.findUnique({
-            where: { id: token.userId as string },
-            select: { role: true },
-          });
-          if (fresh?.role) token.role = fresh.role as UserRole;
-        } catch {}
+        // Subsequent callbacks (no `user` arg) — re-read role from the DB
+        // so admin-promoted or demoted users see the change on the next
+        // page load. Cached via `roleCache` (TTL above) so a page that
+        // fires N parallel API calls doesn't hammer Postgres N times.
+        const userId = token.userId as string;
+        const cached = roleCache.get(userId);
+        if (cached) {
+          token.role = cached;
+        } else {
+          try {
+            const fresh = await prisma.user.findUnique({
+              where: { id: userId },
+              select: { role: true },
+            });
+            if (fresh?.role) {
+              token.role = fresh.role as UserRole;
+              roleCache.set(userId, fresh.role as UserRole);
+            }
+          } catch {}
+        }
       }
       return token;
     },

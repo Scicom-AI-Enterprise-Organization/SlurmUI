@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { submitJob } from "@/lib/submit-job";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
+import { toJobListItems, type JobListInputRow } from "@/lib/job-list-transform";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -60,31 +61,72 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     if (Object.keys(range).length > 0) where.createdAt = range;
   }
 
-  const [jobs, total, partitionsRaw, clusterRow] = await Promise.all([
-    prisma.job.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: limit }),
-    prisma.job.count({ where }),
+  // Listing payload: select ONLY the columns the table renders. The
+  // default `findMany` returns every column — including `output` (cached
+  // job stdout, can be megabytes per row) and the full `script`. On a
+  // cluster with a few hundred jobs that adds up to tens of MB per page
+  // load. Browser only needs ~7 fields, plus enough of `script` to
+  // extract the SBATCH job-name.
+  const [jobs, total, partitionsRaw, configPartitionsRaw] = await Promise.all([
     prisma.job.findMany({
-      where: { clusterId: id, ...(((session.user as any).role !== "ADMIN") ? { userId: session.user.id } : {}) },
-      distinct: ["partition"],
-      select: { partition: true },
+      where,
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+      select: {
+        id: true,
+        slurmJobId: true,
+        clusterId: true,
+        userId: true,
+        partition: true,
+        status: true,
+        exitCode: true,
+        createdAt: true,
+        updatedAt: true,
+        sourceName: true,
+        // The full `script` is only used here to regex out `--job-name=`.
+        // Prisma can't slice text, so include it but accept the cost —
+        // scripts are typically <2KB each, far smaller than `output`.
+        script: true,
+      },
     }),
-    prisma.cluster.findUnique({ where: { id }, select: { config: true } }),
+    prisma.job.count({ where }),
+    // groupBy is the indexed path for distinct partitions; `findMany +
+    // distinct` does it client-side after fetching N rows.
+    prisma.job.groupBy({
+      by: ["partition"],
+      where: {
+        clusterId: id,
+        ...(((session.user as any).role !== "ADMIN") ? { userId: session.user.id } : {}),
+      },
+    }),
+    // Pull just `slurm_partitions[].name` out of the cluster config via a
+    // JSONB path query. The full `config` JSONB on a configured cluster
+    // is 50–500 KB (nodes / storage / packages / users / env vars) — we
+    // were fetching all of that just to read the partition list.
+    // jsonb_path_query_array returns a JSON string array; we cast the
+    // result and unpack on the JS side.
+    prisma.$queryRaw<Array<{ partitions: string[] | null }>>`
+      SELECT jsonb_path_query_array(config, '$.slurm_partitions[*].name') AS partitions
+      FROM "Cluster" WHERE id = ${id}
+    `,
   ]);
 
-  // Derive job name from the stored SBATCH script so we can show a Name column.
-  const nameRe = /#SBATCH\s+(?:--job-name|-J)[=\s]+(\S+)/;
-  const withName = jobs.map((j) => {
-    const m = j.script?.match(nameRe);
-    return { ...j, name: m ? m[1] : null };
-  });
+  // Derive job name from the stored SBATCH script so we can show a Name
+  // column, then drop the full script from the payload — the listing
+  // page never displays it; the detail page fetches /jobs/<id> which
+  // returns the full script. Helper lives in lib/job-list-transform so
+  // the perf contract (no `script`/`output` in payload) is unit-tested.
+  const withName = toJobListItems(jobs as unknown as JobListInputRow[]);
 
   // Available partitions for the filter dropdown: union of (cluster-config
-  // partitions) + (distinct partitions used by any past job).
-  const cfg = (clusterRow?.config ?? {}) as Record<string, unknown>;
-  const configPartitions = (cfg.slurm_partitions as Array<{ name: string }> | undefined)?.map((p) => p.name) ?? [];
+  // partitions extracted via JSONB path) + (distinct partitions used by
+  // any past job).
+  const configPartitions = (configPartitionsRaw[0]?.partitions ?? [])
+    .filter((p): p is string => typeof p === "string");
   const availablePartitions = Array.from(new Set([
     ...configPartitions,
-    ...partitionsRaw.map((p) => p.partition),
+    ...partitionsRaw.map((p: { partition: string }) => p.partition),
   ])).filter(Boolean).sort();
 
   return NextResponse.json({
