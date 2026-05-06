@@ -26,3 +26,8 @@ __pycache__/
 .ansible/
 
 id_rsa*
+
+# External repo checked out alongside this one — has its own .git, not
+# a submodule. Ignored so an accidental `git add` doesn't re-create the
+# phantom-submodule gitlink.
+Enterprise-Template/

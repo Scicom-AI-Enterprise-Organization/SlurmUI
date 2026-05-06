@@ -7,6 +7,12 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Server, Send } from "lucide-react";
 
+// Listing — render fresh every request. Cluster status badges flip
+// between ACTIVE / DEGRADED / OFFLINE constantly; a cached HTML render
+// would lie about the cluster's real state.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function UserClustersPage() {
   const session = await auth();
   if (!session?.user) redirect("/api/auth/signin");

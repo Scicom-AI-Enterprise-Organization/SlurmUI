@@ -9,6 +9,12 @@ import Link from "next/link";
 import { Server } from "lucide-react";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
+// Listing — render fresh every request. Cross-cluster job status
+// changes constantly; a cached HTML render would silently show stale
+// rows.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function JobsPage() {
   const session = await auth();
   if (!session?.user) redirect("/api/auth/signin");

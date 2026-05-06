@@ -57,6 +57,12 @@ function fmtDuration(sec: number): string {
   return `${(sec / 86400).toFixed(1)}d`;
 }
 
+// Listing/aggregation page — render fresh every request. Charts and
+// status counts must reflect "right now", not whatever the route was
+// last rendered with.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user) redirect("/api/auth/signin");

@@ -18,6 +18,13 @@ import { prisma } from "@/lib/prisma";
 import { toJobListItems, type JobListInputRow } from "@/lib/job-list-transform";
 import JobListPage, { type JobListInitialData } from "./jobs-list-client";
 
+// Render this page on every request — never serve a cached response.
+// The job table is per-user (non-admins see only their own jobs) and
+// changes constantly as Slurm transitions states; a stale render would
+// show the wrong rows or wrong status badges.
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 interface Props {
   params: Promise<{ id: string }>;
 }
