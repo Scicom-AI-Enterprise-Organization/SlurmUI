@@ -26,6 +26,7 @@ import { tmpdir } from "os";
 import * as yaml from "js-yaml";
 import { prisma } from "./prisma";
 import { submitJob } from "./submit-job";
+import { extractJobName } from "./job-list-transform";
 import { logAudit } from "./audit";
 
 export interface GitOpsJobsConfig {
@@ -616,7 +617,11 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     });
     const userById = new Map(users.map((u) => [u.id, u]));
 
-    type AdoptPatch = { jobId: string; sourceName: string; sourceRef: string };
+    // `name` is only set on the patch when the row's column was null
+    // before this run — so we backfill once and never overwrite a
+    // user-set value. Other fields (sourceName, sourceRef) are always
+    // refreshed because the exporter owns them.
+    type AdoptPatch = { jobId: string; sourceName: string; sourceRef: string; name?: string };
     const patches: AdoptPatch[] = [];
     // Absolute paths of every YAML we've written or refreshed this run.
     // Anything auto-adopted on disk that's NOT in this set belongs to a
@@ -634,11 +639,23 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       if (!u) continue;
 
       // The user's job name is the canonical identifier — both the
-      // filename and metadata.name come from it. Fall back to slurmJobId
-      // for legacy rows whose `name` column is null (not backfilled),
-      // and finally to a short id slice. Sanitise path-unsafe characters
-      // (`/`, `\0`) so a hand-authored name can't escape clusterDir.
-      const candidateName = j.name ?? j.sourceName ?? (j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8));
+      // filename and metadata.name come from it. Resolution order:
+      //   1. j.name           (set + validated on submit)
+      //   2. parse #SBATCH --job-name= from j.script  (legacy rows the
+      //                       backfill couldn't populate because the
+      //                       directive was missing at backfill time
+      //                       but is present now)
+      //   3. j.slurmJobId     (script has no name directive at all)
+      //   4. j.id.slice(0,8)  (no slurm id either — submission failed)
+      //
+      // Deliberately NOT falling back to j.sourceName: the OLD exporter
+      // wrote `sourceName = slurmJobId` for non-adopted jobs, so reusing
+      // it here would round-trip the filename back to the slurm id we
+      // are trying to move away from.
+      const candidateName =
+        j.name ??
+        extractJobName(j.script) ??
+        (j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8));
       const safeName = candidateName.replace(/[/\\\0]/g, "_");
       // Disambiguate name collisions inside this single export pass —
       // legacy rows can share a name; we don't want one YAML to clobber
@@ -680,7 +697,17 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       const relPath = relative(repoDir, filePath);
       const contentHash = createHash("sha256").update(fullBody).digest("hex").slice(0, 16);
       const sourceRef = `${relPath}@sha256:${contentHash}`;
-      patches.push({ jobId: j.id, sourceName, sourceRef });
+      patches.push({
+        jobId: j.id,
+        sourceName,
+        sourceRef,
+        // Only backfill name when it was null on the row. Don't ever
+        // overwrite an existing user-supplied name, even if our derived
+        // dedupedName disagrees (the disagreement would mean two jobs
+        // shared a name and we appended "__<slurmJobId>" — that's a
+        // disambiguation for the *file*, not a rename of the job).
+        ...(j.name == null ? { name: candidateName } : {}),
+      });
       exported++;
     }
 
@@ -791,7 +818,11 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       for (const p of patches) {
         await prisma.job.update({
           where: { id: p.jobId },
-          data: { sourceName: p.sourceName, sourceRef: p.sourceRef },
+          data: {
+            sourceName: p.sourceName,
+            sourceRef: p.sourceRef,
+            ...(p.name ? { name: p.name } : {}),
+          },
         }).catch(() => {});
       }
       return { exported, pruned };
@@ -808,7 +839,11 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     for (const p of patches) {
       await prisma.job.update({
         where: { id: p.jobId },
-        data: { sourceName: p.sourceName, sourceRef: p.sourceRef },
+        data: {
+          sourceName: p.sourceName,
+          sourceRef: p.sourceRef,
+          ...(p.name ? { name: p.name } : {}),
+        },
       }).catch(() => {});
     }
 
