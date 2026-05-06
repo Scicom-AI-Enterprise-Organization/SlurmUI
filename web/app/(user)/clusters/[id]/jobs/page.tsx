@@ -61,6 +61,7 @@ export default async function JobsListServerPage({ params }: Props) {
           createdAt: true,
           updatedAt: true,
           sourceName: true,
+          name: true,
           script: true,
         },
       }),

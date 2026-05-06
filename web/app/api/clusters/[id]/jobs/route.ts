@@ -84,9 +84,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         createdAt: true,
         updatedAt: true,
         sourceName: true,
-        // The full `script` is only used here to regex out `--job-name=`.
-        // Prisma can't slice text, so include it but accept the cost —
-        // scripts are typically <2KB each, far smaller than `output`.
+        // Stored job name (set on submit). The transform prefers this
+        // over the script regex; we still read `script` as a fallback
+        // for legacy rows whose `name` column wasn't backfilled.
+        name: true,
         script: true,
       },
     }),

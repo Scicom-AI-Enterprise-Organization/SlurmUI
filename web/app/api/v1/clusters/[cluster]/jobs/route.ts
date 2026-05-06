@@ -133,6 +133,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       userId: user.id,
       script: finalScript,
       partition,
+      // Pass the explicit `body.name` through so submitJob doesn't have
+      // to re-extract from the script (and so the validation error
+      // message references the value the API caller actually sent).
+      name: body.name?.trim() || undefined,
       auditExtra: { via: "api/v1", tokenId: user.tokenId },
     });
     return NextResponse.json({

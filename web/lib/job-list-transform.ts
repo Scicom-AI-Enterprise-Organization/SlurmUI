@@ -27,7 +27,12 @@ export interface JobListInputRow {
   createdAt: Date | string;
   updatedAt: Date | string;
   sourceName: string | null;
-  /** Used to extract the SBATCH job-name. Dropped from the output. */
+  /** Stored job name (set on submit). When null we fall back to
+   * extracting from `script` so legacy rows without this column keep
+   * rendering correctly. */
+  name?: string | null;
+  /** Used to extract the SBATCH job-name when `name` is null. Dropped
+   * from the output. */
   script: string;
   /** Sentinel: if the upstream ever leaks `output` here, the test will
    * catch it because the listing item type below has no such field. */
@@ -80,7 +85,10 @@ export function toJobListItem(row: JobListInputRow): JobListItem {
     createdAt: rest.createdAt,
     updatedAt: rest.updatedAt,
     sourceName: rest.sourceName,
-    name: extractJobName(_script),
+    // Prefer the stored name (set on submit, validated, unique among
+    // running jobs); fall back to the script regex for legacy rows
+    // backfilled before the column existed.
+    name: (rest.name as string | null | undefined) ?? extractJobName(_script),
   };
 }
 

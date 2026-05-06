@@ -274,7 +274,10 @@ exit 2
 
 export async function runReconcile(onLog: (line: string) => void): Promise<ReconcileSummary> {
   const cfg = await loadGitOpsJobsConfig();
-  if (!cfg.enabled) throw new Error("gitops jobs sync is disabled");
+  // Note: deliberately no `cfg.enabled` check here. The toggle controls
+  // whether the cron tick runs (see `tick()` further down) — manual
+  // reconciles via the API or admin UI must work regardless so an
+  // operator can dry-run a config before flipping the cron on.
   if (!cfg.repoUrl) throw new Error("repoUrl is not set");
 
   const summary: ReconcileSummary = {
@@ -341,6 +344,35 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
     onLog(`[gitops] known clusters: ${[...clusterByName.keys()].join(", ") || "(none)"}`);
     onLog(`[gitops] matched users:  ${[...userByEmail.keys()].join(", ") || "(none)"}`);
 
+    // ── First pass: detect in-scan duplicates by (clusterId, sourceName).
+    // If two manifests resolve to the same DB unique key — usually the
+    // exporter's auto-adopted YAML AND a hand-authored one for the same
+    // logical job, or two hand-authored files that picked the same
+    // metadata.name — we must NOT process them naïvely. The first iter
+    // would submit, the second iter would see a row with a different
+    // sourceRef and "resubmit", and the next tick the order flips and
+    // does it again — that's the thrashing the user saw as "creating
+    // the same jobs". Skip the whole conflict set instead so we leave
+    // any existing row alone.
+    const conflictKeys = new Set<string>();
+    {
+      const counts = new Map<string, string[]>();
+      for (const m of parsed) {
+        const clusterId = clusterByName.get(m.clusterName);
+        if (!clusterId) continue;
+        const key = `${clusterId}\x00${m.name}`;
+        const arr = counts.get(key) ?? [];
+        arr.push(m.relPath);
+        counts.set(key, arr);
+      }
+      for (const [key, paths] of counts) {
+        if (paths.length > 1) {
+          conflictKeys.add(key);
+          onLog(`[gitops] CONFLICT: metadata.name collision across ${paths.length} manifests — leaving row untouched: ${paths.join(", ")}`);
+        }
+      }
+    }
+
     // Track which (clusterId, sourceName) keys are present in this scan so we
     // can identify deletions afterwards.
     const seenKeys = new Set<string>();
@@ -356,7 +388,15 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
         summary.skipped.push({ path: m.relPath, reason: `user "${m.userEmail}" not found` });
         continue;
       }
-      seenKeys.add(`${clusterId}\x00${m.name}`);
+      const conflictKey = `${clusterId}\x00${m.name}`;
+      if (conflictKeys.has(conflictKey)) {
+        // Mark as seen so the removal pass doesn't try to clean up the
+        // existing row — the conflict is the user's to resolve.
+        seenKeys.add(conflictKey);
+        summary.skipped.push({ path: m.relPath, reason: `metadata.name "${m.name}" appears in multiple manifests for cluster ${m.clusterName}` });
+        continue;
+      }
+      seenKeys.add(conflictKey);
 
       const sourceRef = `${m.relPath}@sha256:${m.contentHash}`;
       const existing = await prisma.job.findUnique({
@@ -369,7 +409,10 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
           const res = await submitJob({
             clusterId, userId,
             script: m.script, partition: m.partition,
-            sourceRef, sourceName: m.name,
+            // Use the manifest's metadata.name for both the human-readable
+            // job name and the gitops sourceName so the in-code uniqueness
+            // check in submitJob applies here too. They're the same value.
+            name: m.name, sourceRef, sourceName: m.name,
             auditExtra: { via: "gitops", manifest: m.relPath },
           });
           onLog(`[gitops] submitted ${m.relPath} → job.id=${res?.id ?? "?"} slurmJobId=${res?.slurmJobId ?? "?"}`);
@@ -406,7 +449,7 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
         const res = await submitJob({
           clusterId, userId,
           script: m.script, partition: m.partition,
-          sourceRef, sourceName: m.name,
+          name: m.name, sourceRef, sourceName: m.name,
           auditExtra: { via: "gitops", manifest: m.relPath, replaces: existing.id },
         });
         onLog(`[gitops] resubmitted ${m.relPath} → job.id=${res?.id ?? "?"} slurmJobId=${res?.slurmJobId ?? "?"}`);
@@ -581,14 +624,37 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     const writtenAbsPaths = new Set<string>();
 
     let exported = 0;
+    // We may encounter multiple PENDING/RUNNING jobs that share a name
+    // (legacy data; the running-uniqueness check only blocks NEW
+    // submissions). Track names already used in this export so a second
+    // job with the same name doesn't clobber the first one's YAML.
+    const namesUsed = new Set<string>();
     for (const j of jobs) {
       const u = userById.get(j.userId);
       if (!u) continue;
+
+      // The user's job name is the canonical identifier — both the
+      // filename and metadata.name come from it. Fall back to slurmJobId
+      // for legacy rows whose `name` column is null (not backfilled),
+      // and finally to a short id slice. Sanitise path-unsafe characters
+      // (`/`, `\0`) so a hand-authored name can't escape clusterDir.
+      const candidateName = j.name ?? j.sourceName ?? (j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8));
+      const safeName = candidateName.replace(/[/\\\0]/g, "_");
+      // Disambiguate name collisions inside this single export pass —
+      // legacy rows can share a name; we don't want one YAML to clobber
+      // the other.
+      const nameKey = `${j.cluster.name}\x00${safeName}`;
+      let dedupedName = safeName;
+      if (namesUsed.has(nameKey)) {
+        // Suffix with the slurmJobId (or short uuid) so both files exist.
+        dedupedName = `${safeName}__${j.slurmJobId ?? j.id.slice(0, 8)}`;
+      }
+      namesUsed.add(nameKey);
+
       const clusterDir = join(jobsDir, j.cluster.name);
       mkdirSync(clusterDir, { recursive: true });
-      const fileId = j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8);
-      const filePath = join(clusterDir, `${fileId}.yaml`);
-      const sourceName = j.sourceName ?? fileId;
+      const filePath = join(clusterDir, `${dedupedName}.yaml`);
+      const sourceName = dedupedName;
       writtenAbsPaths.add(filePath);
 
       // Shape the YAML EXACTLY like parseManifest expects so the reconciler
@@ -618,20 +684,28 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       exported++;
     }
 
-    // Prune YAMLs whose underlying job is no longer running. We treat the
-    // Job table as the source of truth: any manifest in the tree that
-    // we didn't (re)write this pass is checked against the DB.
+    // Prune YAMLs the exporter no longer wants in the tree. Two rules,
+    // ordered by ownership:
     //
-    //   row exists & status is terminal     → delete (job is done)
-    //   row missing & file has adopt header → delete (adopted job was
-    //                                         purged from the DB)
-    //   row missing & no header             → keep  (looks hand-authored
-    //                                         and awaiting reconcile)
-    //   currently running                   → never reached: was already
-    //                                         in writtenAbsPaths
+    //   1. File has the ADOPTED_HEADER → exporter-owned. If we did not
+    //      (re)write it this pass, it is stale, full stop. The canonical
+    //      file for the running job is already in writtenAbsPaths under
+    //      the new j.name-based filename; old slurmJobId-named YAMLs
+    //      from a previous exporter version fall in here and get
+    //      cleaned up. Previously this branch consulted the Job table
+    //      and *kept* the file when the row was RUNNING — which left
+    //      duplicate YAMLs for the same job after the filename rule
+    //      changed. Don't.
     //
-    // The header sniff is intentionally loose (`startsWith`) so older
-    // adoption files with slightly different wording still get pruned.
+    //   2. File has no header → hand-authored. Only delete when the
+    //      corresponding Job row exists AND is in a terminal state
+    //      (COMPLETED / FAILED / CANCELLED / etc.). If the row is
+    //      missing, leave it alone — could be a fresh manifest the
+    //      reconciler hasn't picked up yet.
+    //
+    // The header sniff uses `startsWith("# Managed by SlurmUI GitOps")`
+    // so older adoption files with slightly different wording still
+    // match.
     let pruned = 0;
     if (existsSync(jobsDir)) {
       const walk = (dir: string): string[] => {
@@ -645,7 +719,8 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       };
 
       // Cache cluster name → id so we can look up Job rows by the same
-      // (clusterId, sourceName) compound key the reconciler uses.
+      // (clusterId, sourceName) compound key the reconciler uses (only
+      // needed for the hand-authored branch).
       const allClusters = await prisma.cluster.findMany({ select: { id: true, name: true } });
       const clusterIdByName = new Map(allClusters.map((c) => [c.name, c.id]));
 
@@ -655,41 +730,36 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
         let text = "";
         try { text = readFileSync(file, "utf8"); } catch { continue; }
 
-        let parsed: unknown = null;
-        try { parsed = yaml.load(text); } catch { /* malformed → skip below */ }
-        const meta =
-          (parsed && typeof parsed === "object" && "metadata" in parsed
-            ? (parsed as { metadata?: unknown }).metadata
-            : null) as { name?: unknown; cluster?: unknown } | null;
-        const sourceName = typeof meta?.name === "string" ? meta.name : "";
-        const clusterName = typeof meta?.cluster === "string" ? meta.cluster : "";
         const hasAdoptHeader = (text.split("\n", 1)[0] ?? "").trim().startsWith("# Managed by SlurmUI GitOps");
 
         let safeToDelete = false;
-        if (sourceName && clusterName) {
-          const clusterId = clusterIdByName.get(clusterName);
-          if (clusterId) {
-            const row = await prisma.job.findUnique({
-              where: { clusterId_sourceName: { clusterId, sourceName } },
-              select: { status: true },
-            });
-            if (row) {
-              // Job exists and isn't running — terminal state, delete the YAML.
-              if (row.status !== "PENDING" && row.status !== "RUNNING") {
+        if (hasAdoptHeader) {
+          // Exporter owns adoption files. Anything not in writtenAbsPaths
+          // this pass is stale — covers old slurmJobId-named files left
+          // behind when the filename rule changed to j.name.
+          safeToDelete = true;
+        } else {
+          // Hand-authored — only drop when the Job row is terminal.
+          let parsed: unknown = null;
+          try { parsed = yaml.load(text); } catch { /* malformed → skip */ }
+          const meta =
+            (parsed && typeof parsed === "object" && "metadata" in parsed
+              ? (parsed as { metadata?: unknown }).metadata
+              : null) as { name?: unknown; cluster?: unknown } | null;
+          const sourceName = typeof meta?.name === "string" ? meta.name : "";
+          const clusterName = typeof meta?.cluster === "string" ? meta.cluster : "";
+          if (sourceName && clusterName) {
+            const clusterId = clusterIdByName.get(clusterName);
+            if (clusterId) {
+              const row = await prisma.job.findUnique({
+                where: { clusterId_sourceName: { clusterId, sourceName } },
+                select: { status: true },
+              });
+              if (row && row.status !== "PENDING" && row.status !== "RUNNING") {
                 safeToDelete = true;
               }
-            } else if (hasAdoptHeader) {
-              // No row: was an adoption file, but the underlying job has
-              // since been purged. Adoption files are exporter-owned, so
-              // delete. Hand-authored ones (no header) we leave alone —
-              // the next reconcile will pick them up.
-              safeToDelete = true;
             }
           }
-        } else if (hasAdoptHeader) {
-          // Header present but malformed metadata — almost certainly an
-          // adoption file from an older code path. Drop it.
-          safeToDelete = true;
         }
 
         if (!safeToDelete) continue;

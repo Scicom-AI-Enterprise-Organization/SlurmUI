@@ -14,14 +14,107 @@ import { prisma } from "./prisma";
 import { logAudit } from "./audit";
 import { sendCommandAndWait, publishCommand } from "./nats";
 import { effectiveClusterStatus } from "./cluster-health";
-import { sshExecScript } from "./ssh-exec";
+import { sshExecScript, sshExecSimple } from "./ssh-exec";
 import { startJobWatcher } from "./job-watcher";
+import { extractJobName } from "./job-list-transform";
+
+interface ClusterForSlurmQuery {
+  id: string;
+  controllerHost: string;
+  sshUser: string;
+  sshPort: number;
+  sshBastion: boolean;
+  sshJumpHost: string | null;
+  sshJumpUser: string | null;
+  sshJumpPort: number | null;
+  sshProxyCommand: string | null;
+  sshJumpProxyCommand: string | null;
+  connectionMode: string;
+}
+
+/**
+ * Ask Slurm directly for the names of currently-RUNNING jobs.
+ *
+ * Returns null on any infrastructure failure (SSH down, no key, NATS
+ * cluster, squeue exits non-zero) so the caller can fall back to the
+ * cheaper DB-side check rather than blocking the submit on transient
+ * cluster issues.
+ *
+ * SSH-only — NATS-mode clusters fall through to the DB check below.
+ * Could be wired through the agent's `list_jobs` command later if
+ * NATS becomes a common path here, but every NATS cluster we have today
+ * also has SSH credentials configured for setup work, and adding a
+ * roundtrip there would slow non-Slurm submits too.
+ */
+async function fetchRunningSlurmNames(cluster: ClusterForSlurmQuery): Promise<Set<string> | null> {
+  if (cluster.connectionMode !== "SSH") return null;
+  const withKey = await prisma.cluster.findUnique({
+    where: { id: cluster.id },
+    include: { sshKey: true },
+  });
+  if (!withKey?.sshKey) return null;
+
+  const target = {
+    host: cluster.controllerHost,
+    user: cluster.sshUser,
+    port: cluster.sshPort,
+    privateKey: withKey.sshKey.privateKey,
+    bastion: cluster.sshBastion,
+    jumpHost: cluster.sshJumpHost ?? undefined,
+    jumpUser: cluster.sshJumpUser ?? undefined,
+    jumpPort: cluster.sshJumpPort ?? undefined,
+    proxyCommand: cluster.sshProxyCommand ?? undefined,
+    jumpProxyCommand: cluster.sshJumpProxyCommand ?? undefined,
+  };
+
+  // -h: no header, --states=R: only RUNNING (matches our uniqueness rule),
+  // -o "%200j": job name padded to 200 cols (Slurm truncates at the column
+  // width — too small a width silently chops long names).
+  const res = await sshExecSimple(target, `squeue -h --states=R -o "%200j" 2>/dev/null`);
+  if (!res.success) return null;
+
+  const names = new Set<string>();
+  for (const raw of res.stdout.split("\n")) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    // squeue%j is space-padded right; we already trimmed both sides.
+    names.add(trimmed);
+  }
+  return names;
+}
+
+/**
+ * Resolve the job name we'll persist on the row. Priority:
+ *   1. explicit `name` argument on the call (used by the v1 API),
+ *   2. the gitops `sourceName` (already validated upstream),
+ *   3. the `#SBATCH --job-name=` directive parsed out of the script.
+ *
+ * Returned name MUST contain no whitespace — Slurm itself accepts
+ * spaces but our uniqueness model and most tooling assume one token,
+ * and a name with spaces tends to indicate a copy-paste accident.
+ *
+ * Throws on empty / whitespace-bearing names so the caller (UI/API)
+ * can show the message verbatim.
+ */
+function resolveJobName(opts: { name?: string; sourceName?: string; script: string }): string {
+  const raw = (opts.name ?? opts.sourceName ?? extractJobName(opts.script) ?? "").trim();
+  if (!raw) {
+    throw new Error("Job name is required — set `#SBATCH --job-name=<name>` in the script (or pass `name` in the API body).");
+  }
+  if (/\s/.test(raw)) {
+    throw new Error(`Job name "${raw}" contains whitespace. Names may use any non-whitespace characters (letters, digits, dash, underscore, dot, colon, etc.).`);
+  }
+  return raw;
+}
 
 export interface SubmitJobInput {
   clusterId: string;
   userId: string;
   script: string;
   partition: string;
+  /** Explicit job name. When omitted, falls back to sourceName, then to
+   * the `#SBATCH --job-name=` directive in the script. */
+  name?: string;
   /** Optional gitops provenance — persisted on the Job row. */
   sourceRef?: string;
   sourceName?: string;
@@ -34,7 +127,11 @@ export interface SubmitJobInput {
 }
 
 export async function submitJob(input: SubmitJobInput): Promise<Job> {
-  const { clusterId, userId, script, partition, sourceRef, sourceName, auditExtra } = input;
+  const { clusterId, userId, script, partition, name, sourceRef, sourceName, auditExtra } = input;
+
+  // Resolve + validate the job name BEFORE any DB writes — easier to
+  // surface as a 400 to the caller than to roll back a half-created row.
+  const jobName = resolveJobName({ name, sourceName, script });
 
   const cluster = await prisma.cluster.findUnique({ where: { id: clusterId } });
   if (!cluster) throw new Error("Cluster not found");
@@ -56,12 +153,42 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
   const dbUser = await prisma.user.findUnique({ where: { id: userId } });
   if (!dbUser) throw new Error("User not found");
 
+  // Running-job uniqueness check. Slurm itself is the source of truth —
+  // squeue --states=R lists every running job on the controller right
+  // now, including ones submitted via the CLI outside Aura. We fall back
+  // to a DB-only check when the Slurm query can't run (NATS-mode
+  // cluster, SSH transient error). Both checks block on RUNNING only:
+  // PENDING and terminal states keep the name historically but don't
+  // block reuse, so a user can rerun "training" tomorrow without renaming.
+  const slurmNames = await fetchRunningSlurmNames(cluster).catch(() => null);
+  if (slurmNames !== null) {
+    if (slurmNames.has(jobName)) {
+      throw new Error(
+        `Job name "${jobName}" is already in use by a RUNNING job on this cluster (per squeue). ` +
+        `Cancel it, wait for it to finish, or pick a different name.`,
+      );
+    }
+  } else {
+    const runningConflict = await prisma.job.findFirst({
+      where: { clusterId, name: jobName, status: "RUNNING" },
+      select: { id: true, slurmJobId: true },
+    });
+    if (runningConflict) {
+      const slurmHint = runningConflict.slurmJobId ? ` (slurmJobId=${runningConflict.slurmJobId})` : "";
+      throw new Error(
+        `Job name "${jobName}" is already in use by a RUNNING job on this cluster${slurmHint}. ` +
+        `Cancel it, wait for it to finish, or pick a different name.`,
+      );
+    }
+  }
+
   const job = await prisma.job.create({
     data: {
       clusterId,
       userId,
       script,
       partition,
+      name: jobName,
       status: "PENDING",
       sourceRef: sourceRef ?? null,
       sourceName: sourceName ?? null,

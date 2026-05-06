@@ -208,9 +208,11 @@ export function GitopsJobsSettings() {
           <GitCommit className="h-4 w-4" />
           Git Jobs
           {cfg.enabled ? (
-            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Enabled</Badge>
+            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+              Auto-reconcile on
+            </Badge>
           ) : (
-            <Badge variant="outline">Disabled</Badge>
+            <Badge variant="outline">Auto-reconcile off</Badge>
           )}
           {cfg.lastStatus === "success" && (
             <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Last ok</Badge>
@@ -231,9 +233,10 @@ export function GitopsJobsSettings() {
 
         <div className="flex items-center justify-between rounded-md border p-3">
           <div>
-            <Label htmlFor="gj-enabled" className="font-medium">Enabled</Label>
+            <Label htmlFor="gj-enabled" className="font-medium">Auto-reconcile</Label>
             <p className="text-xs text-muted-foreground">
-              When on, the server ticks every <code>{Math.max(180, cfg.intervalSec)}s</code> and reconciles.
+              When on, the server ticks every <code>{Math.max(180, cfg.intervalSec)}s</code> and reconciles automatically.
+              Off only pauses the cron — you can still hit <b>Reconcile now</b> manually.
             </p>
           </div>
           <Switch
@@ -408,7 +411,13 @@ spec:
               {running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
               Mirror running jobs
             </Button>
-            <Button onClick={reconcileNow} disabled={running || !cfg.enabled || !cfg.repoUrl}>
+            <Button
+              onClick={reconcileNow}
+              disabled={running || !cfg.repoUrl}
+              title={cfg.enabled
+                ? "Force a reconcile pass against the configured repo"
+                : "Force a one-off reconcile — auto-reconcile is off so the cron tick stays paused"}
+            >
               {running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
               Reconcile now
             </Button>

@@ -80,6 +80,14 @@ model Job {
   userId     String
   script     String
   partition  String
+  // Stable user-supplied job name — sourced from the script's
+  // `#SBATCH --job-name=` directive on submit. Enforced unique across
+  // PENDING/RUNNING jobs in a cluster *in code* (see lib/submit-job.ts);
+  // we keep the column nullable + non-unique at the DB level so legacy
+  // rows with duplicate names don't block schema migration. The
+  // `(clusterId, name)` index below is what makes the in-code uniqueness
+  // check fast.
+  name       String?
   status     JobStatus @default(PENDING)
   exitCode   Int?
   output     String?   @db.Text
@@ -119,6 +127,7 @@ model Job {
   // which dominates page-load time on clusters with thousands of jobs.
   @@index([clusterId, createdAt])
   @@index([clusterId, userId, createdAt])
+  @@index([clusterId, name])
   @@unique([clusterId, sourceName])
 }
 

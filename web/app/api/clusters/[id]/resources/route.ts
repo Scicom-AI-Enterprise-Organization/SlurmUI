@@ -52,9 +52,16 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   };
 
   const MARKER = `__RES_${Date.now()}__`;
+  // We use AllocMem (memory committed to running jobs) instead of FreeMem
+  // (OS-level free RAM from /proc/meminfo). On a healthy Linux box FreeMem
+  // is always near zero because the kernel reuses unallocated RAM for the
+  // page / FS cache — it would make a node with 4 GB of jobs running on
+  // an 85 GB machine look 98% full, which is exactly the bug we're
+  // fixing. memFree below is then RealMemory − AllocMem, which matches
+  // Slurm's own scheduling view of "how much can a new job request here".
   const script = `
 echo "${MARKER}_START"
-sinfo -N -h -O "NodeHost:|,StateLong:|,CPUsState:|,Memory:|,FreeMem:|,Gres:200|,GresUsed:200|" 2>/dev/null
+sinfo -N -h -O "NodeHost:|,StateLong:|,CPUsState:|,Memory:|,AllocMem:|,Gres:200|,GresUsed:200|" 2>/dev/null
 echo "${MARKER}_END"
 `;
 
@@ -80,7 +87,7 @@ echo "${MARKER}_END"
     if (!line) continue;
     const parts = line.split("|").map((p) => p.trim());
     if (parts.length < 7) continue;
-    const [host, state, cpuState, memTotal, memFree, gres, gresUsed] = parts;
+    const [host, state, cpuState, memTotal, memAlloc, gres, gresUsed] = parts;
     if (!host || seen.has(host)) continue;
     seen.add(host);
 
@@ -89,7 +96,10 @@ echo "${MARKER}_END"
     const cpuAlloc = parseInt(cs[0] ?? "0", 10) || 0;
     const cpuTotal = parseInt(cs[3] ?? "0", 10) || 0;
     const memTotalMb = parseInt(memTotal, 10) || 0;
-    const memFreeMb = parseInt(memFree, 10) || 0;
+    const memAllocMb = parseInt(memAlloc, 10) || 0;
+    // Free as Slurm sees it: total node memory minus what's been promised
+    // to running jobs. Clamp at zero in case of accounting drift.
+    const memFreeMb = Math.max(0, memTotalMb - memAllocMb);
 
     nodes.push({
       host,
