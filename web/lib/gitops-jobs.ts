@@ -503,19 +503,27 @@ export async function runReconcile(onLog: (line: string) => void): Promise<Recon
 
 export interface ExportRunningSummary {
   exported: number;
-  pruned: number; // kept for API compatibility; no pruning in adoption mode
+  pruned: number;
 }
 
+// First line of every auto-adopted YAML. Used at prune time to tell
+// "this file was written by the exporter" apart from a hand-authored
+// manifest in the same `jobs/` tree — we must never delete the latter.
+const ADOPTED_HEADER = "# Managed by SlurmUI GitOps — auto-adopted from a live job.";
+
 /**
- * Clone the configured repo and write a declarative manifest for every
- * currently PENDING/RUNNING job into `<path>/jobs/<cluster>/<slurmId|jobId>.yaml`.
- * Commits + pushes the diff, then updates each Job row with sourceName +
- * sourceRef so the next reconciler pass treats the manifest as "unchanged"
- * (i.e. adopts it) instead of submitting a duplicate.
+ * Clone the configured repo and reconcile `<path>/jobs/<cluster>/*.yaml`
+ * with the set of currently PENDING/RUNNING jobs:
  *
- * Unlike a wipe-and-write mirror, this exporter never deletes manifests for
- * completed jobs — they remain under `jobs/` until a human removes them.
- * That keeps reconciler state in sync without a cancel-on-completion loop.
+ *   - Write/refresh a YAML for every running job (adoption: the next
+ *     reconciler pass sees a matching sourceRef and leaves the row alone).
+ *   - Delete the YAML for every previously-adopted job that is no longer
+ *     running. Hand-authored manifests (those without the
+ *     `# Managed by SlurmUI GitOps` header) are never touched.
+ *
+ * Pruning closes the loop: without it, completed/cancelled/failed jobs
+ * left dangling adoption YAMLs in the repo forever. With it, the repo
+ * is a faithful mirror of "what's live right now".
  */
 export async function runExportRunning(onLog: (line: string) => void): Promise<ExportRunningSummary> {
   const cfg = await loadGitOpsJobsConfig();
@@ -567,6 +575,10 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
 
     type AdoptPatch = { jobId: string; sourceName: string; sourceRef: string };
     const patches: AdoptPatch[] = [];
+    // Absolute paths of every YAML we've written or refreshed this run.
+    // Anything auto-adopted on disk that's NOT in this set belongs to a
+    // job that's no longer PENDING/RUNNING and gets pruned below.
+    const writtenAbsPaths = new Set<string>();
 
     let exported = 0;
     for (const j of jobs) {
@@ -577,6 +589,7 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       const fileId = j.slurmJobId ? String(j.slurmJobId) : j.id.slice(0, 8);
       const filePath = join(clusterDir, `${fileId}.yaml`);
       const sourceName = j.sourceName ?? fileId;
+      writtenAbsPaths.add(filePath);
 
       // Shape the YAML EXACTLY like parseManifest expects so the reconciler
       // can adopt the row on its next pass without resubmitting.
@@ -593,7 +606,7 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
           script: j.script,
         },
       }, { lineWidth: 120 });
-      const fullBody = `# Managed by SlurmUI GitOps — auto-adopted from a live job.\n${body}`;
+      const fullBody = `${ADOPTED_HEADER}\n${body}`;
       writeFileSync(filePath, fullBody);
 
       // Compute sourceRef identically to the reconciler so the adoption
@@ -603,6 +616,91 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       const sourceRef = `${relPath}@sha256:${contentHash}`;
       patches.push({ jobId: j.id, sourceName, sourceRef });
       exported++;
+    }
+
+    // Prune YAMLs whose underlying job is no longer running. We treat the
+    // Job table as the source of truth: any manifest in the tree that
+    // we didn't (re)write this pass is checked against the DB.
+    //
+    //   row exists & status is terminal     → delete (job is done)
+    //   row missing & file has adopt header → delete (adopted job was
+    //                                         purged from the DB)
+    //   row missing & no header             → keep  (looks hand-authored
+    //                                         and awaiting reconcile)
+    //   currently running                   → never reached: was already
+    //                                         in writtenAbsPaths
+    //
+    // The header sniff is intentionally loose (`startsWith`) so older
+    // adoption files with slightly different wording still get pruned.
+    let pruned = 0;
+    if (existsSync(jobsDir)) {
+      const walk = (dir: string): string[] => {
+        const out: string[] = [];
+        for (const ent of readdirSync(dir, { withFileTypes: true })) {
+          const p = join(dir, ent.name);
+          if (ent.isDirectory()) out.push(...walk(p));
+          else if (ent.isFile() && ent.name.endsWith(".yaml")) out.push(p);
+        }
+        return out;
+      };
+
+      // Cache cluster name → id so we can look up Job rows by the same
+      // (clusterId, sourceName) compound key the reconciler uses.
+      const allClusters = await prisma.cluster.findMany({ select: { id: true, name: true } });
+      const clusterIdByName = new Map(allClusters.map((c) => [c.name, c.id]));
+
+      for (const file of walk(jobsDir)) {
+        if (writtenAbsPaths.has(file)) continue;
+
+        let text = "";
+        try { text = readFileSync(file, "utf8"); } catch { continue; }
+
+        let parsed: unknown = null;
+        try { parsed = yaml.load(text); } catch { /* malformed → skip below */ }
+        const meta =
+          (parsed && typeof parsed === "object" && "metadata" in parsed
+            ? (parsed as { metadata?: unknown }).metadata
+            : null) as { name?: unknown; cluster?: unknown } | null;
+        const sourceName = typeof meta?.name === "string" ? meta.name : "";
+        const clusterName = typeof meta?.cluster === "string" ? meta.cluster : "";
+        const hasAdoptHeader = (text.split("\n", 1)[0] ?? "").trim().startsWith("# Managed by SlurmUI GitOps");
+
+        let safeToDelete = false;
+        if (sourceName && clusterName) {
+          const clusterId = clusterIdByName.get(clusterName);
+          if (clusterId) {
+            const row = await prisma.job.findUnique({
+              where: { clusterId_sourceName: { clusterId, sourceName } },
+              select: { status: true },
+            });
+            if (row) {
+              // Job exists and isn't running — terminal state, delete the YAML.
+              if (row.status !== "PENDING" && row.status !== "RUNNING") {
+                safeToDelete = true;
+              }
+            } else if (hasAdoptHeader) {
+              // No row: was an adoption file, but the underlying job has
+              // since been purged. Adoption files are exporter-owned, so
+              // delete. Hand-authored ones (no header) we leave alone —
+              // the next reconcile will pick them up.
+              safeToDelete = true;
+            }
+          }
+        } else if (hasAdoptHeader) {
+          // Header present but malformed metadata — almost certainly an
+          // adoption file from an older code path. Drop it.
+          safeToDelete = true;
+        }
+
+        if (!safeToDelete) continue;
+        try {
+          rmSync(file);
+          onLog(`[export] pruned ${relative(repoDir, file)} (job no longer running)`);
+          pruned++;
+        } catch (e) {
+          onLog(`[export] failed to prune ${relative(repoDir, file)}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
 
     // Clean up the legacy running/ tree if it exists — we no longer
@@ -616,7 +714,7 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
     await runGit(["add", "-A", "jobs"], baseDir, env, onLog);
     const status = await runGit(["status", "--porcelain"], repoDir, env, onLog);
     if (!status.stdout.trim()) {
-      onLog(`[export] no changes (exported=${exported})`);
+      onLog(`[export] no changes (exported=${exported}, pruned=${pruned})`);
       // Still write the DB patches so future runs without git diffs can
       // adopt — even if the manifest already matched, Job.sourceName may
       // have been null before.
@@ -626,7 +724,7 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
           data: { sourceName: p.sourceName, sourceRef: p.sourceRef },
         }).catch(() => {});
       }
-      return { exported, pruned: 0 };
+      return { exported, pruned };
     }
 
     const commit = await runGit(["commit", "-m", `SlurmUI GitOps adopt @ ${new Date().toISOString()}`], repoDir, env, onLog);
@@ -644,16 +742,16 @@ export async function runExportRunning(onLog: (line: string) => void): Promise<E
       }).catch(() => {});
     }
 
-    onLog(`[export] pushed (exported=${exported})`);
+    onLog(`[export] pushed (exported=${exported}, pruned=${pruned})`);
 
     await logAudit({
       action: "gitops_jobs.export_running",
       entity: "Setting",
       entityId: SETTING_KEY,
-      metadata: { exported },
+      metadata: { exported, pruned },
     });
 
-    return { exported, pruned: 0 };
+    return { exported, pruned };
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

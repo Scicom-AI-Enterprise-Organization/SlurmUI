@@ -6,23 +6,40 @@ import { sshExecSimple } from "@/lib/ssh-exec";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
-// Map Slurm job states (squeue %T) onto our JobStatus enum. Anything we
-// don't explicitly recognise falls through as PENDING so the row still
-// shows up in the UI and the background watcher can correct it later.
+// Map Slurm job states (sacct State, squeue %T) onto our JobStatus enum.
+// Anything we don't explicitly recognise falls through as PENDING so the
+// row still shows up in the UI and the background watcher can correct it
+// later. sacct emits "CANCELLED by <UID>" with a trailing user id — we
+// take the first whitespace-separated token before mapping.
 function mapState(state: string): "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" {
-  const s = state.toUpperCase();
-  if (s === "RUNNING" || s === "COMPLETING") return "RUNNING";
-  if (s === "COMPLETED") return "COMPLETED";
-  if (s === "FAILED" || s === "NODE_FAIL" || s === "TIMEOUT" || s === "OUT_OF_MEMORY") return "FAILED";
-  if (s === "CANCELLED" || s === "CANCELLED+") return "CANCELLED";
+  const head = (state || "").toUpperCase().split(/\s+/)[0];
+  if (head === "RUNNING" || head === "COMPLETING") return "RUNNING";
+  if (head === "COMPLETED") return "COMPLETED";
+  if (head === "FAILED" || head === "NODE_FAIL" || head === "TIMEOUT" || head === "OUT_OF_MEMORY" || head === "BOOT_FAIL" || head === "DEADLINE") return "FAILED";
+  if (head === "CANCELLED" || head === "CANCELLED+") return "CANCELLED";
+  if (head === "PENDING" || head === "REQUEUED" || head === "SUSPENDED" || head === "PREEMPTED") return "PENDING";
   return "PENDING";
 }
 
 // POST /api/clusters/[id]/jobs/import-from-slurm
-// Pulls the live queue via squeue on the controller and upserts any Slurm
-// jobs that aren't already in our DB. Useful after a DB reset, or when jobs
-// were submitted via the CLI outside SlurmUI. Does NOT touch jobs that are
-// already tracked (matched by clusterId + slurmJobId).
+//
+// Reconciles our Job table against Slurm by querying sacct (Slurm
+// accounting) on the controller. sacct returns ALL jobs Slurm has a
+// record of — pending, running, completed, failed, cancelled, timed
+// out — within the look-back window, so an already-tracked job that
+// was cancelled outside the UI is detected and its status is updated.
+//
+// `squeue` was the previous backend but it only lists currently-queued
+// jobs. A job cancelled in another environment leaves the queue
+// instantly, so squeue could never see it and the sync silently kept
+// stale RUNNING rows.
+//
+// For each row sacct returns:
+//   - new (no clusterId+slurmJobId match)  → import with the live state
+//   - existing & status changed            → update status (and exit code)
+//   - existing & status unchanged          → backfill missing #SBATCH
+//                                             directives only (no-op once
+//                                             done)
 export async function POST(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   const session = await auth();
@@ -40,17 +57,24 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "SSH-only endpoint — NATS clusters sync via agent" }, { status: 412 });
   }
 
-  // squeue format:
-  //   %i = job id, %T = state, %u = user, %P = partition, %j = job name,
-  //   %V = submit time, %C = CPUs allocated.
-  // We deliberately don't use %b (TresPerNode) or %G (Gres) for GPU info
-  // because Slurm 23+ does NOT surface gres/gpu in those fields when the
-  // job uses --gres=gpu:N — the count lives in JOB_GRES which only
-  // scontrol exposes. We piggyback a `scontrol show job <ids>` call after
-  // the squeue list to grab JOB_GRES for every running/pending job.
-  // `--array` expands array jobs into their individual tasks.
+  // sacct format:
+  //   JobID  State  User  Partition  JobName  Submit  AllocCPUS  ExitCode
+  // -X = main job only (no .batch / .extern step rows)
+  // -P = parsable, fields separated by FIELD_SEP, no trailing separator
+  // --noheader strips the column header line.
+  // --starttime now-90days bounds the lookback to a sane window — the
+  //   default is "today" which would miss anything that landed yesterday.
+  // --allusers ensures we get every user's jobs, not just the SSH login
+  //   account's. Requires that the SSH user has accounting read access
+  //   (typical on cluster controllers — slurmdbd treats anyone with a
+  //   row in qos as authorised).
+  // GPU counts still come from a follow-up scontrol scrape (only works
+  //   for jobs still in slurmctld memory, i.e. not-too-old terminal jobs)
+  //   because Slurm 23+ doesn't put gres in any sacct field.
   const FIELD_SEP = "|";
-  const squeueCmd = `squeue --array -h -o "%i${FIELD_SEP}%T${FIELD_SEP}%u${FIELD_SEP}%P${FIELD_SEP}%j${FIELD_SEP}%V${FIELD_SEP}%C" 2>&1`;
+  const sacctCmd =
+    `sacct -X -P --noheader --allusers --starttime now-90days ` +
+    `-o JobID,State,User,Partition,JobName,Submit,AllocCPUS,ExitCode 2>&1`;
 
   const sshRes = await sshExecSimple(
     {
@@ -65,22 +89,25 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
       proxyCommand: cluster.sshProxyCommand,
       jumpProxyCommand: cluster.sshJumpProxyCommand,
     },
-    squeueCmd,
+    sacctCmd,
   );
 
   if (!sshRes.success) {
     return NextResponse.json({
-      error: `squeue failed: ${sshRes.stderr.trim() || sshRes.stdout.trim() || `exit ${sshRes.exitCode}`}`,
+      error: `sacct failed: ${sshRes.stderr.trim() || sshRes.stdout.trim() || `exit ${sshRes.exitCode}`}`,
     }, { status: 502 });
   }
 
   const lines = sshRes.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  // Filter out ssh banner / error lines — squeue rows all have 6 separators
-  // now (7 fields: jobid, state, user, partition, name, submit, cpus).
+  // Filter out ssh banner / error lines — sacct rows have exactly 7
+  // separators (8 fields: jobid, state, user, partition, name, submit,
+  // cpus, exitcode).
   const rows = lines
-    .filter((l) => (l.match(/\|/g)?.length ?? 0) === 6)
+    .filter((l) => (l.match(/\|/g)?.length ?? 0) === 7)
     .map((l) => {
-      const [sjid, state, user, partition, name, submit, cpus] = l.split(FIELD_SEP);
+      const [sjid, state, user, partition, name, submit, cpus, exitCode] = l.split(FIELD_SEP);
+      // sacct ExitCode is "rc:signal" (e.g. "0:0", "1:0", "0:9").
+      const exitRc = parseInt((exitCode || "0:0").split(":")[0], 10);
       return {
         slurmJobId: parseInt(sjid, 10),
         state: (state || "").trim(),
@@ -89,6 +116,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
         name: (name || "").trim(),
         submit: (submit || "").trim(),
         cpus: parseInt((cpus || "").trim(), 10) || 1,
+        exitCode: Number.isFinite(exitRc) ? exitRc : 0,
         gpus: 0, // filled in below from scontrol's JOB_GRES line
       };
     })
@@ -139,7 +167,7 @@ done`;
   // running for days.
   const existingRows = await prisma.job.findMany({
     where: { clusterId: id, slurmJobId: { in: rows.map((r) => r.slurmJobId) } },
-    select: { id: true, slurmJobId: true, script: true },
+    select: { id: true, slurmJobId: true, script: true, status: true, exitCode: true },
   });
   const existing = new Map(existingRows.map((e) => [e.slurmJobId!, e]));
 
@@ -153,15 +181,36 @@ done`;
   let imported = 0;
   let skippedExisting = 0;
   let skippedNoUser = 0;
+  let statusUpdated = 0;
   const orphans: Array<{ slurmJobId: number; user: string }> = [];
 
   let backfilled = 0;
   for (const r of rows) {
     const existingJob = existing.get(r.slurmJobId);
     if (existingJob) {
+      // Status reconciliation: the whole point of the sacct-backed sync.
+      // If Slurm's accounting now reports a different state than our DB
+      // (typically the job was cancelled/finished outside this UI), flip
+      // the row in-place. Without this, an out-of-band cancel would
+      // leave a stale RUNNING row forever — the original symptom that
+      // motivated this change.
+      const liveStatus = mapState(r.state);
+      const updates: Record<string, unknown> = {};
+      if (liveStatus !== existingJob.status) {
+        updates.status = liveStatus;
+        // Capture the sacct exit code on terminal transitions so the UI
+        // can show it. Don't overwrite with 0 if the existing row already
+        // has a non-zero one cached by the watcher (less precise field).
+        const terminal = liveStatus === "COMPLETED" || liveStatus === "FAILED" || liveStatus === "CANCELLED";
+        if (terminal && r.exitCode !== existingJob.exitCode) {
+          updates.exitCode = r.exitCode;
+        }
+        statusUpdated++;
+      }
+
       // Backfill: if the stored script is missing GPU/CPU directives but
-      // the live squeue row has them, update in place. No-op once it has
-      // been done. Saves the user from re-importing everything.
+      // sacct has them, update in place. No-op once it has been done.
+      // Saves the user from re-importing everything.
       const lacksCpu = !/^#SBATCH\s+(?:--cpus-per-task|-c)[=\s]/m.test(existingJob.script);
       const lacksGpu = !/^#SBATCH\s+--gres=gpu/m.test(existingJob.script);
       const hasCpuToAdd = lacksCpu && r.cpus > 1;
@@ -170,11 +219,15 @@ done`;
         const additions: string[] = [];
         if (hasCpuToAdd) additions.push(`#SBATCH --cpus-per-task=${r.cpus}`);
         if (hasGpuToAdd) additions.push(`#SBATCH --gres=gpu:${r.gpus}`);
+        updates.script = `${existingJob.script.replace(/\n+$/, "")}\n${additions.join("\n")}\n`;
+        backfilled++;
+      }
+
+      if (Object.keys(updates).length > 0) {
         await prisma.job.update({
           where: { id: existingJob.id },
-          data: { script: `${existingJob.script.replace(/\n+$/, "")}\n${additions.join("\n")}\n` },
+          data: updates,
         }).catch(() => {});
-        backfilled++;
       }
       skippedExisting++;
       continue;
@@ -225,7 +278,7 @@ done`;
     action: "jobs.import_from_slurm",
     entity: "Cluster",
     entityId: id,
-    metadata: { imported, skippedExisting, skippedNoUser, backfilled, total: rows.length },
+    metadata: { imported, skippedExisting, skippedNoUser, statusUpdated, backfilled, total: rows.length },
   });
 
   return NextResponse.json({
@@ -233,6 +286,7 @@ done`;
     imported,
     skippedExisting,
     skippedNoUser,
+    statusUpdated,
     backfilled,
     orphans: orphans.slice(0, 20),
   });

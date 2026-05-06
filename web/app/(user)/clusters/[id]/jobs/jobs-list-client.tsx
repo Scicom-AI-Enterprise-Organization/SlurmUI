@@ -472,7 +472,7 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
         setImportResult({ ok: false, summary: d.error ?? `HTTP ${res.status}` });
         return;
       }
-      const summary = `imported ${d.imported}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} live jobs)`;
+      const summary = `imported ${d.imported}, status-updated ${d.statusUpdated ?? 0}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} sacct rows)`;
       const orphans = (d.orphans ?? []) as Array<{ slurmJobId: number; user: string }>;
       const details = orphans.length > 0
         ? `Unmatched (no local user with that unixUsername):\n${orphans.map((o) => `  ${o.slurmJobId}  ${o.user}`).join("\n")}`

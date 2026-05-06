@@ -703,7 +703,11 @@ export default function NodesPage() {
 
   const openNodeTerminal = (nodeName: string) => {
     setTerminalNode(nodeName);
-    setTermLines([`Connected to ${nodeName} via controller`, ""]);
+    const node = nodes.find((n) => n.name === nodeName);
+    const via = node?.ip
+      ? `Connected to ${nodeName} (${node.ip}) — controller hops one SSH into the node before each command`
+      : `Opened terminal for ${nodeName} — no IP known yet, commands will fail until the node entry has one`;
+    setTermLines([via, ""]);
   };
 
   const runNodeCommand = async () => {
@@ -713,12 +717,32 @@ export default function NodesPage() {
     setTermLines((prev) => [...prev, `$ ${cmd}`]);
     setTermRunning(true);
     try {
-      // Just run the command directly on the controller (which is often the node too).
-      // The /exec endpoint handles bastion marker extraction internally.
+      // /exec runs against the cluster controller. To actually land on the
+      // selected node (e.g. scicom-gpu2), we have to hop one SSH from the
+      // controller into the node's IP — otherwise every command would
+      // silently run on the controller and report the controller's
+      // hostname, even though the dialog says "Terminal: gpu2". Same hop
+      // pattern as fetchNodeLogs below.
+      const nodeEntry = nodes.find((n) => n.name === terminalNode);
+      const ip = nodeEntry?.ip;
+      if (!ip) {
+        // Without an IP we'd silently run on the controller and lie to
+        // the user — exactly the bug this hop fixes. Surface it instead.
+        setTermLines((p) => [
+          ...p,
+          `[error] no IP known for ${terminalNode}; can't hop. Edit the node entry and set its IP, then retry.`,
+        ]);
+        setTermRunning(false);
+        return;
+      }
+      // Single-quote the user command for the remote shell. Embedded
+      // single quotes need the standard '\'' escape so the outer quoting
+      // stays balanced.
+      const remoteCmd = `ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 ${ip} '${cmd.replace(/'/g, "'\\''")}'`;
       const res = await fetch(`/api/clusters/${clusterId}/exec`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: cmd }),
+        body: JSON.stringify({ command: remoteCmd }),
       });
       const data = await res.json();
       const output = (data.stdout ?? "").replace(/\r/g, "").trim();
