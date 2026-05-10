@@ -3,9 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Copy, KeyRound, Search } from "lucide-react";
+import { Check, Copy, KeyRound, Search } from "lucide-react";
 import Link from "next/link";
-import { toast } from "sonner";
 
 /**
  * API reference page — three-column layout modelled on the api.png
@@ -18,36 +17,42 @@ import { toast } from "sonner";
  * change a route's wire shape, update its entry in ENDPOINTS below.
  */
 
+// Inline copy feedback — swaps the icon to a checkmark for ~1.5 s on
+// click instead of firing a toast. Less intrusive and the affordance
+// stays inside the box you just clicked.
 function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = () => {
+    navigator.clipboard?.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
   return (
     <Button
       variant="ghost"
       size="icon-sm"
       className="absolute right-1.5 top-1.5 opacity-50 hover:opacity-100"
-      onClick={() => { navigator.clipboard?.writeText(text); toast.success("Copied"); }}
-      title="Copy"
+      onClick={onClick}
+      title={copied ? "Copied" : "Copy"}
     >
-      <Copy className="h-3 w-3" />
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
     </Button>
   );
 }
 
-// Theme-aware code block — uses `bg-muted` so light/dark mode track the
-// rest of the page palette instead of being hardcoded to zinc-950.
+// Single-bordered code block matching the InfoCard shape (Base URL /
+// Authentication header / Quick start). One rounded border around the
+// whole thing — label and code share the same surface, no internal
+// separator line. Theme-aware via `bg-muted`.
 function CodeBlock({ children, label }: { children: string; label?: string }) {
   return (
-    <div className="relative">
+    <div className="relative rounded-md border bg-muted p-3">
       {label && (
-        <div className="flex items-center justify-between rounded-t-md border border-b-0 bg-muted/60 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          <span>{label}</span>
-        </div>
+        <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {label}
+        </p>
       )}
-      <pre
-        className={
-          "overflow-x-auto border bg-muted p-3 pr-10 font-mono text-xs leading-relaxed " +
-          (label ? "rounded-b-md" : "rounded-md")
-        }
-      >
+      <pre className="overflow-x-auto pr-8 font-mono text-xs leading-relaxed text-foreground/90">
         {children}
       </pre>
       <CopyBtn text={children} />
