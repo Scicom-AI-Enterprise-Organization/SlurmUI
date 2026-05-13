@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { Sun, Moon, LogOut, User, KeyRound, Code2 } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,10 +42,11 @@ export function UserMenu() {
       {/* Avatar dropdown */}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            <Avatar size="default">
-              <AvatarFallback>{initials}</AvatarFallback>
-            </Avatar>
+          <button
+            aria-label="Account menu"
+            className="flex size-8 items-center justify-center rounded-full border border-border bg-transparent text-xs font-semibold text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {initials}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">

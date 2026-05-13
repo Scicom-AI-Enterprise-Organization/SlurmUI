@@ -1,7 +1,8 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/nav/sidebar";
-import { UserMenu } from "@/components/nav/user-menu";
+import { Topbar } from "@/components/nav/topbar";
+import { SidebarStateProvider } from "@/components/nav/sidebar-state";
 
 export default async function UserLayout({
   children,
@@ -15,14 +16,14 @@ export default async function UserLayout({
   }
 
   return (
-    <div className="flex h-screen bg-background">
-      <Sidebar role={(session.user as any).role} />
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 shrink-0 items-center justify-end border-b border-border px-6">
-          <UserMenu />
-        </header>
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+    <SidebarStateProvider>
+      <div className="flex h-screen bg-background">
+        <Sidebar role={(session.user as any).role} />
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <Topbar />
+          <main className="flex-1 overflow-auto p-6">{children}</main>
+        </div>
       </div>
-    </div>
+    </SidebarStateProvider>
   );
 }

@@ -55,7 +55,7 @@ export default function ExplainPage() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div>
       <div className="mb-6">
         <h1 className="text-3xl font-bold">Learn Slurm</h1>
         <p className="text-muted-foreground">

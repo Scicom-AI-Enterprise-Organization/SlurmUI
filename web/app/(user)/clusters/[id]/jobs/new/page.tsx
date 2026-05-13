@@ -948,7 +948,7 @@ export default function NewJobPage() {
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Submit Job</h1>
         <p className="text-muted-foreground">Submit a Slurm batch job</p>

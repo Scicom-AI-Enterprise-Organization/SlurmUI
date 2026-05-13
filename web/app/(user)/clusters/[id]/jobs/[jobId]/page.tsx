@@ -409,7 +409,7 @@ export default function JobDetailPage() {
   const isRunning = job.status === "RUNNING" || job.status === "PENDING";
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-3">

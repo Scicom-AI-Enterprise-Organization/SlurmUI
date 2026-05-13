@@ -12,7 +12,7 @@ export default async function NewClusterPage() {
 
   if (sshKeys.length === 0) {
     return (
-      <div className="mx-auto max-w-2xl py-8 space-y-6">
+      <div className="space-y-6">
         <h1 className="text-3xl font-bold">New Cluster</h1>
         <div className="rounded-lg border border-destructive/50 bg-destructive/5 p-6 space-y-4">
           <div className="flex items-center gap-2 text-destructive font-semibold text-lg">
@@ -32,7 +32,7 @@ export default async function NewClusterPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl py-8">
+    <div>
       <h1 className="mb-8 text-3xl font-bold">New Cluster</h1>
       <NewClusterWizard sshKeys={sshKeys} />
     </div>

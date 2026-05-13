@@ -160,7 +160,7 @@ export default function ProfilePage() {
   const displayName = user.name || user.email;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Profile</h1>
         <p className="text-muted-foreground">Your account and cluster access</p>
