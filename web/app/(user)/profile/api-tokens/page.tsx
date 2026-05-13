@@ -9,7 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
-import { Copy, KeyRound, Trash2, ExternalLink } from "lucide-react";
+import { Copy, Trash2, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 
@@ -88,12 +88,10 @@ export default function ApiTokensPage() {
   };
 
   return (
-    <div className="space-y-4 p-6">
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-            <KeyRound className="h-5 w-5" /> API tokens
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">API tokens</h1>
           <p className="text-sm text-muted-foreground">
             Personal tokens for the <code>/api/v1</code> endpoints. Use them to submit and
             list jobs from scripts, CI, or external schedulers.
