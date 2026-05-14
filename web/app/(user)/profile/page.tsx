@@ -91,17 +91,17 @@ function PasswordCard() {
             <Input id="cfpw" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <Button onClick={handleSave} disabled={!canSave}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {saving ? "Saving…" : "Update password"}
-          </Button>
+        <div className="flex items-center justify-end gap-3">
           {next && next.length < 8 && (
             <span className="text-xs text-destructive">Min 8 characters.</span>
           )}
           {confirm && next !== confirm && (
             <span className="text-xs text-destructive">Confirmation doesn&apos;t match.</span>
           )}
+          <Button onClick={handleSave} disabled={!canSave}>
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {saving ? "Saving…" : "Update password"}
+          </Button>
         </div>
       </CardContent>
     </Card>

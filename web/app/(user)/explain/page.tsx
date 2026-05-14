@@ -109,14 +109,14 @@ export default function ExplainPage() {
                 <Row k="munge" v="Authentication layer. A shared /etc/munge/munge.key on every node lets slurmctld/slurmd/slurmdbd trust each other." />
               </tbody>
             </table>
-            <Pre>{`┌──────────────┐    munge     ┌──────────────┐
-│  Controller  │◀────────────▶│   Worker 1   │   slurmd
-│  slurmctld   │              │   slurmd     │
-│  slurmdbd    │              └──────────────┘
-└──────▲───────┘              ┌──────────────┐
-       │ sbatch/scontrol      │   Worker 2   │   slurmd
-       │                      │   slurmd     │
-   user shell                 └──────────────┘`}</Pre>
+            <Pre>{`+--------------+    munge     +--------------+
+|  Controller  |<------------>|   Worker 1   |   slurmd
+|  slurmctld   |              |   slurmd     |
+|  slurmdbd    |              +--------------+
++------^-------+              +--------------+
+       | sbatch/scontrol      |   Worker 2   |   slurmd
+       |                      |   slurmd     |
+   user shell                 +--------------+`}</Pre>
           </Section>
 
           <Section id="nodes" title="Nodes">
