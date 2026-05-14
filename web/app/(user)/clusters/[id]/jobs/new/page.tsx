@@ -1363,28 +1363,37 @@ export default function NewJobPage() {
               </div>
             );
           })()}
-          <Button
-            onClick={handleSubmit}
-            disabled={(() => {
-              if (gitopsOnly || submitting || !partition) return true;
-              if (mode === "form" ? !command.trim() : !rawScript.trim()) return true;
-              if (mode === "form" && resourceTotals) {
-                const cpuReq = Math.max(1, ntasks) * Math.max(1, cpusPerTask);
-                const gpuReq = Math.max(0, gpus);
-                const memReqMb = Math.max(0, memoryGb) * 1024;
-                if (cpuReq > resourceTotals.cpuFree) return true;
-                if (gpuReq > resourceTotals.gpuFree) return true;
-                if (memReqMb > resourceTotals.memFreeMb) return true;
-              }
-              return false;
-            })()}
-            className="w-full"
-          >
-            <Send className="mr-2 h-4 w-4" />
-            {submitting ? "Submitting..." : "Submit Job"}
-          </Button>
         </CardContent>
       </Card>
+
+      <div className="flex items-center justify-end gap-2">
+        <Button
+          variant="ghost"
+          onClick={() => router.push(`/clusters/${clusterId}/jobs`)}
+          disabled={submitting}
+        >
+          Cancel
+        </Button>
+        <Button
+          onClick={handleSubmit}
+          disabled={(() => {
+            if (gitopsOnly || submitting || !partition) return true;
+            if (mode === "form" ? !command.trim() : !rawScript.trim()) return true;
+            if (mode === "form" && resourceTotals) {
+              const cpuReq = Math.max(1, ntasks) * Math.max(1, cpusPerTask);
+              const gpuReq = Math.max(0, gpus);
+              const memReqMb = Math.max(0, memoryGb) * 1024;
+              if (cpuReq > resourceTotals.cpuFree) return true;
+              if (gpuReq > resourceTotals.gpuFree) return true;
+              if (memReqMb > resourceTotals.memFreeMb) return true;
+            }
+            return false;
+          })()}
+        >
+          <Send className="mr-2 h-4 w-4" />
+          {submitting ? "Submitting..." : "Submit Job"}
+        </Button>
+      </div>
 
       <Dialog open={!!errorDialog} onOpenChange={(o) => { if (!o) setErrorDialog(null); }}>
         <DialogContent className="max-w-2xl">

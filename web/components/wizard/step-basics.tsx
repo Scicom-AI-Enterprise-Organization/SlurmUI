@@ -144,22 +144,43 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
           <CardDescription>How SlurmUI reaches the controller and authenticates.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label>Connection Mode</Label>
-            <Select value={data.connectionMode} onValueChange={(v) => update("connectionMode", v)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="SSH">SSH (direct, no agent)</SelectItem>
-                <SelectItem value="NATS">NATS (agent-based)</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {data.connectionMode === "SSH"
-                ? "Commands run directly over SSH. Simpler setup, no agent binary needed on the node."
-                : "An agent runs on the node and communicates via NATS. Better for real-time streaming and multi-node setups."}
-            </p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Connection Mode</Label>
+              <Select value={data.connectionMode} onValueChange={(v) => update("connectionMode", v)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="SSH">SSH (direct, no agent)</SelectItem>
+                  <SelectItem value="NATS">NATS (agent-based)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {data.connectionMode === "SSH"
+                  ? "Commands run directly over SSH. Simpler setup, no agent binary needed on the node."
+                  : "An agent runs on the node and communicates via NATS. Better for real-time streaming and multi-node setups."}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>SSH Key</Label>
+              <Select value={data.sshKeyId} onValueChange={(v) => update("sshKeyId", v)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Select an SSH key" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sshKeys.map((key) => (
+                    <SelectItem key={key.id} value={key.id}>
+                      {key.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                The SSH key used to connect to this cluster. Manage keys in Settings.
+              </p>
+            </div>
           </div>
 
           {data.connectionMode === "NATS" && (
@@ -176,25 +197,6 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
               </p>
             </div>
           )}
-
-          <div className="space-y-2">
-            <Label>SSH Key</Label>
-            <Select value={data.sshKeyId} onValueChange={(v) => update("sshKeyId", v)}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select an SSH key" />
-              </SelectTrigger>
-              <SelectContent>
-                {sshKeys.map((key) => (
-                  <SelectItem key={key.id} value={key.id}>
-                    {key.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              The SSH key used to connect to this cluster. Manage keys in Settings.
-            </p>
-          </div>
 
           <div className="grid grid-cols-[1fr_1fr_auto] gap-4 items-end">
             <div className="space-y-2">

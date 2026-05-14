@@ -97,10 +97,19 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
       <div className="space-y-6">
         <StepBasics data={basics} onChange={setBasics} sshKeys={sshKeys} onSshTestChange={setSshTestStatus} />
 
-        <Button onClick={handleCreate} disabled={!canCreate || creating} className="w-full">
-          {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          {creating ? "Creating..." : "Create Cluster"}
-        </Button>
+        <div className="flex items-center justify-end gap-2">
+          <Button
+            variant="ghost"
+            onClick={() => router.push("/admin/clusters")}
+            disabled={creating}
+          >
+            Cancel
+          </Button>
+          <Button onClick={handleCreate} disabled={!canCreate || creating}>
+            {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {creating ? "Creating..." : "Create Cluster"}
+          </Button>
+        </div>
       </div>
 
       <Dialog open={!!errorMsg} onOpenChange={(open) => { if (!open) setErrorMsg(null); }}>

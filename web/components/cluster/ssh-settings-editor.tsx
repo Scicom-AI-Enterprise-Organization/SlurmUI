@@ -338,7 +338,12 @@ export function SshSettingsEditor({
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2">
+          {saved && (
+            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+              Saved
+            </Badge>
+          )}
           <Button onClick={handleSave} disabled={saving || !hasChanges}>
             {saving ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -347,11 +352,6 @@ export function SshSettingsEditor({
             )}
             {saving ? "Saving..." : "Save"}
           </Button>
-          {saved && (
-            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-              Saved
-            </Badge>
-          )}
         </div>
       </CardContent>
     </Card>

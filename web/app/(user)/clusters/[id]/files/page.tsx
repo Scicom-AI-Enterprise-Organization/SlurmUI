@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,7 +25,7 @@ import {
 import { toast } from "sonner";
 import {
   Folder, File, Download, ArrowLeft, RefreshCw, ChevronRight, Home,
-  FilePlus, Upload, Loader2, Save, Pencil,
+  FilePlus, Upload, Loader2, Save,
 } from "lucide-react";
 
 interface FileEntry {
@@ -45,10 +45,12 @@ function formatSize(bytes: number): string {
 
 export default function FilesPage() {
   const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const clusterId = params.id as string;
 
-  const [path, setPath] = useState("");
-  const [rootId, setRootId] = useState("home");
+  const [path, setPath] = useState(() => searchParams.get("path") ?? "");
+  const [rootId, setRootId] = useState(() => searchParams.get("root") ?? "home");
   const [roots, setRoots] = useState<Array<{ id: string; label: string; base: string; type: string }>>([]);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,6 +67,26 @@ export default function FilesPage() {
   // Upload
   const [uploading, setUploading] = useState(false);
 
+  // Single source of truth for URL state — every navigation / dialog change
+  // funnels through here so refresh + share + browser-back stay consistent.
+  const writeUrlState = useCallback((opts: {
+    path: string;
+    root: string;
+    edit?: string | null;
+    isNew?: boolean;
+  }) => {
+    const qs = new URLSearchParams();
+    if (opts.root && opts.root !== "home") qs.set("root", opts.root);
+    if (opts.path) qs.set("path", opts.path);
+    if (opts.edit) qs.set("edit", opts.edit);
+    if (opts.isNew) qs.set("new", "1");
+    const search = qs.toString();
+    router.replace(
+      `/clusters/${clusterId}/files${search ? `?${search}` : ""}`,
+      { scroll: false },
+    );
+  }, [clusterId, router]);
+
   const load = useCallback(async (p: string, r: string) => {
     setLoading(true);
     try {
@@ -79,14 +101,59 @@ export default function FilesPage() {
       setRoots(data.roots ?? []);
       setPath(p);
       setRootId(r);
+      writeUrlState({ path: p, root: r });
     } catch (e: any) {
       toast.error(e.message ?? "Failed to list files");
     } finally {
       setLoading(false);
     }
+  }, [clusterId, writeUrlState]);
+
+  // Open an edit dialog for an arbitrary path (used both by row clicks and
+  // by the on-mount URL restorer below).
+  const openEditByPath = useCallback(async (filePath: string, r: string) => {
+    setEditPath(filePath);
+    setEditIsNew(false);
+    setEditContent("");
+    setEditLoading(true);
+    setEditOpen(true);
+    try {
+      const qs = new URLSearchParams({ path: filePath, root: r }).toString();
+      const res = await fetch(`/api/clusters/${clusterId}/files/download?${qs}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err.error ?? "Failed to open file");
+        setEditOpen(false);
+        return;
+      }
+      const blob = await res.blob();
+      const text = await blob.text();
+      setEditContent(text);
+    } catch {
+      toast.error("Failed to open file");
+      setEditOpen(false);
+    } finally {
+      setEditLoading(false);
+    }
   }, [clusterId]);
 
-  useEffect(() => { load("", "home"); }, [load]);
+  useEffect(() => {
+    const initPath = searchParams.get("path") ?? "";
+    const initRoot = searchParams.get("root") ?? "home";
+    const editParam = searchParams.get("edit");
+    const newParam = searchParams.get("new") === "1";
+    load(initPath, initRoot);
+    if (newParam) {
+      setEditPath(editParam ?? (initPath ? `${initPath}/new-file.txt` : "new-file.txt"));
+      setEditIsNew(true);
+      setEditContent("");
+      setEditOpen(true);
+    } else if (editParam) {
+      openEditByPath(editParam, initRoot);
+    }
+    // Run only once on mount — subsequent URL changes flow back via load().
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeRoot = roots.find((r) => r.id === rootId);
 
@@ -132,33 +199,18 @@ export default function FilesPage() {
     setEditIsNew(true);
     setEditContent("");
     setEditOpen(true);
+    writeUrlState({ path, root: rootId, edit: suggested, isNew: true });
   };
 
-  const openEditFile = async (entry: FileEntry) => {
+  const openEditFile = (entry: FileEntry) => {
     const filePath = path ? `${path}/${entry.name}` : entry.name;
-    setEditPath(filePath);
-    setEditIsNew(false);
-    setEditContent("");
-    setEditLoading(true);
-    setEditOpen(true);
-    try {
-      const qs = new URLSearchParams({ path: filePath, root: rootId }).toString();
-      const res = await fetch(`/api/clusters/${clusterId}/files/download?${qs}`);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        toast.error(err.error ?? "Failed to open file");
-        setEditOpen(false);
-        return;
-      }
-      const blob = await res.blob();
-      const text = await blob.text();
-      setEditContent(text);
-    } catch {
-      toast.error("Failed to open file");
-      setEditOpen(false);
-    } finally {
-      setEditLoading(false);
-    }
+    writeUrlState({ path, root: rootId, edit: filePath });
+    openEditByPath(filePath, rootId);
+  };
+
+  const closeEditDialog = () => {
+    setEditOpen(false);
+    writeUrlState({ path, root: rootId });
   };
 
   const saveFile = async () => {
@@ -178,8 +230,9 @@ export default function FilesPage() {
         toast.error(err.error ?? "Save failed");
         return;
       }
+      // load() will rewrite the URL without ?edit/?new, so the dialog
+      // state and URL stay in sync.
       setEditOpen(false);
-      // Refresh the list so the new / updated file shows.
       load(path, rootId);
     } finally {
       setEditSaving(false);
@@ -328,8 +381,19 @@ export default function FilesPage() {
                   <tr key={entry.name} className="border-b last:border-0 hover:bg-muted/20">
                     <td className="px-4 py-2">
                       <button
-                        onClick={() => entry.is_dir && navigate(entry)}
-                        className={`flex items-center gap-2 ${entry.is_dir ? "cursor-pointer hover:underline" : "cursor-default"}`}
+                        onClick={() => {
+                          if (entry.is_dir) navigate(entry);
+                          else if (entry.size <= 5 * 1024 * 1024) openEditFile(entry);
+                        }}
+                        disabled={!entry.is_dir && entry.size > 5 * 1024 * 1024}
+                        title={
+                          entry.is_dir
+                            ? "Open folder"
+                            : entry.size > 5 * 1024 * 1024
+                              ? "File too large to edit (download instead)"
+                              : "Edit file"
+                        }
+                        className="flex items-center gap-2 cursor-pointer hover:underline disabled:cursor-not-allowed disabled:no-underline disabled:opacity-60"
                       >
                         {entry.is_dir
                           ? <Folder className="h-4 w-4 text-blue-500 shrink-0" />
@@ -346,15 +410,6 @@ export default function FilesPage() {
                     <td className="px-4 py-2 text-right">
                       {!entry.is_dir && (
                         <>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            title="Edit"
-                            onClick={() => openEditFile(entry)}
-                            disabled={entry.size > 5 * 1024 * 1024}
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
                           <Button
                             variant="ghost"
                             size="sm"
@@ -376,8 +431,15 @@ export default function FilesPage() {
       )}
 
       {/* New / edit file dialog */}
-      <Dialog open={editOpen} onOpenChange={(o) => { if (!editSaving) setEditOpen(o); }}>
-        <DialogContent className="max-w-3xl">
+      <Dialog
+        open={editOpen}
+        onOpenChange={(o) => {
+          if (editSaving) return;
+          if (o) setEditOpen(true);
+          else closeEditDialog();
+        }}
+      >
+        <DialogContent className="flex max-h-[90vh] max-w-3xl flex-col">
           <DialogHeader>
             <DialogTitle>{editIsNew ? "New file" : `Edit ${editPath.split("/").pop()}`}</DialogTitle>
             <DialogDescription>
@@ -386,7 +448,7 @@ export default function FilesPage() {
                 : `Saving to ${editPath}`}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="flex min-h-0 flex-1 flex-col space-y-3 overflow-y-auto">
             {editIsNew && (
               <div className="space-y-1">
                 <Label htmlFor="file-path">Path</Label>
@@ -405,8 +467,7 @@ export default function FilesPage() {
               </div>
             ) : (
               <Textarea
-                rows={20}
-                className="font-mono text-xs"
+                className="min-h-[300px] flex-1 resize-none font-mono text-xs"
                 value={editContent}
                 onChange={(e) => setEditContent(e.target.value)}
                 placeholder={editIsNew ? "#!/bin/bash\n# your script" : ""}

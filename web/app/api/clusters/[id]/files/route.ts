@@ -86,14 +86,35 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     };
 
     const marker = `__FILES_${Date.now()}__`;
-    // %P=rel name, %y=d|f|l|…, %s=size, %TY-... =modified, %M=mode
+    // %P=rel name, %y=d|f|l|…, %s=size, %TY-... =modified, %M=mode.
+    // s3fs / FUSE mounts often don't behave with find -printf (some entries
+    // return blank type or mtime), so we fall back to `ls -lA` if find returns
+    // nothing — and only report NOT_FOUND/NOT_DIR after both fail.
     const script = `#!/bin/bash
 set +e
 echo "${marker}_START"
-if [ ! -d ${JSON.stringify(abs)} ]; then
-  echo "__NOT_DIR__"
+ABS=${JSON.stringify(abs)}
+LIST=$(find "$ABS" -maxdepth 1 -mindepth 1 -printf '%P|%y|%s|%TY-%Tm-%TdT%TH:%TM:%TS|%M\\n' 2>/dev/null | head -5000)
+if [ -z "$LIST" ]; then
+  LIST=$(ls -lA --time-style=full-iso "$ABS" 2>/dev/null | tail -n +2 | head -5000 | awk '{
+    perm=$1; size=$5; date=$6; time=$7;
+    name="";
+    for (i=9; i<=NF; i++) name=name (name==""?"":" ") $i;
+    sub(/ -> .*/, "", name);
+    if (name=="" || name=="." || name=="..") next;
+    type="f"; c=substr(perm,1,1);
+    if (c=="d") type="d"; if (c=="l") type="l";
+    print name "|" type "|" size "|" date "T" time "|" perm
+  }')
+fi
+if [ -z "$LIST" ]; then
+  if [ ! -e "$ABS" ]; then
+    echo "__NOT_FOUND__"
+  elif [ ! -d "$ABS" ]; then
+    echo "__NOT_DIR__"
+  fi
 else
-  find ${JSON.stringify(abs)} -maxdepth 1 -mindepth 1 -printf '%P|%y|%s|%TY-%Tm-%TdT%TH:%TM:%TS|%M\\n' 2>/dev/null | head -5000
+  echo "$LIST"
 fi
 echo "${marker}_END"
 `;
@@ -111,7 +132,7 @@ echo "${marker}_END"
       ? full.slice(startIdx + `${marker}_START`.length, endIdx).trim()
       : full.trim();
 
-    if (body.includes("__NOT_DIR__")) {
+    if (body.includes("__NOT_FOUND__") || body.includes("__NOT_DIR__")) {
       return NextResponse.json({ error: `Path not found: ${abs}`, roots, path, rootId: root.id }, { status: 404 });
     }
 
