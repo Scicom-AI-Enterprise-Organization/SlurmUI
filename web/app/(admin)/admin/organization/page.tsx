@@ -19,7 +19,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  UserPlus, Copy, Check, Trash2, KeyRound, Loader2,
+  UserPlus, Copy, Check, Trash2, KeyRound, Loader2, ChevronDown,
 } from "lucide-react";
 
 type Role = "ADMIN" | "VIEWER";
@@ -65,6 +65,12 @@ export default function OrganizationPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Radix Select uses useId() which mismatches between SSR and client, causing
+  // a layout shift on hydration. Gate the Select with a `mounted` flag and
+  // render a same-shape placeholder until after first paint.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -242,7 +248,7 @@ export default function OrganizationPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={createInvite} className="grid gap-3 md:grid-cols-[1fr_140px_120px_auto] items-end">
+          <form onSubmit={createInvite} className="grid gap-3 md:grid-cols-[1fr_140px_120px_auto]">
             <div className="space-y-1">
               <Label htmlFor="inv-email">Email (optional — locks the invite if set)</Label>
               <Input
@@ -255,13 +261,25 @@ export default function OrganizationPage() {
             </div>
             <div className="space-y-1">
               <Label>Role</Label>
-              <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as Role)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ADMIN">Admin</SelectItem>
-                  <SelectItem value="VIEWER">Viewer</SelectItem>
-                </SelectContent>
-              </Select>
+              {mounted ? (
+                <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as Role)}>
+                  <SelectTrigger className="h-9 w-full px-3 py-1 text-base md:text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ADMIN">Admin</SelectItem>
+                    <SelectItem value="VIEWER">Viewer</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <button
+                  type="button"
+                  aria-hidden
+                  tabIndex={-1}
+                  className="border-input dark:bg-input/30 flex h-9 w-full min-w-0 items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs whitespace-nowrap md:text-sm"
+                >
+                  <span>{inviteRole === "ADMIN" ? "Admin" : "Viewer"}</span>
+                  <ChevronDown className="size-4 shrink-0 opacity-50" />
+                </button>
+              )}
             </div>
             <div className="space-y-1">
               <Label htmlFor="inv-hours">Expires (hours)</Label>
@@ -274,10 +292,13 @@ export default function OrganizationPage() {
                 onChange={(e) => setInviteHours(parseInt(e.target.value || "24", 10))}
               />
             </div>
-            <Button type="submit" disabled={creating}>
-              {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Generate link
-            </Button>
+            <div className="space-y-1">
+              <span className="invisible block text-sm leading-none" aria-hidden>_</span>
+              <Button type="submit" disabled={creating} className="w-full">
+                {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Generate link
+              </Button>
+            </div>
           </form>
           <p className="mt-2 text-xs text-muted-foreground">
             The link is shown <b>once</b> — the token is not stored in plain form and cannot be retrieved later.
@@ -353,13 +374,25 @@ export default function OrganizationPage() {
                     <TableCell>{u.name ?? <span className="text-muted-foreground">-</span>}</TableCell>
                     <TableCell className="font-mono text-sm">{u.email}</TableCell>
                     <TableCell>
-                      <Select value={u.role} onValueChange={(v) => requestRoleChange(u, v as Role)}>
-                        <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="ADMIN">Admin</SelectItem>
-                          <SelectItem value="VIEWER">Viewer</SelectItem>
-                        </SelectContent>
-                      </Select>
+                      {mounted ? (
+                        <Select value={u.role} onValueChange={(v) => requestRoleChange(u, v as Role)}>
+                          <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ADMIN">Admin</SelectItem>
+                            <SelectItem value="VIEWER">Viewer</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <button
+                          type="button"
+                          aria-hidden
+                          tabIndex={-1}
+                          className="border-input dark:bg-input/30 flex h-8 w-28 items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs"
+                        >
+                          <span>{u.role === "ADMIN" ? "Admin" : "Viewer"}</span>
+                          <ChevronDown className="size-4 opacity-50" />
+                        </button>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Badge variant={u.provider === "local" ? "default" : "outline"}>

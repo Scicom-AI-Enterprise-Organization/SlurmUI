@@ -123,6 +123,18 @@ export function Sidebar({ role }: SidebarProps) {
             ))}
           </SidebarGroup>
 
+          <SidebarGroup label="Account" collapsed={collapsed}>
+            {ACCOUNT.map((item) => (
+              <SidebarItem
+                key={item.label}
+                item={item}
+                active={isActive(item.href)}
+                collapsed={collapsed}
+                onNavigate={closeMobile}
+              />
+            ))}
+          </SidebarGroup>
+
           {isAdmin && (
             <SidebarGroup label="Admin" collapsed={collapsed}>
               {ADMIN.map((item) => (
@@ -136,18 +148,6 @@ export function Sidebar({ role }: SidebarProps) {
               ))}
             </SidebarGroup>
           )}
-
-          <SidebarGroup label="Account" collapsed={collapsed}>
-            {ACCOUNT.map((item) => (
-              <SidebarItem
-                key={item.label}
-                item={item}
-                active={isActive(item.href)}
-                collapsed={collapsed}
-                onNavigate={closeMobile}
-              />
-            ))}
-          </SidebarGroup>
         </nav>
       </aside>
     </>
