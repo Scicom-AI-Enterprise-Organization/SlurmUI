@@ -64,6 +64,6 @@ export const config = {
     // `Job.proxyPublic` before falling back to session auth, so we must
     // NOT redirect unauth users to /login here — that'd defeat the
     // public-proxy toggle.
-    "/((?!_next/static|_next/image|favicon.ico|public|api/health|api/install|api/metrics|api/v1|login|invite|reset|api/invites/by-token|api/password-reset/by-token|job-proxy).*)",
+    "/((?!_next/static|_next/image|favicon.ico|scicom-logo|api/health|api/install|api/metrics|api/v1|login|invite|reset|api/invites/by-token|api/password-reset/by-token|job-proxy).*)",
   ],
 };

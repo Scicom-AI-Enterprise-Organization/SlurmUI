@@ -171,3 +171,31 @@
 [data-slot="collapsible-content"][data-state="closed"] {
   animation: collapsible-up 200ms ease-out;
 }
+
+/* Browser autofill paints its own yellow/blue background on the <input>,
+   which leaks through `bg-transparent` and clashes with our wrapper bg.
+   Paint a 1000px inset shadow in the wrapper's colour so the autofilled
+   field looks identical to a blank one. */
+input.autofill-fix:-webkit-autofill,
+input.autofill-fix:-webkit-autofill:hover,
+input.autofill-fix:-webkit-autofill:focus,
+input.autofill-fix:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px #f1f5f9 inset; /* slate-100 */
+  -webkit-text-fill-color: var(--foreground);
+  caret-color: var(--foreground);
+  transition: background-color 5000s ease-in-out 0s;
+}
+.dark input.autofill-fix:-webkit-autofill,
+.dark input.autofill-fix:-webkit-autofill:hover,
+.dark input.autofill-fix:-webkit-autofill:focus,
+.dark input.autofill-fix:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px #0f172a inset; /* slate-900 */
+}
+
+/* Hide the native password reveal/clear glyphs in Edge/IE — we ship our
+   own Eye toggle, and the native icon makes the password pill look
+   visually different from the email pill. */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}
