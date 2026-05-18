@@ -193,10 +193,6 @@ export function LoginForm({
         </>
       )}
 
-      <p className="mt-6 text-center text-sm text-muted-foreground">
-        No account? Ask an admin for an invite link.
-      </p>
-
       {showForgot && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"

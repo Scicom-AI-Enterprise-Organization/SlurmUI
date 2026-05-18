@@ -1,9 +1,11 @@
 import Link from "next/link";
 import Image from "next/image";
+import { ThemeToggle } from "./theme-toggle";
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="grid min-h-screen w-full lg:grid-cols-2">
+      <ThemeToggle />
       {/* Left — Brand hero. Hidden on mobile to free up space for the form. */}
       <div className="relative hidden overflow-hidden bg-gradient-to-br from-primary/15 via-background to-primary/5 lg:block">
         {/* Faint dot grid for visual texture */}
