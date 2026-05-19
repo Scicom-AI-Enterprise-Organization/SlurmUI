@@ -21,7 +21,10 @@ FROM node:20-alpine AS deps
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 COPY web/prisma ./prisma/
-RUN apk add --no-cache openssl && npm ci
+# python3/make/g++ are needed when node-pty's prebuilt binary for the current
+# arch is missing (notably linux-arm64 in node-pty 1.x), so npm falls back to
+# node-gyp. Cheap to install; let it run for any arch.
+RUN apk add --no-cache openssl python3 make g++ && npm ci
 
 # ---- Next.js build ----
 FROM node:20-alpine AS builder
@@ -44,7 +47,7 @@ RUN npm install --no-save esbuild && \
       --external:next --external:next/* \
       --external:next-auth --external:next-auth/* \
       --external:@auth/prisma-adapter --external:@prisma/client \
-      --external:ws --external:nats
+      --external:ws --external:nats --external:node-pty
 
 # next has no `exports` field, so `import "next/server"` from next-auth's ESM
 # files fails under Node's strict ESM resolver. Rewrite those imports in-place
