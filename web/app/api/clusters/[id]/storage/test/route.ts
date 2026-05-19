@@ -32,6 +32,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   let script: string;

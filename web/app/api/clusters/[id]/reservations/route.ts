@@ -45,6 +45,8 @@ async function runOnController(clusterId: string, script: string): Promise<strin
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
   const chunks: string[] = [];
   await new Promise<void>((resolve) => {

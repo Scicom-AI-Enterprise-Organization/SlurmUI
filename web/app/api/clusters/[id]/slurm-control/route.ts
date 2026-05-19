@@ -71,6 +71,8 @@ echo "${marker}_END:$ec"
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
   const chunks: string[] = [];
   await new Promise<void>((resolve) => {

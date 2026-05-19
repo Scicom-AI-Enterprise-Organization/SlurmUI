@@ -230,6 +230,8 @@ function buildSshJobStream(
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   // Loop: resolve StdOut via scontrol, tail -F it until the job leaves the queue
