@@ -65,6 +65,15 @@ RUN apk add --no-cache openssl python3 py3-pip openssh-client git curl ca-certif
     pip3 install --break-system-packages ansible-core==2.16.* && \
     rm -rf /root/.cache/pip
 
+# Ansible Galaxy collections declared in ansible/requirements.yml. Without
+# this step, bootstrap fails parsing roles/slurm_controller/tasks/main.yml at
+# the first community.mysql.* reference (used for slurmdbd accounting setup).
+COPY ansible/requirements.yml /tmp/ansible-requirements.yml
+RUN ansible-galaxy collection install \
+        -r /tmp/ansible-requirements.yml \
+        -p /usr/share/ansible/collections && \
+    rm /tmp/ansible-requirements.yml
+
 # cloudflared — used to front the web tier with a Cloudflare Tunnel without
 # exposing a public LB. Pinned via ARG so CI can bump without editing this
 # file; `latest` resolves to Cloudflare's latest GA release.
