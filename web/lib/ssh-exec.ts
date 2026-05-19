@@ -37,6 +37,35 @@ export interface SshTarget {
 }
 
 /**
+ * Build a SshTarget from a Prisma cluster row + its eager-loaded sshKey
+ * (and optional sshJumpKey). Centralises the field mapping so route
+ * handlers don't have to remember to include proxyCommand /
+ * jumpProxyCommand / jumpHost / jumpUser / jumpPort — earlier omissions
+ * caused tunnel-only controllers to fail with "Network unreachable" on
+ * every non-bootstrap SSH path.
+ *
+ * The `cluster` argument is loosely typed as `any` so this helper can be
+ * called from any route that does `prisma.cluster.findUnique({ include:
+ * { sshKey: true, sshJumpKey: true }})` without forcing every caller to
+ * import the generated Prisma type.
+ */
+export function buildSshTargetFromCluster(cluster: any): SshTarget {
+  return {
+    host: cluster.controllerHost,
+    user: cluster.sshUser,
+    port: cluster.sshPort,
+    privateKey: cluster.sshKey?.privateKey ?? "",
+    bastion: cluster.sshBastion,
+    jumpHost: cluster.sshJumpHost,
+    jumpUser: cluster.sshJumpUser,
+    jumpPort: cluster.sshJumpPort,
+    jumpPrivateKey: cluster.sshJumpKey?.privateKey ?? null,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
+  };
+}
+
+/**
  * Build the jump arguments for ssh. Always uses an explicit `ProxyCommand`
  * so the jump-hop flags (StrictHostKeyChecking, IdentityFile, etc.) are
  * guaranteed to apply — OpenSSH < 8.9's `-J` silently drops `-i` and strict

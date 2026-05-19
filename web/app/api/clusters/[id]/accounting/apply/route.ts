@@ -60,6 +60,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    // Honour the cluster's Host ProxyCommand (e.g. cloudflared access ssh).
+    // Otherwise this route's SSH dial fails with "Network unreachable" on
+    // tunnel-only controllers. Mirrors the fix applied to bootstrap (commit
+    // 4966c73) and ansible inventory (commit 9f39bd3).
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   // Collect active cluster users so we can re-register them when enabling slurmdbd.
