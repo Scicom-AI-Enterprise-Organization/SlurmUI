@@ -14,7 +14,7 @@ import { prisma } from "./prisma";
 import { getMux, muxArgs, muxEnabled } from "./ssh-mux";
 import { bastionMuxEnabled, getBastionSession } from "./ssh-bastion-mux";
 
-interface SshTarget {
+export interface SshTarget {
   host: string;
   user: string;
   port: number;
@@ -46,7 +46,7 @@ interface SshTarget {
  * Caller is responsible for deleting it (every spawn helper rm -rf's its
  * tmpDir when the process exits).
  */
-function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: string): string[] {
+export function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: string): string[] {
   const hostProxy = target.proxyCommand?.trim() || "";
   const jumpProxy = target.jumpProxyCommand?.trim() || "";
   const hasHostProxy = hostProxy.length > 0;

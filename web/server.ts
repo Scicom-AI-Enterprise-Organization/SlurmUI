@@ -100,6 +100,7 @@ app.prepare().then(() => {
 
   server.listen(port, hostname, () => {
     console.log(`> Ready on http://${hostname}:${port}`);
+    console.log(`> WS upgrade routes: /api/ws, /job-proxy/*`);
   });
 
   startHeartbeatMonitor().catch((err) => {

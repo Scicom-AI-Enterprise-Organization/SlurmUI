@@ -4,6 +4,7 @@ WORKDIR /app
 
 # ---- Dependencies ----
 FROM base AS deps
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
 RUN npm ci
@@ -19,6 +20,8 @@ RUN npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
+
+RUN apk add --no-cache openssh-client
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs

@@ -27,6 +27,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { LiveLogDialog } from "@/components/ui/live-log-dialog";
+import { ClusterShellPane } from "@/components/cluster/cluster-shell-pane";
 import {
   Select,
   SelectContent,
@@ -42,7 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, Send, FileText, Server, Stethoscope, Pencil, ChevronDown, Layers } from "lucide-react";
+import { RefreshCw, Plus, Zap, Loader2, Check, X, Wrench, Terminal as TerminalIcon, Trash2, FileText, Server, Stethoscope, Pencil, ChevronDown, Layers } from "lucide-react";
 
 interface NodeInfo {
   name: string;
@@ -156,9 +157,6 @@ export default function NodesPage() {
   const [deletingNode, setDeletingNode] = useState<string | null>(null);
   const [confirmDeleteNode, setConfirmDeleteNode] = useState<string | null>(null);
   const [terminalNode, setTerminalNode] = useState<string | null>(null);
-  const [termLines, setTermLines] = useState<string[]>([]);
-  const [termCmd, setTermCmd] = useState("");
-  const [termRunning, setTermRunning] = useState(false);
 
   // Logs dialog state
   const [logsNode, setLogsNode] = useState<string | null>(null);
@@ -703,79 +701,6 @@ export default function NodesPage() {
 
   const openNodeTerminal = (nodeName: string) => {
     setTerminalNode(nodeName);
-    const node = nodes.find((n) => n.name === nodeName);
-    const via = node?.ip
-      ? `Connected to ${nodeName} (${node.ip}) — controller hops one SSH into the node before each command`
-      : `Opened terminal for ${nodeName} — no IP known yet, commands will fail until the node entry has one`;
-    setTermLines([via, ""]);
-  };
-
-  const runNodeCommand = async () => {
-    const cmd = termCmd.trim();
-    if (!cmd || !terminalNode || termRunning) return;
-    setTermCmd("");
-    setTermLines((prev) => [...prev, `$ ${cmd}`]);
-    setTermRunning(true);
-    try {
-      // /exec runs against the cluster controller. To actually land on the
-      // selected node (e.g. scicom-gpu2), we have to hop one SSH from the
-      // controller into the node's IP — otherwise every command would
-      // silently run on the controller and report the controller's
-      // hostname, even though the dialog says "Terminal: gpu2". Same hop
-      // pattern as fetchNodeLogs below.
-      const nodeEntry = nodes.find((n) => n.name === terminalNode);
-      const ip = nodeEntry?.ip;
-      if (!ip) {
-        // Without an IP we'd silently run on the controller and lie to
-        // the user — exactly the bug this hop fixes. Surface it instead.
-        setTermLines((p) => [
-          ...p,
-          `[error] no IP known for ${terminalNode}; can't hop. Edit the node entry and set its IP, then retry.`,
-        ]);
-        setTermRunning(false);
-        return;
-      }
-      // Single-quote the user command for the remote shell. Embedded
-      // single quotes need the standard '\'' escape so the outer quoting
-      // stays balanced.
-      const remoteCmd = `ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 ${ip} '${cmd.replace(/'/g, "'\\''")}'`;
-      const res = await fetch(`/api/clusters/${clusterId}/exec`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command: remoteCmd }),
-      });
-      const data = await res.json();
-      const output = (data.stdout ?? "").replace(/\r/g, "").trim();
-      if (output) {
-        for (const l of output.split("\n")) {
-          const trimmed = l.trim();
-          // Filter bastion welcome banner noise
-          if (trimmed && !trimmed.startsWith("Welcome to") &&
-              !trimmed.includes("System load:") && !trimmed.includes("Usage of /:") &&
-              !trimmed.includes("Memory usage:") && !trimmed.includes("Swap usage:") &&
-              !trimmed.includes("Last login:") && !trimmed.includes("System information as of") &&
-              !trimmed.includes("Processes:") && !trimmed.includes("Users logged in:") &&
-              !trimmed.includes("IPv4 address") && !trimmed.includes("Connection to") &&
-              !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/)) {
-            setTermLines((p) => [...p, l]);
-          }
-        }
-      }
-      if (!data.success && data.exitCode !== null && data.exitCode !== 0) {
-        setTermLines((p) => [...p, `[exit ${data.exitCode}]`]);
-      }
-      if (data.stderr) {
-        for (const l of data.stderr.split("\n")) {
-          if (l && !l.includes("Permanently added") && !l.includes("Connection to")) {
-            setTermLines((p) => [...p, `[stderr] ${l}`]);
-          }
-        }
-      }
-    } catch {
-      setTermLines((p) => [...p, "[error] Request failed"]);
-    } finally {
-      setTermRunning(false);
-    }
   };
 
   const fetchNodeLogs = async (nodeName: string, source: string) => {
@@ -1613,43 +1538,23 @@ export default function NodesPage() {
 
       {/* Node terminal dialog */}
       <Dialog open={!!terminalNode} onOpenChange={(o) => { if (!o) setTerminalNode(null); }}>
-        <DialogContent className="max-w-4xl">
+        <DialogContent showCloseButton className="max-w-5xl">
           <DialogHeader>
             <DialogTitle>Terminal: {terminalNode}</DialogTitle>
           </DialogHeader>
-          <div className="h-[500px] overflow-y-auto rounded-md border bg-black p-3 font-mono text-sm text-green-400">
-            {termLines.map((line, i) => (
-              <div
-                key={i}
-                className={`whitespace-pre-wrap leading-5 ${
-                  line.startsWith("[stderr]") ? "text-yellow-400" :
-                  line.startsWith("[error]") ? "text-red-400" :
-                  line.startsWith("$") ? "text-cyan-400" : ""
-                }`}
-              >
-                {line || "\u00A0"}
-              </div>
-            ))}
-            {termRunning && (
-              <div className="inline-flex items-center gap-2 text-muted-foreground">
-                <Loader2 className="h-3 w-3 animate-spin" />
-              </div>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <Input
-              value={termCmd}
-              onChange={(e) => setTermCmd(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") runNodeCommand(); }}
-              placeholder="Type a command..."
-              className="font-mono text-sm"
-              disabled={termRunning}
-              autoFocus
-            />
-            <Button onClick={runNodeCommand} disabled={termRunning || !termCmd.trim()}>
-              <Send className="h-4 w-4" />
-            </Button>
-          </div>
+          {(() => {
+            if (!terminalNode) return null;
+            const nodeEntry = nodes.find((n) => n.name === terminalNode);
+            const ip = nodeEntry?.ip;
+            if (!ip) {
+              return (
+                <div className="rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground">
+                  No IP known for <strong>{terminalNode}</strong>. Edit the node entry and set its IP, then reopen the terminal.
+                </div>
+              );
+            }
+            return <ClusterShellPane clusterId={clusterId} nodeIp={ip} />;
+          })()}
         </DialogContent>
       </Dialog>
 
