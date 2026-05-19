@@ -265,6 +265,8 @@ async function runBastionBootstrap(taskId: string, clusterId: string, cluster: a
         port: cluster.sshPort,
         privateKey: cluster.sshKey?.privateKey ?? "",
         bastion: true,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
       },
     });
   } catch (e) {
@@ -303,6 +305,8 @@ async function runBastionBootstrap(taskId: string, clusterId: string, cluster: a
               port: cluster.sshPort,
               privateKey: cluster.sshKey?.privateKey ?? "",
               bastion: cluster.sshBastion,
+              proxyCommand: cluster.sshProxyCommand,
+              jumpProxyCommand: cluster.sshJumpProxyCommand,
             },
           });
         } catch (e) {
@@ -401,6 +405,8 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
               port: cluster.sshPort,
               privateKey: cluster.sshKey?.privateKey ?? "",
               bastion: cluster.sshBastion,
+              proxyCommand: cluster.sshProxyCommand,
+              jumpProxyCommand: cluster.sshJumpProxyCommand,
             },
           });
         } catch (e) {
@@ -416,6 +422,8 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
               port: cluster.sshPort,
               privateKey: cluster.sshKey?.privateKey ?? "",
               bastion: cluster.sshBastion,
+              proxyCommand: cluster.sshProxyCommand,
+              jumpProxyCommand: cluster.sshJumpProxyCommand,
             },
           });
         } catch (e) {
@@ -496,7 +504,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 async function seedControllerAsNode(args: {
   clusterId: string;
   taskId: string;
-  sshTarget: { host: string; user: string; port: number; privateKey: string; bastion: boolean };
+  sshTarget: {
+    host: string;
+    user: string;
+    port: number;
+    privateKey: string;
+    bastion: boolean;
+    // Honour the cluster's Host ProxyCommand (e.g. cloudflared access ssh).
+    // Without it, the probe SSH call dials ansible_host directly and fails
+    // ("Network unreachable") for tunnel-only controllers.
+    proxyCommand?: string | null;
+    jumpProxyCommand?: string | null;
+  };
 }) {
   const { clusterId, taskId, sshTarget } = args;
   if (!sshTarget.privateKey) return;
@@ -623,7 +642,18 @@ export interface BootstrapNodeSeed {
 async function autoEnableAccounting(args: {
   clusterId: string;
   taskId: string;
-  sshTarget: { host: string; user: string; port: number; privateKey: string; bastion?: any };
+  sshTarget: {
+    host: string;
+    user: string;
+    port: number;
+    privateKey: string;
+    bastion?: any;
+    // Same rationale as seedControllerAsNode — without these, the post-
+    // bootstrap accounting enable fails ("Network unreachable") on
+    // tunnel-only controllers.
+    proxyCommand?: string | null;
+    jumpProxyCommand?: string | null;
+  };
 }): Promise<void> {
   const { clusterId, taskId, sshTarget } = args;
 
