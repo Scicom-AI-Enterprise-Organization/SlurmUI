@@ -26,6 +26,13 @@ interface ClusterSsh {
   user: string;
   port: number;
   sshKeyFile?: string;
+  // Raw -o ProxyCommand to reach the controller (e.g. `cloudflared access ssh
+  // --hostname %h`). When set, every ansible_host line gets a matching
+  // ansible_ssh_common_args entry so the underlying ssh client honours it.
+  // Without this, ansible bypasses the cluster's ProxyCommand and tries to
+  // TCP-connect directly to ansible_host — which fails ("Network unreachable")
+  // for tunnel-only controllers like Cloudflare Tunnel-fronted hosts.
+  proxyCommand?: string | null;
 }
 
 function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>): string {
@@ -41,13 +48,20 @@ function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>)
 
   const keyArg = clusterSsh.sshKeyFile ? ` ansible_ssh_private_key_file=${clusterSsh.sshKeyFile}` : "";
 
-  const controllerLine = `${controllerHost} ansible_host=${clusterSsh.host} ansible_user=${clusterSsh.user} ansible_port=${clusterSsh.port} ansible_python_interpreter=/usr/bin/python3${keyArg}`;
+  // Honour the cluster's Host ProxyCommand (e.g. cloudflared access ssh) so
+  // ansible's ssh client reaches the controller through the configured
+  // transport instead of trying a direct TCP connection.
+  const proxyArg = clusterSsh.proxyCommand && clusterSsh.proxyCommand.trim()
+    ? ` ansible_ssh_common_args='-o ProxyCommand="${clusterSsh.proxyCommand.replace(/'/g, "'\\''")}"'`
+    : "";
+
+  const controllerLine = `${controllerHost} ansible_host=${clusterSsh.host} ansible_user=${clusterSsh.user} ansible_port=${clusterSsh.port} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
 
   const workerLines = workerEntries
     .map((h) => {
       const user = (h as any).user || clusterSsh.user;
       const port = (h as any).port || 22;
-      return `${h.hostname} ansible_host=${h.ip} ansible_user=${user} ansible_port=${port} ansible_python_interpreter=/usr/bin/python3${keyArg}`;
+      return `${h.hostname} ansible_host=${h.ip} ansible_user=${user} ansible_port=${port} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
     })
     .join("\n");
 
@@ -330,6 +344,7 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
       user: cluster.sshUser,
       port: cluster.sshPort,
       sshKeyFile,
+      proxyCommand: cluster.sshProxyCommand,
     }, config));
     writeFileSync(configPath, JSON.stringify(config, null, 2));
 
