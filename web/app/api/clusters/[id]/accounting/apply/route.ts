@@ -166,6 +166,10 @@ echo "[aura] Done. Jobs are now ordered FIFO — no fair-share math."
   (async () => {
     await appendLog(task.id, `[aura] Applying accounting mode: ${mode}`);
     const handle = sshExecScript(target, script, {
+      // Enabling slurmdbd installs MariaDB + slurmdbd via apt and restarts
+      // services — easily exceeds the 60s default. Match the same timeout
+      // used by the bootstrap path's autoEnableAccounting (commit 4966c73).
+      timeoutMs: 15 * 60 * 1000,
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {
