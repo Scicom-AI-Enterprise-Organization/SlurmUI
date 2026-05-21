@@ -159,7 +159,7 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
             <Label>Cluster Type</Label>
             <Select
               value={data.clusterType}
-              onValueChange={(v) => update("clusterType", v as ClusterBasics["clusterType"])}
+              onValueChange={(v: string) => update("clusterType", v as ClusterBasics["clusterType"])}
             >
               <SelectTrigger className="w-full">
                 <SelectValue />
@@ -182,7 +182,7 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
                 <Switch
                   id="allowCrossNodeScheduling"
                   checked={data.allowCrossNodeScheduling}
-                  onCheckedChange={(checked) => update("allowCrossNodeScheduling", checked)}
+                  onCheckedChange={(checked: boolean) => update("allowCrossNodeScheduling", checked)}
                 />
                 <div className="space-y-1">
                   <Label htmlFor="allowCrossNodeScheduling" className="cursor-pointer">

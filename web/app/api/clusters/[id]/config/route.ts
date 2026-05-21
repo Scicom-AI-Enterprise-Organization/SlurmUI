@@ -128,7 +128,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       include: { sshKey: true },
     });
     if (freshCluster?.sshKey) {
-      runContainerPropagate(freshCluster, config);
+      runContainerPropagate(freshCluster, config as Record<string, unknown>);
     }
     return NextResponse.json({
       cluster: updatedCluster,
