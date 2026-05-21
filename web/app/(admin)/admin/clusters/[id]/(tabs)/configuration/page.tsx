@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { AccountingCard } from "@/components/cluster/accounting-card";
 import { GitopsOnlyCard } from "@/components/cluster/gitops-only-card";
+import { ContainerSchedulingCard } from "@/components/cluster/container-scheduling-card";
 import { redactConfig } from "@/lib/redact-config";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
@@ -32,6 +33,11 @@ export default async function ConfigurationPage({ params }: PageProps) {
 
   return (
     <div className="space-y-6">
+      <ContainerSchedulingCard
+        clusterId={id}
+        clusterType={cluster.clusterType}
+        initialAllowCrossNodeScheduling={cluster.allowCrossNodeScheduling}
+      />
       {controllerReachable && <AccountingCard clusterId={id} />}
       <GitopsOnlyCard clusterId={id} />
       <ConfigEditor clusterId={id} initialConfig={config} />

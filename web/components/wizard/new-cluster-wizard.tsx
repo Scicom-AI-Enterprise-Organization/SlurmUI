@@ -35,6 +35,8 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
     sshJumpKeyId: "",
     sshProxyCommand: "",
     sshJumpProxyCommand: "",
+    clusterType: "BAREMETAL",
+    allowCrossNodeScheduling: false,
   });
   const [creating, setCreating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -67,6 +69,10 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
           sshJumpKeyId: basics.sshJumpHost && basics.sshJumpKeyId ? basics.sshJumpKeyId : undefined,
           sshProxyCommand: basics.sshProxyCommand || undefined,
           sshJumpProxyCommand: basics.sshJumpProxyCommand || undefined,
+          clusterType: basics.clusterType,
+          // Server ignores this for baremetal, but send it anyway so the
+          // create body is symmetric and easier to test.
+          allowCrossNodeScheduling: basics.allowCrossNodeScheduling,
         }),
       });
       if (!res.ok) {

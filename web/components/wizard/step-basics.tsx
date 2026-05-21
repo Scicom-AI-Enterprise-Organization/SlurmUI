@@ -13,7 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Check, X, ChevronDown, ChevronRight } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Loader2, Check, X, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
 
 export interface ClusterBasics {
   clusterName: string;
@@ -29,6 +30,12 @@ export interface ClusterBasics {
   sshJumpKeyId: string;
   sshProxyCommand: string;
   sshJumpProxyCommand: string;
+  // Cluster provisioning type. BAREMETAL = legacy systemd + NFS path.
+  // CONTAINER = supervisord + scp-based config push (RunPod et al).
+  clusterType: "BAREMETAL" | "CONTAINER";
+  // Container clusters only. When false, Slurm enforces MaxNodes=1 so
+  // every job stays on a single node — guarantees NVLink-only GPU comms.
+  allowCrossNodeScheduling: boolean;
 }
 
 export interface SshKeyOption {
@@ -52,10 +59,10 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
   // set (e.g. when editing a pre-filled form), collapsed otherwise.
   const [jumpOpen, setJumpOpen] = useState<boolean>(!!data.sshJumpHost);
 
-  const update = (field: keyof ClusterBasics, value: string) => {
-    onChange({ ...data, [field]: value });
+  const update = (field: keyof ClusterBasics, value: string | boolean) => {
+    onChange({ ...data, [field]: value } as ClusterBasics);
     // Reset SSH test when connection details change
-    if (["controllerHost", "sshUser", "sshPort", "sshKeyId", "sshJumpHost", "sshJumpUser", "sshJumpPort", "sshJumpKeyId", "sshProxyCommand", "sshJumpProxyCommand"].includes(field)) {
+    if (["controllerHost", "sshUser", "sshPort", "sshKeyId", "sshJumpHost", "sshJumpUser", "sshJumpPort", "sshJumpKeyId", "sshProxyCommand", "sshJumpProxyCommand"].includes(field as string)) {
       setSshTest("idle");
       setSshTestMsg("");
       onSshTestChange?.("idle");
@@ -135,6 +142,78 @@ export function StepBasics({ data, onChange, sshKeys, onSshTestChange }: StepBas
               IP address or hostname of the master node. Must be reachable via SSH.
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Provisioning Type</CardTitle>
+          <CardDescription>
+            Bare metal / VM uses systemd and an NFS-backed mgmt share. Container is for
+            environments like RunPod or Lambda Labs where you only get SSH into a container —
+            no systemd, no kernel NFS server.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Cluster Type</Label>
+            <Select
+              value={data.clusterType}
+              onValueChange={(v) => update("clusterType", v as ClusterBasics["clusterType"])}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="BAREMETAL">Bare Metal / VM (standard)</SelectItem>
+                <SelectItem value="CONTAINER">Container (RunPod, Lambda Labs, Docker, k8s)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {data.clusterType === "CONTAINER"
+                ? "Uses supervisord instead of systemd and ships slurm.conf to workers via scp from this server."
+                : "Default. Bootstraps munge + slurm via systemd, distributes config over NFS."}
+            </p>
+          </div>
+
+          {data.clusterType === "CONTAINER" && (
+            <div className="space-y-3 rounded-md border border-border bg-muted/30 p-4">
+              <div className="flex items-start gap-3">
+                <Switch
+                  id="allowCrossNodeScheduling"
+                  checked={data.allowCrossNodeScheduling}
+                  onCheckedChange={(checked) => update("allowCrossNodeScheduling", checked)}
+                />
+                <div className="space-y-1">
+                  <Label htmlFor="allowCrossNodeScheduling" className="cursor-pointer">
+                    Allow cross-node scheduling
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Off by default. When off, Slurm enforces <code>MaxNodes=1</code> on every
+                    partition — jobs are guaranteed to run inside a single container and use
+                    only intra-node GPU interconnect (NVLink/NVSwitch).
+                  </p>
+                </div>
+              </div>
+              {data.allowCrossNodeScheduling && (
+                <div className="flex items-start gap-2 rounded-md bg-amber-50 p-3 text-xs text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <p className="font-semibold">CCL / MPI latency warning</p>
+                    <p className="mt-1">
+                      Multi-node collective communications (NCCL, oneCCL, MPI) will route
+                      over your container network. The hop chain is significantly slower
+                      than NVLink — typically 10–100× higher latency and bandwidth-bottlenecked
+                      by the slowest interconnect. Only enable this if your workers have
+                      a high-speed interconnect (RoCE, InfiniBand) between them, and the
+                      workload tolerates the overhead. Otherwise pack all GPUs onto a single
+                      container for best performance.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 
