@@ -1,0 +1,94 @@
+name: Push to CCE
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to copy from ECR to CCE (without leading v)'
+        required: true
+
+permissions:
+  id-token: write   # OIDC token for AWS (to pull from ECR)
+  contents: read
+  actions: read     # read the triggering workflow_run
+
+jobs:
+  cce-push:
+    name: Copy ECR image to CCE
+    runs-on: ubuntu-latest
+    # Only run when the upstream ECR workflow succeeded, or on manual dispatch
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout (for tag lookup)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            VERSION=$(git tag --points-at "$SHA" | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+            if [ -z "$VERSION" ]; then
+              echo "No release tag on $SHA — semantic-release did not cut one. Skipping."
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Install skopeo
+        if: steps.ver.outputs.skip != 'true'
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.ver.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR (source)
+        if: steps.ver.outputs.skip != 'true'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Login to CCE registry (destination)
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.CCE_REGISTRY }}
+          username: ${{ secrets.CCE_USERNAME }}
+          password: ${{ secrets.CCE_PASSWORD }}
+
+      # SWR only accepts Docker v2 schema 2 manifests, not OCI manifests.
+      # skopeo --format v2s2 converts the manifest media type on the fly.
+      - name: Copy amd64 image ECR to CCE
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          ECR_REGISTRY:   ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          CCE_REGISTRY:   ${{ secrets.CCE_REGISTRY }}
+          CCE_REPOSITORY: ${{ secrets.CCE_REPOSITORY }}
+          VERSION:        ${{ steps.ver.outputs.version }}
+        run: |
+          skopeo copy --format v2s2 \
+            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$VERSION-amd64 \
+            docker://$CCE_REGISTRY/$CCE_REPOSITORY:$VERSION
+          skopeo copy --format v2s2 \
+            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$VERSION-amd64 \
+            docker://$CCE_REGISTRY/$CCE_REPOSITORY:latest
