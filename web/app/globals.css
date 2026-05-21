@@ -199,3 +199,29 @@ input::-ms-reveal,
 input::-ms-clear {
   display: none;
 }
+
+/* Always-visible scrollbar for the job log/terminal panel. macOS hides
+   overlay scrollbars until you actively scroll, so the black output box gave
+   no hint it was scrollable (or how far through the log you were). Forcing an
+   explicit width opts the box out of overlay mode and keeps the bar on
+   screen; colours are tuned for the dark panel background. */
+.log-scroll {
+  scrollbar-width: thin;                  /* Firefox */
+  scrollbar-color: #4b5563 transparent;   /* thumb / track — gray-600 */
+}
+.log-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.log-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.log-scroll::-webkit-scrollbar-thumb {
+  background-color: #4b5563;              /* gray-600 */
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.log-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: #6b7280;              /* gray-500 */
+}

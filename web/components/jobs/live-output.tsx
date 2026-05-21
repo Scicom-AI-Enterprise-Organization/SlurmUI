@@ -189,7 +189,7 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
       </div>
       <div
         ref={scrollRef}
-        className="h-96 overflow-auto rounded-md border bg-black p-4"
+        className="log-scroll h-96 overflow-auto rounded-md border bg-black p-4"
       >
         <div className="font-mono text-xs text-green-400">
           {displayText ? (
