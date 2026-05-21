@@ -81,7 +81,7 @@ jobs:
         if: steps.ver.outputs.skip != 'true'
         env:
           ECR_REGISTRY:   ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REPOSITORY: scicom/scicom-aura
           CCE_REGISTRY:   ${{ secrets.CCE_REGISTRY }}
           CCE_REPOSITORY: ${{ secrets.CCE_REPOSITORY }}
           VERSION:        ${{ steps.ver.outputs.version }}
