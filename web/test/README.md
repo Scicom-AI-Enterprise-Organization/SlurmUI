@@ -23,6 +23,7 @@ node --import tsx --test --test-reporter=spec \
   test/job-list-transform.unit.test.mjs \
   test/role-cache.unit.test.mjs \
   test/visible-interval-scheduler.unit.test.mjs \
+  test/container-cluster.unit.test.mjs \
   test/job-proxy.smoke.test.mjs
 
 # Or just one file:
