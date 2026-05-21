@@ -1,0 +1,18 @@
+---
+- name: reload supervisord conf
+  ansible.builtin.shell: |
+    supervisorctl reread
+    supervisorctl update
+  changed_when: false
+
+- name: restart slurmctld
+  ansible.builtin.command: supervisorctl restart slurmctld
+  changed_when: true
+
+- name: restart slurmdbd
+  ansible.builtin.command: supervisorctl restart slurmdbd
+  changed_when: true
+
+- name: restart slurmd
+  ansible.builtin.command: supervisorctl restart slurmd
+  changed_when: true

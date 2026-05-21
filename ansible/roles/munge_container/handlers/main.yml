@@ -1,0 +1,10 @@
+---
+- name: reload supervisord conf
+  ansible.builtin.shell: |
+    supervisorctl reread
+    supervisorctl update
+  changed_when: false
+
+- name: restart munge
+  ansible.builtin.command: supervisorctl restart munged
+  changed_when: true

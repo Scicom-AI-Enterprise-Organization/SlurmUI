@@ -1,0 +1,9 @@
+---
+# Re-read conf.d snippets, then apply any added/changed/removed programs.
+# `update` is the part that actually starts/stops processes — `reread`
+# alone only parses the new config without touching running services.
+- name: reload supervisord conf
+  ansible.builtin.shell: |
+    supervisorctl reread
+    supervisorctl update
+  changed_when: false

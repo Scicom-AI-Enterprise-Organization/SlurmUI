@@ -1,0 +1,42 @@
+---
+# Container-mode worker. Receives slurm.conf, cgroup.conf, gres.conf via
+# `copy` from the control machine (bootstrap_container.yml fetches them
+# off the controller in the preceding play). munge.key is handled by the
+# munge_container role similarly.
+
+- name: Install slurmd
+  ansible.builtin.apt:
+    name:
+      - slurmd
+      - slurm-client
+    state: present
+    update_cache: true
+
+- name: Create slurm directories on worker
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0755'
+  loop:
+    - "{{ slurm_config_dir }}"
+    - "{{ slurm_log_dir }}"
+    - "{{ slurm_spool_dir }}/slurmd"
+    - /var/run/slurm
+
+- name: Set permissions on slurm config directory
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    recurse: true
+
+- name: Drop supervisord program conf for slurmd
+  ansible.builtin.template:
+    src: slurmd.conf.j2
+    dest: "{{ supervisord_conf_d }}/slurmd.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload supervisord conf

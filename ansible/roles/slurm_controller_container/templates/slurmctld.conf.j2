@@ -1,0 +1,13 @@
+[program:slurmctld]
+command=/usr/sbin/slurmctld -D
+user={{ slurm_user }}
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+stdout_logfile={{ supervisord_log_dir }}/slurmctld.log
+stderr_logfile={{ supervisord_log_dir }}/slurmctld.err
+priority=20
+{# Slurmctld won't start until munged accepts auth — set a healthy startup
+   delay so supervisord doesn't flap the daemon during initial bootstrap. #}
+startsecs=3

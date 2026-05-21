@@ -1,0 +1,11 @@
+[program:slurmdbd]
+command=/usr/sbin/slurmdbd -D
+user={{ slurm_user }}
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+stdout_logfile={{ supervisord_log_dir }}/slurmdbd.log
+stderr_logfile={{ supervisord_log_dir }}/slurmdbd.err
+priority=15
+startsecs=3

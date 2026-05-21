@@ -21,6 +21,16 @@ model Cluster {
   id              String         @id @default(uuid())
   name            String         @unique
   controllerHost  String
+  // Provisioning target type. BAREMETAL is the legacy path (systemd +
+  // NFS-based config distribution). CONTAINER swaps in supervisord and
+  // scp-based config push; see ansible/bootstrap_container.yml.
+  // Immutable after create.
+  clusterType     ClusterType    @default(BAREMETAL)
+  // Container clusters only. When false, the rendered slurm.conf pins
+  // MaxNodes=1 on every partition so jobs cannot escape a single node
+  // and pay inter-container CCL/MPI latency. Flipping this on a live
+  // cluster triggers a config propagate + scontrol reconfigure.
+  allowCrossNodeScheduling Boolean @default(false)
   connectionMode  ConnectionMode @default(NATS)
   natsUrl         String?        // NATS URL the agent uses to connect back (NATS mode only)
   natsCredentials String         // encrypted at rest
@@ -63,6 +73,11 @@ model Cluster {
 enum ConnectionMode {
   NATS
   SSH
+}
+
+enum ClusterType {
+  BAREMETAL
+  CONTAINER
 }
 
 enum ClusterStatus {

@@ -1,0 +1,10 @@
+---
+- name: reload supervisord conf
+  ansible.builtin.shell: |
+    supervisorctl reread
+    supervisorctl update
+  changed_when: false
+
+- name: restart aura-agent
+  ansible.builtin.command: supervisorctl restart aura-agent
+  changed_when: true

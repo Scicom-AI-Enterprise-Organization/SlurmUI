@@ -1,0 +1,15 @@
+[program:aura-agent]
+command=/usr/local/bin/aura-agent
+user=root
+autostart=true
+autorestart=true
+startretries=10
+stopsignal=TERM
+{# supervisord doesn't read EnvironmentFile-style files; ship the values
+   inline. Keep the same env-var names the Go binary already expects so
+   no agent code change is needed. #}
+environment=NATS_URL="{{ aura_agent_nats_url }}",CLUSTER_ID="{{ aura_cluster_id | default(slurm_cluster_name) }}",ANSIBLE_PLAYBOOK_DIR="{{ aura_agent_playbook_dir | default('/opt/aura/ansible') }}",SLURM_USER="{{ slurm_user | default('slurm') }}"
+stdout_logfile={{ supervisord_log_dir }}/aura-agent.log
+stderr_logfile={{ supervisord_log_dir }}/aura-agent.err
+priority=40
+startsecs=3

@@ -1,0 +1,166 @@
+---
+# Container-mode controller. Functionally equivalent to slurm_controller but
+# with:
+#   * supervisord program confs instead of systemd unit start/enable
+#   * no NFS export of slurm.conf / cgroup.conf / gres.conf — the bootstrap
+#     playbook `fetch`es them to the control machine and copies onto workers
+#   * mysql/slurmdbd kept off the hot path: too brittle inside random
+#     container images. Accounting is supported only when explicitly enabled
+#     via vault_slurmdbd_storage_pass, identical to baremetal behaviour.
+#
+# The slurm.conf template is reused verbatim from the baremetal role. The
+# template branches on `allow_cross_node_scheduling` to enforce MaxNodes=1
+# on container clusters when cross-node is off.
+
+- name: Install Slurm controller packages
+  ansible.builtin.apt:
+    name:
+      - slurmctld
+      - slurmdbd
+      - slurm-client
+      # slurmd is bundled even on the controller so single-node container
+      # clusters (controller = worker) work without a second box.
+      - slurmd
+      - munge
+      - libmunge-dev
+    state: present
+    update_cache: true
+
+# Accounting (slurmdbd) is opt-in via vault_slurmdbd_storage_pass — same as
+# baremetal. mysql install is skipped by default since the package on stock
+# Ubuntu container images is fragile without privileged caps.
+- name: Install MySQL and Python MySQL binding (only when accounting enabled)
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - python3-mysqldb
+    state: present
+    update_cache: true
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
+
+# MySQL in container mode is started via supervisord too. We only install
+# the supervisord conf when accounting is enabled to keep the conf.d tree
+# tidy on the common no-accounting case.
+- name: Drop supervisord conf for mysqld (accounting enabled)
+  ansible.builtin.copy:
+    dest: "{{ supervisord_conf_d }}/mysqld.conf"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [program:mysqld]
+      command=/usr/sbin/mysqld --user=mysql
+      user=root
+      autostart=true
+      autorestart=true
+      stdout_logfile={{ supervisord_log_dir }}/mysqld.log
+      stderr_logfile={{ supervisord_log_dir }}/mysqld.err
+      priority=5
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
+  notify: reload supervisord conf
+
+- name: Remove stale mysqld supervisord conf when accounting disabled
+  ansible.builtin.file:
+    path: "{{ supervisord_conf_d }}/mysqld.conf"
+    state: absent
+  when: vault_slurmdbd_storage_pass | default('') | length == 0
+  notify: reload supervisord conf
+
+- name: Create slurm directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0755'
+  loop:
+    - "{{ slurm_config_dir }}"
+    - "{{ slurm_log_dir }}"
+    - "{{ slurm_spool_dir }}/slurmctld"
+    - "{{ slurm_spool_dir }}/slurmd"
+    - /var/run/slurm
+
+# Reuse the canonical slurm.conf.j2 from the baremetal role. The template's
+# partition loop now respects `allow_cross_node_scheduling` (set on the
+# playbook via group_vars / extra-vars) and emits MaxNodes=1 when false.
+- name: Write slurm.conf
+  ansible.builtin.template:
+    src: ../../slurm_controller/templates/slurm.conf.j2
+    dest: "{{ slurm_config_dir }}/slurm.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+
+- name: Write slurmdbd.conf (accounting only)
+  ansible.builtin.template:
+    src: ../../slurm_controller/templates/slurmdbd.conf.j2
+    dest: "{{ slurm_config_dir }}/slurmdbd.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0600'
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
+
+- name: Remove stale slurmdbd.conf when accounting disabled
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}/slurmdbd.conf"
+    state: absent
+  when: vault_slurmdbd_storage_pass | default('') | length == 0
+
+- name: Write cgroup.conf
+  ansible.builtin.template:
+    src: ../../slurm_controller/templates/cgroup.conf.j2
+    dest: "{{ slurm_config_dir }}/cgroup.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+
+- name: Write gres.conf (GPU nodes only)
+  ansible.builtin.template:
+    src: ../../slurm_controller/templates/gres.conf.j2
+    dest: "{{ slurm_config_dir }}/gres.conf"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    mode: '0644'
+  when: (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0
+
+- name: Set permissions on slurm config directory
+  ansible.builtin.file:
+    path: "{{ slurm_config_dir }}"
+    owner: "{{ slurm_user }}"
+    group: "{{ slurm_group }}"
+    recurse: true
+
+- name: Drop supervisord program conf for slurmctld
+  ansible.builtin.template:
+    src: slurmctld.conf.j2
+    dest: "{{ supervisord_conf_d }}/slurmctld.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload supervisord conf
+
+- name: Drop supervisord program conf for slurmd (controller = worker too)
+  ansible.builtin.template:
+    src: slurmd.conf.j2
+    dest: "{{ supervisord_conf_d }}/slurmd.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload supervisord conf
+
+- name: Drop supervisord program conf for slurmdbd (accounting only)
+  ansible.builtin.template:
+    src: slurmdbd.conf.j2
+    dest: "{{ supervisord_conf_d }}/slurmdbd.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  when: vault_slurmdbd_storage_pass | default('') | length > 0
+  notify: reload supervisord conf
+
+- name: Remove stale slurmdbd supervisord conf when accounting disabled
+  ansible.builtin.file:
+    path: "{{ supervisord_conf_d }}/slurmdbd.conf"
+    state: absent
+  when: vault_slurmdbd_storage_pass | default('') | length == 0
+  notify: reload supervisord conf

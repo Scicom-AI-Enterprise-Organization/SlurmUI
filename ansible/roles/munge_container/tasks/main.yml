@@ -1,0 +1,83 @@
+---
+# Container-mode munge: no NFS, no systemd. The controller generates the
+# key locally and the bootstrap playbook `fetch`es it to the control
+# machine; workers receive it via `copy` in the same play before this role
+# runs against them (see bootstrap_container.yml).
+
+- name: Install munge
+  ansible.builtin.apt:
+    name:
+      - munge
+      - libmunge-dev
+    state: present
+    update_cache: true
+
+- name: Ensure /etc/munge directory exists with correct ownership
+  ansible.builtin.file:
+    path: /etc/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0711'
+
+- name: Ensure /var/run/munge exists (supervisord starts before tmpfiles.d)
+  ansible.builtin.file:
+    path: /var/run/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0755'
+
+- name: Ensure /var/lib/munge exists
+  ansible.builtin.file:
+    path: /var/lib/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0700'
+
+# Controller: stat the key. If missing, generate it. The bootstrap playbook
+# is what's responsible for fetching the key off the controller and copying
+# it onto each worker — we don't do anything cross-host here.
+- name: Stat existing munge key (controller)
+  ansible.builtin.stat:
+    path: /etc/munge/munge.key
+  register: munge_key_stat
+  when: inventory_hostname in groups['slurm_controllers']
+
+- name: Generate munge key on controller (when missing)
+  ansible.builtin.command: mungekey --create --keyfile /etc/munge/munge.key
+  become_user: "{{ munge_user }}"
+  args:
+    creates: /etc/munge/munge.key
+  when:
+    - inventory_hostname in groups['slurm_controllers']
+    - not (munge_key_stat.stat.exists | default(false))
+
+- name: Set munge key permissions
+  ansible.builtin.file:
+    path: /etc/munge/munge.key
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+  when: inventory_hostname in groups['slurm_controllers']
+
+# Workers receive the key from the control machine via copy (see playbook).
+# This task only asserts the file is in place with the right perms — the
+# play wires up the actual transfer.
+- name: Ensure munge key permissions on workers
+  ansible.builtin.file:
+    path: /etc/munge/munge.key
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0400'
+  when: inventory_hostname in groups['slurm_workers']
+
+- name: Drop supervisord program conf for munged
+  ansible.builtin.template:
+    src: munged.conf.j2
+    dest: "{{ supervisord_conf_d }}/munged.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload supervisord conf

@@ -1,0 +1,22 @@
+---
+# Base log directory shared by every supervisord-managed program in the
+# container. Kept under /var/log/aura so a host-mount or volume can collect
+# everything in one place. Tasks creating individual program confs reference
+# `{{ supervisord_log_dir }}/<program>.log`.
+supervisord_log_dir: /var/log/aura
+
+# Where individual program conf snippets are dropped. Matches Debian/Ubuntu's
+# `supervisor` package defaults so `supervisorctl reread` picks them up
+# without further configuration.
+supervisord_conf_d: /etc/supervisor/conf.d
+
+# Main supervisord config — we leave Debian's at /etc/supervisor/supervisord.conf
+# untouched and only push program snippets into conf.d/.
+supervisord_main_conf: /etc/supervisor/supervisord.conf
+
+# How supervisord itself is started. With container clusters we cannot rely
+# on systemd, so the role launches `supervisord` as a background daemon
+# via `nohup` on first install. If a host already has supervisord running
+# (e.g. user's container entrypoint is supervisord with PID 1) the role
+# detects this and just reloads conf instead.
+supervisord_socket: /var/run/supervisor.sock

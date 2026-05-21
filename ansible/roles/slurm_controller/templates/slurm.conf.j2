@@ -60,12 +60,18 @@ SlurmdParameters=config_overrides
 GresTypes=gpu
 {% endif %}
 
+{# Container clusters with cross-node scheduling disabled get MaxNodes=1
+   stamped on every partition (auto-fallback and user-defined). The flag
+   is set via extra-vars from the web bootstrap route; defaults to false
+   so baremetal flows are unaffected. #}
+{% set _container_lock = (is_container_cluster | default(false)) and (not (allow_cross_node_scheduling | default(false))) %}
+{% set _max_nodes_directive = ' MaxNodes=1' if _container_lock else '' %}
 {% if slurm_nodes | length == 0 %}
 # slurmctld won't start without at least one NodeName / PartitionName, so for
 # a fresh bootstrap we register the controller itself as an all-in-one node
 # using the gathered facts. Real nodes get added via the UI's Nodes tab.
 NodeName={{ ansible_hostname }} NodeAddr={{ slurm_controller_host }} CPUs={{ ansible_processor_vcpus }} Sockets=1 CoresPerSocket={{ ansible_processor_vcpus }} ThreadsPerCore=1 RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
-PartitionName=main Nodes={{ ansible_hostname }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
+PartitionName=main Nodes={{ ansible_hostname }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES{{ _max_nodes_directive }}
 {% else %}
 {% for node in slurm_nodes %}
 {# Tolerate stub entries created by Edit-node (no cpus/memory yet) — fall
@@ -80,14 +86,14 @@ NodeName={{ node.expression }} CPUs={{ node.cpus | default(ansible_processor_vcp
    at least one PartitionName line. Auto-create a `main` partition listing
    every defined node so bootstrap is self-recovering. Admins can override
    via the Partitions tab. #}
-PartitionName=main Nodes={{ slurm_nodes | map(attribute='expression') | join(',') }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
+PartitionName=main Nodes={{ slurm_nodes | map(attribute='expression') | join(',') }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES{{ _max_nodes_directive }}
 {% else %}
 {% for partition in slurm_partitions %}
 {# `partition.nodes` may legitimately be either a list (from the Partitions
    tab) or a comma-separated string (from add-node). Normalise so jinja's
    join doesn't iterate the characters of a string. #}
 {% set _node_str = partition.nodes if (partition.nodes is string) else (partition.nodes | join(',')) %}
-PartitionName={{ partition.name }} Nodes={{ _node_str }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time }} State=UP OverSubscribe=YES
+PartitionName={{ partition.name }} Nodes={{ _node_str }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time }} State=UP OverSubscribe=YES{{ _max_nodes_directive }}
 {% endfor %}
 {% endif %}
 {% endif %}

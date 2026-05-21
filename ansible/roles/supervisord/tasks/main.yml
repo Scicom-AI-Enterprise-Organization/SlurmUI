@@ -1,0 +1,66 @@
+---
+# Container clusters cannot rely on systemd, so every Aura-managed daemon
+# (munge, slurmctld, slurmdbd, slurmd, aura-agent) is supervised by
+# `supervisord` instead. This role only handles the supervisor install +
+# launch — individual program confs are dropped by the per-service roles
+# (munge_container, slurm_*_container, aura_agent_container).
+
+- name: Install supervisor and tooling
+  ansible.builtin.apt:
+    name:
+      - supervisor
+      # `openssh-server` is technically the bootstrap precondition, but we
+      # also need scp for the worker config-push path used in the
+      # propagate_config_container playbook.
+      - openssh-client
+    state: present
+    update_cache: true
+
+- name: Ensure supervisord conf.d directory exists
+  ansible.builtin.file:
+    path: "{{ supervisord_conf_d }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ensure aura log directory exists
+  ansible.builtin.file:
+    path: "{{ supervisord_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# Detect whether supervisord is already running before we try to start it.
+# Three cases handled:
+#  1. supervisord already PID 1 (container entrypoint) — just reload conf
+#  2. supervisord running as background daemon — just reload conf
+#  3. supervisord not running — start it ourselves as a background daemon
+- name: Check if supervisord is already running
+  ansible.builtin.command: pgrep -x supervisord
+  register: supervisord_running
+  changed_when: false
+  failed_when: false
+
+- name: Start supervisord as a background daemon (only when not running)
+  # `supervisord` daemonizes by default; nodaemon=false is the package default.
+  # We rely on Debian/Ubuntu's bundled /etc/supervisor/supervisord.conf which
+  # already points at /etc/supervisor/conf.d/*.conf — no extra config needed.
+  ansible.builtin.command: supervisord -c {{ supervisord_main_conf }}
+  when: supervisord_running.rc != 0
+  changed_when: true
+
+# After the daemon is up, conf snippets dropped by later roles are picked
+# up via `supervisorctl reread && update`. Individual program roles call
+# `notify: reload supervisord conf` to trigger the handler below — the
+# initial bootstrap pass triggers it once at the end of all dependent
+# roles, idempotently.
+- name: Wait until supervisorctl can talk to the daemon
+  ansible.builtin.command: supervisorctl status
+  register: supervisorctl_ready
+  retries: 10
+  delay: 2
+  until: supervisorctl_ready.rc == 0 or supervisorctl_ready.stdout is search('no such process|no such group|RUNNING|STOPPED|FATAL|EXITED|STARTING|BACKOFF|UNKNOWN')
+  changed_when: false
+  failed_when: false
