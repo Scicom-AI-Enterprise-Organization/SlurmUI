@@ -5,6 +5,11 @@ import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
 import { buildEnableSlurmdbdScript } from "@/lib/accounting-script";
+import {
+  bootstrapPlaybook,
+  containerExtraVars,
+  isContainerCluster,
+} from "@/lib/container-cluster";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
@@ -327,8 +332,16 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
     config = { ...config, aura_agent_binary_src: process.env.AURA_AGENT_BINARY_SRC };
   }
 
+  // Merge in the container-mode extra-vars (no-op for BAREMETAL clusters)
+  // so the slurm.conf template knows whether to stamp MaxNodes=1 onto
+  // partitions and so the playbook knows to run the supervisord path.
+  config = { ...config, ...containerExtraVars(cluster) };
+
   const playbookDir = process.env.ANSIBLE_PLAYBOOKS_DIR ?? "/opt/aura/ansible";
-  const playbookFile = process.env.ANSIBLE_PLAYBOOK ?? "bootstrap.yml";
+  // The env override still wins for ops folks who want to swap playbooks
+  // without touching the UI. When unset, the helper picks bootstrap.yml or
+  // bootstrap_container.yml based on the cluster's clusterType.
+  const playbookFile = process.env.ANSIBLE_PLAYBOOK ?? bootstrapPlaybook(cluster);
 
   let tmpDir: string | null = null;
 
@@ -484,7 +497,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   // Start in background (don't await). `runBastionBootstrap` is async now
   // (awaits the preflight probe before kicking off the bootstrap script);
   // fire-and-forget, but surface any synchronous throw to the task log.
-  if (cluster.sshBastion) {
+  //
+  // Container clusters always go through the Ansible path. The bastion
+  // bootstrap path inlines a bash script with systemd commands that would
+  // never work in a container, so we explicitly skip it even when
+  // sshBastion=true (which create-cluster already refuses, but defend in
+  // depth in case the DB has a legacy row from before that validation).
+  if (cluster.sshBastion && !isContainerCluster(cluster)) {
     runBastionBootstrap(task.id, id, cluster).catch(async (e) => {
       await appendLog(task.id, `[aura] Bootstrap error: ${e instanceof Error ? e.message : "unknown"}`);
       await finishTask(task.id, false);

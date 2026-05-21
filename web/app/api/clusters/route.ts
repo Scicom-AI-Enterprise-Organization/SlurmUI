@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
+  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand, clusterType, allowCrossNodeScheduling } = body;
   if (!name || !controllerHost) {
     return NextResponse.json(
       { error: "Missing required fields: name, controllerHost" },
@@ -56,6 +56,21 @@ export async function POST(req: NextRequest) {
   if (mode === "NATS" && !natsUrl) {
     return NextResponse.json({ error: "NATS URL is required for NATS mode" }, { status: 400 });
   }
+
+  // Container clusters: BAREMETAL is the legacy default; CONTAINER swaps in
+  // the supervisord + scp-based playbooks. The type is immutable after create
+  // so we validate it here, not on PATCH.
+  const type = clusterType === "CONTAINER" ? "CONTAINER" : "BAREMETAL";
+  if (type === "CONTAINER" && body.sshBastion === true) {
+    // Bastion mode runs an inline bash script with systemd commands — won't
+    // work in containers, and rewriting it to render the right ansible
+    // invocation under bastion is out of scope for v1.
+    return NextResponse.json(
+      { error: "Bastion mode is not supported for container clusters." },
+      { status: 400 },
+    );
+  }
+  const crossNode = type === "CONTAINER" ? !!allowCrossNodeScheduling : false;
 
   // Validate SSH key exists
   if (sshKeyId) {
@@ -104,6 +119,8 @@ export async function POST(req: NextRequest) {
         config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
         installToken,
         installTokenExpiresAt,
+        clusterType: type,
+        allowCrossNodeScheduling: crossNode,
         ...(sshKeyId ? { sshKeyId } : {}),
       },
     });
@@ -112,7 +129,7 @@ export async function POST(req: NextRequest) {
       action: "cluster.create",
       entity: "Cluster",
       entityId: cluster.id,
-      metadata: { name, controllerHost, connectionMode: mode },
+      metadata: { name, controllerHost, connectionMode: mode, clusterType: type, allowCrossNodeScheduling: crossNode },
     });
 
     return NextResponse.json(cluster, { status: 201 });

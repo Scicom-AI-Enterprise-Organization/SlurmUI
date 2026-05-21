@@ -5,7 +5,16 @@ import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
+import {
+  addNodePlaybook,
+  containerExtraVars,
+  isContainerCluster,
+} from "@/lib/container-cluster";
 import { randomUUID } from "crypto";
+import { spawn } from "child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -23,6 +32,145 @@ async function finishTask(taskId: string, success: boolean) {
     where: { id: taskId },
     data: { status: success ? "success" : "failed", completedAt: new Date() },
   });
+}
+
+interface HostEntry {
+  hostname: string;
+  ip: string;
+  user?: string;
+  port?: number;
+}
+
+// Container add-node: instead of the inline systemd/munge bash script, we
+// shell out to ansible-playbook add_node_container.yml. The inventory has
+// to include the controller, every existing worker (so the playbook can
+// push the refreshed slurm.conf), and the new target node.
+function runContainerAddNode(
+  taskId: string,
+  clusterId: string,
+  cluster: any,
+  config: Record<string, unknown>,
+  target: { nodeName: string; ip: string; sshUser: string; sshPort: number },
+): void {
+  const playbookDir = process.env.ANSIBLE_PLAYBOOKS_DIR ?? "/opt/aura/ansible";
+  const playbookFile = addNodePlaybook(cluster);
+
+  // Merge in the container extras + the new-node target so the playbook's
+  // `hosts: "{{ target_node }}"` directive resolves to our worker.
+  const mergedConfig: Record<string, unknown> = {
+    ...config,
+    ...containerExtraVars(cluster),
+    target_node: target.nodeName,
+  };
+  if (process.env.AURA_AGENT_BINARY_SRC) {
+    mergedConfig.aura_agent_binary_src = process.env.AURA_AGENT_BINARY_SRC;
+  }
+
+  let tmpDir: string | null = null;
+  try {
+    tmpDir = mkdtempSync(join(tmpdir(), "aura-add-node-"));
+    const inventoryPath = join(tmpDir, "inventory.ini");
+    const configPath = join(tmpDir, "cluster-config.json");
+
+    let sshKeyFile: string | undefined;
+    if (cluster.sshKey) {
+      sshKeyFile = join(tmpDir, "ssh_key");
+      writeFileSync(sshKeyFile, cluster.sshKey.privateKey, { mode: 0o600 });
+    }
+    const keyArg = sshKeyFile ? ` ansible_ssh_private_key_file=${sshKeyFile}` : "";
+    const proxyArg = cluster.sshProxyCommand && cluster.sshProxyCommand.trim()
+      ? ` ansible_ssh_common_args='-o ProxyCommand="${String(cluster.sshProxyCommand).replace(/'/g, "'\\''")}"'`
+      : "";
+
+    // Build the same controller line bootstrap uses, then list every existing
+    // worker entry plus the new target. We exclude the controller from the
+    // worker block to avoid the single-VM self-mount foot-gun.
+    const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
+    const controllerLine = `${cluster.controllerHost} ansible_host=${cluster.controllerHost} ansible_user=${cluster.sshUser} ansible_port=${cluster.sshPort} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
+    const workerLines = hostsEntries
+      .filter((h) => h.hostname !== cluster.controllerHost && h.ip !== cluster.controllerHost)
+      .map((h) => `${h.hostname} ansible_host=${h.ip} ansible_user=${h.user || cluster.sshUser} ansible_port=${h.port || 22} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`)
+      .join("\n");
+
+    writeFileSync(
+      inventoryPath,
+      `[slurm_controllers]\n${controllerLine}\n\n[slurm_workers]\n${workerLines}\n\n[slurm:children]\nslurm_controllers\nslurm_workers\n`,
+    );
+    writeFileSync(configPath, JSON.stringify(mergedConfig, null, 2));
+
+    appendLog(taskId, `[aura] Adding container worker: ${target.nodeName} (${target.ip})`);
+    appendLog(taskId, `[aura] Running: ansible-playbook ${playbookFile}`);
+    appendLog(taskId, "");
+
+    const proc = spawn(
+      "ansible-playbook",
+      [
+        "-i", inventoryPath,
+        "-e", `@${configPath}`,
+        "--diff",
+        join(playbookDir, playbookFile),
+      ],
+      {
+        env: {
+          ...process.env,
+          ANSIBLE_FORCE_COLOR: "0",
+          ANSIBLE_NOCOLOR: "1",
+          ANSIBLE_HOST_KEY_CHECKING: "False",
+        },
+      },
+    );
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().split("\n")) {
+        if (line) appendLog(taskId, line);
+      }
+    });
+    proc.stderr.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().split("\n")) {
+        if (line) appendLog(taskId, `[stderr] ${line}`);
+      }
+    });
+
+    proc.on("close", async (code) => {
+      const success = code === 0;
+      if (success) {
+        await appendLog(taskId, "\n[aura] Container worker added successfully.");
+        logAudit({
+          action: "node.add",
+          entity: "Cluster",
+          entityId: clusterId,
+          metadata: { nodeName: target.nodeName, ip: target.ip, mode: "ansible-container" },
+        });
+        try {
+          const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
+          if (fresh) {
+            const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+            const list = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown>>;
+            const i = list.findIndex((n) => n.expression === target.nodeName || n.name === target.nodeName);
+            if (i >= 0) {
+              list[i] = { ...list[i], deployed: true };
+              cfg.slurm_nodes = list;
+              await prisma.cluster.update({ where: { id: clusterId }, data: { config: cfg as any } });
+            }
+          }
+        } catch {}
+      } else {
+        await appendLog(taskId, `\n[aura] ansible-playbook exited with code ${code}`);
+      }
+      await finishTask(taskId, success);
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    proc.on("error", async (err) => {
+      await appendLog(taskId, `[aura] Failed to start: ${err.message}`);
+      await finishTask(taskId, false);
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    });
+  } catch (err) {
+    appendLog(taskId, `[aura] Error: ${err instanceof Error ? err.message : "Unknown"}`);
+    finishTask(taskId, false);
+    if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+  }
 }
 
 // POST /api/clusters/[id]/nodes/add
@@ -90,6 +238,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     where: { id },
     data: { config: config as any },
   });
+
+  // Container clusters run add_node_container.yml via ansible-playbook —
+  // the inline SSH bash script below has systemctl + apt postinst paths
+  // that don't apply in containers. We handle it here, regardless of
+  // connectionMode, so both NATS and SSH container clusters take this path.
+  if (isContainerCluster(cluster)) {
+    if (!cluster.sshKey) {
+      return NextResponse.json({ error: "No SSH key assigned" }, { status: 412 });
+    }
+    const task = await prisma.backgroundTask.create({
+      data: { clusterId: id, type: "add_node" },
+    });
+    runContainerAddNode(task.id, id, cluster, config, {
+      nodeName,
+      ip,
+      sshUser: sshUser || "root",
+      sshPort: sshPort || 22,
+    });
+    return NextResponse.json({ taskId: task.id });
+  }
 
   // SSH mode: run in background
   if (cluster.connectionMode === "SSH") {

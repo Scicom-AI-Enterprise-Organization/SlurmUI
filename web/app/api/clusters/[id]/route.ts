@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { redactConfig } from "@/lib/redact-config";
 import { probeClusterHealth, effectiveClusterStatus } from "@/lib/cluster-health";
+import { isContainerCluster } from "@/lib/container-cluster";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -62,11 +63,19 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 
   const body = await req.json();
-  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
+  const { name, controllerHost, status, config, sshUser, sshPort, sshBastion, sshKeyId, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand, allowCrossNodeScheduling } = body;
 
   const VALID_STATUSES = ["PROVISIONING", "ACTIVE", "DEGRADED", "OFFLINE", "ERROR"];
   if (status && !VALID_STATUSES.includes(status)) {
     return NextResponse.json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` }, { status: 400 });
+  }
+
+  // clusterType is immutable post-create — refuse any attempt to change it.
+  if (body.clusterType !== undefined) {
+    return NextResponse.json(
+      { error: "clusterType is set on create and cannot be changed. Recreate the cluster with the desired type." },
+      { status: 400 },
+    );
   }
 
   if (sshKeyId) {
@@ -76,6 +85,16 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
+
+  // allowCrossNodeScheduling is only meaningful for CONTAINER clusters. We
+  // allow setting it on baremetal too (it stays false), but reject explicit
+  // attempts to enable it there so the user knows the toggle has no effect.
+  if (allowCrossNodeScheduling !== undefined && allowCrossNodeScheduling && cluster.clusterType !== "CONTAINER") {
+    return NextResponse.json(
+      { error: "allowCrossNodeScheduling only applies to container clusters." },
+      { status: 400 },
+    );
+  }
 
   // Merge config fields into existing config instead of replacing
   let mergedConfig = undefined;
@@ -109,8 +128,33 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       ...(sshJumpHost === undefined && sshJumpKeyId !== undefined && { sshJumpKeyId: sshJumpKeyId || null }),
       ...(sshProxyCommand !== undefined && { sshProxyCommand: sshProxyCommand || null }),
       ...(sshJumpProxyCommand !== undefined && { sshJumpProxyCommand: sshJumpProxyCommand || null }),
+      ...(allowCrossNodeScheduling !== undefined && { allowCrossNodeScheduling: !!allowCrossNodeScheduling }),
     },
   });
+
+  // When the cross-node toggle flips on a live container cluster, re-render
+  // slurm.conf with (or without) MaxNodes=1 and push it to every worker.
+  // POST /api/clusters/[id]/config is the canonical entry point — call it
+  // by hitting the same path internally so the propagate logic stays in
+  // one place.
+  if (
+    allowCrossNodeScheduling !== undefined
+    && cluster.allowCrossNodeScheduling !== !!allowCrossNodeScheduling
+    && isContainerCluster(updated)
+  ) {
+    try {
+      const propagateUrl = new URL(`/api/clusters/${id}/config`, req.url);
+      // Fire-and-forget; the propagate playbook can take minutes and we
+      // don't want to block the PATCH response on it.
+      fetch(propagateUrl.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie: req.headers.get("cookie") ?? "" },
+        body: JSON.stringify({ config: updated.config }),
+      }).catch((e) => console.error("[cluster PATCH] propagate kick-off failed:", e));
+    } catch (e) {
+      console.error("[cluster PATCH] failed to dispatch propagate:", e);
+    }
+  }
 
   return NextResponse.json(updated);
 }

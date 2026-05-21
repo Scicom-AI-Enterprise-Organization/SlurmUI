@@ -4,7 +4,16 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
 import { sshExecScript } from "@/lib/ssh-exec";
+import {
+  containerExtraVars,
+  isContainerCluster,
+  teardownPlaybook,
+} from "@/lib/container-cluster";
 import { randomUUID } from "crypto";
+import { spawn } from "child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -194,6 +203,124 @@ echo "============================================"
 `;
 }
 
+// Stream output from a spawned ansible-playbook process as Server-Sent
+// Events. Used by the container teardown path — the response semantics
+// match the SSH-mode SSE stream below so the UI doesn't need to branch.
+function streamAnsiblePlaybook(
+  cluster: any,
+  config: Record<string, unknown>,
+  playbookFile: string,
+): Response {
+  const playbookDir = process.env.ANSIBLE_PLAYBOOKS_DIR ?? "/opt/aura/ansible";
+  const enc = new TextEncoder();
+  const mergedConfig = { ...config, ...containerExtraVars(cluster) };
+
+  let tmpDir: string | null = null;
+  let seq = 0;
+
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (data: object) => {
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {}
+      };
+      const sendLine = (line: string) => send({ type: "stream", line, seq: seq++ });
+
+      try {
+        tmpDir = mkdtempSync(join(tmpdir(), "aura-teardown-"));
+        const inventoryPath = join(tmpDir, "inventory.ini");
+        const configPath = join(tmpDir, "cluster-config.json");
+
+        let sshKeyFile: string | undefined;
+        if (cluster.sshKey) {
+          sshKeyFile = join(tmpDir, "ssh_key");
+          writeFileSync(sshKeyFile, cluster.sshKey.privateKey, { mode: 0o600 });
+        }
+        const keyArg = sshKeyFile ? ` ansible_ssh_private_key_file=${sshKeyFile}` : "";
+        const proxyArg = cluster.sshProxyCommand && cluster.sshProxyCommand.trim()
+          ? ` ansible_ssh_common_args='-o ProxyCommand="${String(cluster.sshProxyCommand).replace(/'/g, "'\\''")}"'`
+          : "";
+
+        const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
+        const controllerLine = `${cluster.controllerHost} ansible_host=${cluster.controllerHost} ansible_user=${cluster.sshUser} ansible_port=${cluster.sshPort} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
+        const workerLines = hostsEntries
+          .filter((h) => h.hostname !== cluster.controllerHost && h.ip !== cluster.controllerHost)
+          .map((h: any) => `${h.hostname} ansible_host=${h.ip} ansible_user=${h.user || cluster.sshUser} ansible_port=${h.port || 22} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`)
+          .join("\n");
+
+        writeFileSync(
+          inventoryPath,
+          `[slurm_controllers]\n${controllerLine}\n\n[slurm_workers]\n${workerLines}\n\n[slurm:children]\nslurm_controllers\nslurm_workers\n`,
+        );
+        writeFileSync(configPath, JSON.stringify(mergedConfig, null, 2));
+
+        sendLine(`[ansible] Running ${playbookFile}`);
+
+        const proc = spawn(
+          "ansible-playbook",
+          [
+            "-i", inventoryPath,
+            "-e", `@${configPath}`,
+            "--diff",
+            join(playbookDir, playbookFile),
+          ],
+          {
+            env: {
+              ...process.env,
+              ANSIBLE_FORCE_COLOR: "0",
+              ANSIBLE_NOCOLOR: "1",
+              ANSIBLE_HOST_KEY_CHECKING: "False",
+            },
+          },
+        );
+
+        proc.stdout.on("data", (chunk: Buffer) => {
+          for (const line of chunk.toString().split("\n")) {
+            if (line) sendLine(line);
+          }
+        });
+        proc.stderr.on("data", (chunk: Buffer) => {
+          for (const line of chunk.toString().split("\n")) {
+            if (line) sendLine(`[stderr] ${line}`);
+          }
+        });
+        proc.on("close", (code) => {
+          const success = code === 0;
+          send({
+            type: "complete",
+            success,
+            payload: {
+              exitCode: code,
+              ...(success ? {} : { error: `ansible-playbook exited with code ${code}` }),
+            },
+          });
+          if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+          controller.close();
+        });
+        proc.on("error", (err) => {
+          send({ type: "complete", success: false, payload: { error: err.message } });
+          if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+          controller.close();
+        });
+      } catch (err) {
+        send({ type: "complete", success: false, payload: { error: err instanceof Error ? err.message : "Unknown" } });
+        if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+      Connection: "keep-alive",
+    },
+  });
+}
+
 export async function POST(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   const session = await auth();
@@ -214,6 +341,23 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   const sshPrivateKey = cluster.sshKey
     ? Buffer.from(cluster.sshKey.privateKey).toString("base64")
     : "";
+
+  // Container clusters: run teardown_container.yml via ansible-playbook,
+  // streaming output via SSE so the UI's existing stream client works
+  // unchanged. The legacy SSH inline-bash teardown only handles systemd
+  // and would no-op in a container.
+  if (isContainerCluster(cluster)) {
+    if (!cluster.sshKey) {
+      return NextResponse.json({ error: "No SSH key assigned" }, { status: 412 });
+    }
+    logAudit({
+      action: "cluster.teardown",
+      entity: "Cluster",
+      entityId: id,
+      metadata: { name: cluster.name, mode: "ansible-container" },
+    });
+    return streamAnsiblePlaybook(cluster, clusterConfig, teardownPlaybook(cluster));
+  }
 
   // SSH mode: run teardown directly via SSH and stream output
   if (cluster.connectionMode === "SSH") {
