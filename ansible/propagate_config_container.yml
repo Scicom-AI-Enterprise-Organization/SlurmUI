@@ -1,0 +1,100 @@
+---
+# Re-render slurm.conf on the controller and push it onto every worker.
+# Used when the user toggles `allowCrossNodeScheduling`, edits partitions,
+# or otherwise changes anything the slurm.conf template depends on.
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e is_container_cluster=true \
+#     -e allow_cross_node_scheduling=true \
+#     propagate_config_container.yml
+
+- name: Re-render slurm.conf on controller
+  hosts: slurm_controllers
+  become: true
+  vars:
+    is_container_cluster: true
+  tasks:
+    - name: Write refreshed slurm.conf
+      ansible.builtin.template:
+        src: roles/slurm_controller/templates/slurm.conf.j2
+        dest: "{{ slurm_config_dir }}/slurm.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+    - name: Re-render cgroup.conf
+      ansible.builtin.template:
+        src: roles/slurm_controller/templates/cgroup.conf.j2
+        dest: "{{ slurm_config_dir }}/cgroup.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+    - name: Re-render gres.conf (GPU nodes only)
+      ansible.builtin.template:
+        src: roles/slurm_controller/templates/gres.conf.j2
+        dest: "{{ slurm_config_dir }}/gres.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+      when: (slurm_nodes | selectattr('gpus', 'defined') | selectattr('gpus', 'gt', 0) | list | length) > 0
+    - name: Stage slurm.conf for workers
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/slurm.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/slurm.conf"
+        flat: true
+    - name: Stage cgroup.conf for workers
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/cgroup.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/cgroup.conf"
+        flat: true
+    - name: Stage gres.conf for workers (when present)
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/gres.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/gres.conf"
+        flat: true
+      ignore_errors: true
+
+- name: Push refreshed slurm config to every worker
+  hosts: slurm_workers
+  become: true
+  vars:
+    is_container_cluster: true
+  tasks:
+    - name: Push slurm.conf
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/slurm.conf"
+        dest: "{{ slurm_config_dir }}/slurm.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+      notify: restart slurmd
+    - name: Push cgroup.conf
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/cgroup.conf"
+        dest: "{{ slurm_config_dir }}/cgroup.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+      notify: restart slurmd
+    - name: Push gres.conf
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/gres.conf"
+        dest: "{{ slurm_config_dir }}/gres.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+      ignore_errors: true
+      notify: restart slurmd
+  handlers:
+    - name: restart slurmd
+      ansible.builtin.command: supervisorctl restart slurmd
+      changed_when: true
+
+- name: scontrol reconfigure to apply changes live
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: scontrol reconfigure
+      ansible.builtin.command: scontrol reconfigure
+      changed_when: true

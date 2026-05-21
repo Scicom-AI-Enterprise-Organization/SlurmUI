@@ -1,0 +1,136 @@
+---
+# Bootstrap a container-mode Slurm cluster.
+#
+# Functional equivalent of bootstrap.yml but tailored for environments
+# without systemd or kernel NFS (RunPod, vast.ai, in-house Docker/k8s pods
+# exposed via SSH). Differences from baremetal bootstrap.yml:
+#   * supervisord replaces systemd
+#   * No mgmt NFS — slurm.conf / munge.key are fetched off the controller
+#     to the Ansible control machine, then copied onto each worker
+#   * chrony is skipped (host's responsibility inside containers)
+#   * Data NFS is optional and client-only (external server)
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e is_container_cluster=true \
+#     -e allow_cross_node_scheduling=false \
+#     bootstrap_container.yml
+#
+# Required vars (via cluster-config.json):
+#   slurm_cluster_name, slurm_controller_host,
+#   slurm_nodes, slurm_partitions, slurm_hosts_entries,
+#   aura_agent_nats_url, aura_agent_binary_src (NATS mode only),
+#   data_nfs_server, data_nfs_path (optional external data NFS)
+
+- name: Bootstrap controller container
+  hosts: slurm_controllers
+  become: true
+  vars:
+    is_container_cluster: true
+  roles:
+    - common
+    - supervisord
+    - hosts_block
+    - munge_container
+    - slurm_controller_container
+    - role: aura_agent_container
+      when: aura_agent_binary_src is defined and (aura_agent_binary_src | length > 0)
+  post_tasks:
+    - name: Reload supervisord conf so every newly-dropped program starts
+      ansible.builtin.shell: |
+        supervisorctl reread
+        supervisorctl update
+      changed_when: false
+
+# Fetch the controller's munge.key and slurm.conf onto the Ansible control
+# machine, then we'll push them onto every worker in the next play. This
+# is the NFS-replacement path used by the entire container flow.
+- name: Stage controller config locally for worker push
+  hosts: slurm_controllers
+  become: true
+  tasks:
+    - name: Fetch munge.key off controller
+      ansible.builtin.fetch:
+        src: /etc/munge/munge.key
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/munge.key"
+        flat: true
+    - name: Fetch slurm.conf off controller
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/slurm.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/slurm.conf"
+        flat: true
+    - name: Fetch cgroup.conf off controller
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/cgroup.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/cgroup.conf"
+        flat: true
+    - name: Fetch gres.conf off controller (when present)
+      ansible.builtin.fetch:
+        src: "{{ slurm_config_dir }}/gres.conf"
+        dest: "/tmp/aura-stage/{{ slurm_cluster_name }}/gres.conf"
+        flat: true
+      ignore_errors: true
+
+- name: Bootstrap worker containers
+  hosts: slurm_workers
+  become: true
+  vars:
+    is_container_cluster: true
+  pre_tasks:
+    - name: Ensure /etc/munge exists with correct ownership
+      ansible.builtin.file:
+        path: /etc/munge
+        state: directory
+        owner: "{{ munge_user }}"
+        group: "{{ munge_group }}"
+        mode: '0711'
+    - name: Push munge.key to worker
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/munge.key"
+        dest: /etc/munge/munge.key
+        owner: "{{ munge_user }}"
+        group: "{{ munge_group }}"
+        mode: '0400'
+    - name: Ensure /etc/slurm exists
+      ansible.builtin.file:
+        path: "{{ slurm_config_dir }}"
+        state: directory
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0755'
+    - name: Push slurm.conf to worker
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/slurm.conf"
+        dest: "{{ slurm_config_dir }}/slurm.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+    - name: Push cgroup.conf to worker
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/cgroup.conf"
+        dest: "{{ slurm_config_dir }}/cgroup.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+    - name: Push gres.conf to worker (when present on controller)
+      ansible.builtin.copy:
+        src: "/tmp/aura-stage/{{ slurm_cluster_name }}/gres.conf"
+        dest: "{{ slurm_config_dir }}/gres.conf"
+        owner: "{{ slurm_user }}"
+        group: "{{ slurm_group }}"
+        mode: '0644'
+      ignore_errors: true
+  roles:
+    - common
+    - supervisord
+    - nfs_client_container
+    - hosts_block
+    - munge_container
+    - slurm_worker_container
+  post_tasks:
+    - name: Reload supervisord conf so slurmd / munged actually start
+      ansible.builtin.shell: |
+        supervisorctl reread
+        supervisorctl update
+      changed_when: false

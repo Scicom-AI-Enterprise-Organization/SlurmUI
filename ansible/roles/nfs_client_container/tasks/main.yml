@@ -1,0 +1,58 @@
+---
+# Container-mode NFS client. Only mounts the external user-data share —
+# the mgmt share is gone in container mode (it lived inside the controller
+# container, which can't run a kernel NFS server without --privileged).
+#
+# Mount is skipped entirely when `data_nfs_server` is empty or evaluates to
+# the controller host (the default for single-node baremetal bootstraps).
+# The rescue block converts an `ansible.posix.mount` failure — typically
+# caused by missing CAP_SYS_ADMIN on the container — into a non-fatal
+# warning so bootstrap doesn't abort. The web UI surfaces the same warning
+# to the user on the cluster overview page.
+
+- name: Decide whether an external data NFS mount is needed
+  ansible.builtin.set_fact:
+    _container_mount_data_nfs: >-
+      {{ (data_nfs_server | default('') | length > 0)
+         and (data_nfs_server != slurm_controller_host) }}
+
+- name: Install NFS client tooling (when data NFS is configured)
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+    update_cache: true
+  when: _container_mount_data_nfs | bool
+
+- name: Create data mount point
+  ansible.builtin.file:
+    path: "{{ data_nfs_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: _container_mount_data_nfs | bool
+
+- name: Mount external data NFS share
+  block:
+    - name: Mount data FS
+      ansible.posix.mount:
+        path: "{{ data_nfs_path }}"
+        src: "{{ data_nfs_server }}:{{ data_nfs_path }}"
+        fstype: nfs
+        # `noauto` because /etc/fstab + automount-on-boot doesn't apply
+        # inside a container; we mount it now and that's it for this
+        # container's lifetime.
+        opts: "rw,sync,hard,intr,noauto"
+        state: mounted
+  rescue:
+    - name: Capture NFS mount failure for UI surfacing
+      ansible.builtin.set_fact:
+        container_data_nfs_failed: true
+        container_data_nfs_message: >-
+          Could not mount {{ data_nfs_server }}:{{ data_nfs_path }} —
+          the container probably lacks CAP_SYS_ADMIN. Job output will
+          be local to each node.
+    - name: Warn loudly so the bootstrap log makes the cause obvious
+      ansible.builtin.debug:
+        msg: "{{ container_data_nfs_message }}"
+  when: _container_mount_data_nfs | bool

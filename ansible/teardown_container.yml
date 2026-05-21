@@ -1,0 +1,110 @@
+---
+# Tear down a container-mode Slurm cluster.
+#
+# Stops every supervisord-managed Aura process, removes the conf snippets,
+# and leaves the container's base OS otherwise untouched (we never installed
+# anything we couldn't safely leave behind, and apt-removing in a container
+# you don't own is rude).
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini \
+#     -e @cluster-config.json \
+#     -e is_container_cluster=true \
+#     teardown_container.yml
+
+- name: Stop Slurm + munge on workers
+  hosts: slurm_workers
+  become: true
+  ignore_errors: true
+  tasks:
+    - name: Stop slurmd
+      ansible.builtin.command: supervisorctl stop slurmd
+      changed_when: true
+      failed_when: false
+    - name: Stop munged
+      ansible.builtin.command: supervisorctl stop munged
+      changed_when: true
+      failed_when: false
+    - name: Remove worker supervisord confs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/supervisor/conf.d/slurmd.conf
+        - /etc/supervisor/conf.d/munged.conf
+    - name: Remove worker slurm + munge config
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/slurm/slurm.conf
+        - /etc/slurm/cgroup.conf
+        - /etc/slurm/gres.conf
+        - /etc/munge/munge.key
+    - name: Reload supervisord conf so the stopped programs disappear
+      ansible.builtin.shell: |
+        supervisorctl reread
+        supervisorctl update
+      changed_when: false
+      failed_when: false
+
+- name: Stop Slurm + munge + aura-agent on controller
+  hosts: slurm_controllers
+  become: true
+  ignore_errors: true
+  tasks:
+    - name: Stop aura-agent (NATS mode)
+      ansible.builtin.command: supervisorctl stop aura-agent
+      changed_when: true
+      failed_when: false
+    - name: Stop slurmctld
+      ansible.builtin.command: supervisorctl stop slurmctld
+      changed_when: true
+      failed_when: false
+    - name: Stop slurmd (controller's own)
+      ansible.builtin.command: supervisorctl stop slurmd
+      changed_when: true
+      failed_when: false
+    - name: Stop slurmdbd
+      ansible.builtin.command: supervisorctl stop slurmdbd
+      changed_when: true
+      failed_when: false
+    - name: Stop munged
+      ansible.builtin.command: supervisorctl stop munged
+      changed_when: true
+      failed_when: false
+    - name: Remove controller supervisord confs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/supervisor/conf.d/aura-agent.conf
+        - /etc/supervisor/conf.d/slurmctld.conf
+        - /etc/supervisor/conf.d/slurmd.conf
+        - /etc/supervisor/conf.d/slurmdbd.conf
+        - /etc/supervisor/conf.d/mysqld.conf
+        - /etc/supervisor/conf.d/munged.conf
+    - name: Remove controller slurm + munge config
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/slurm/slurm.conf
+        - /etc/slurm/cgroup.conf
+        - /etc/slurm/gres.conf
+        - /etc/slurm/slurmdbd.conf
+        - /etc/munge/munge.key
+    - name: Wipe spool and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ slurm_spool_dir }}/slurmctld"
+        - "{{ slurm_spool_dir }}/slurmd"
+        - "{{ slurm_log_dir }}"
+    - name: Reload supervisord conf so the stopped programs disappear
+      ansible.builtin.shell: |
+        supervisorctl reread
+        supervisorctl update
+      changed_when: false
+      failed_when: false
