@@ -38,17 +38,19 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version }}"
+            ECR_TAG="v${VERSION}"
           else
             SHA="${{ github.event.workflow_run.head_sha }}"
-            VERSION=$(git tag --points-at "$SHA" | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-            if [ -z "$VERSION" ]; then
-              echo "No release tag on $SHA — semantic-release did not cut one. Skipping."
+            ECR_TAG=$(git tag --points-at "$SHA" | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+            if [ -z "$ECR_TAG" ]; then
+              echo "No release tag on $SHA — skipping."
               echo "skip=true" >> $GITHUB_OUTPUT
               exit 0
             fi
+            VERSION="${ECR_TAG#v}"
           fi
-          VERSION="${VERSION#v}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "ecr_tag=$ECR_TAG" >> $GITHUB_OUTPUT
           echo "skip=false" >> $GITHUB_OUTPUT
 
       - name: Install skopeo
@@ -85,10 +87,11 @@ jobs:
           CCE_REGISTRY:   ${{ secrets.CCE_REGISTRY }}
           CCE_REPOSITORY: ${{ secrets.CCE_REPOSITORY }}
           VERSION:        ${{ steps.ver.outputs.version }}
+          ECR_TAG:        ${{ steps.ver.outputs.ecr_tag }}
         run: |
           skopeo copy --format v2s2 \
-            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$VERSION-amd64 \
+            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG-amd64 \
             docker://$CCE_REGISTRY/$CCE_REPOSITORY:$VERSION
           skopeo copy --format v2s2 \
-            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$VERSION-amd64 \
+            docker://$ECR_REGISTRY/$ECR_REPOSITORY:$ECR_TAG-amd64 \
             docker://$CCE_REGISTRY/$CCE_REPOSITORY:latest
