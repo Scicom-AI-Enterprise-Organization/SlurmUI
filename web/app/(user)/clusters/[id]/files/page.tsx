@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeEditor } from "@/components/ui/code-editor";
 import {
   Dialog,
   DialogContent,
@@ -63,6 +63,11 @@ export default function FilesPage() {
   const [editContent, setEditContent] = useState("");
   const [editLoading, setEditLoading] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  // Timestamp of the most recent successful save — used to show a brief
+  // "Saved" indicator without closing the dialog (so Ctrl/Cmd+S keeps you
+  // in the editor instead of yanking you back to the file list).
+  const [editSavedAt, setEditSavedAt] = useState<number | null>(null);
 
   // Upload
   const [uploading, setUploading] = useState(false);
@@ -210,14 +215,20 @@ export default function FilesPage() {
 
   const closeEditDialog = () => {
     setEditOpen(false);
-    writeUrlState({ path, root: rootId });
+    setEditError(null);
+    setEditSavedAt(null);
+    // Refresh the directory listing now that we're back in the file browser —
+    // catches any size/timestamp updates from the in-dialog saves we kept
+    // silent. writeUrlState happens inside load(), so don't double up here.
+    load(path, rootId);
   };
 
   const saveFile = async () => {
     if (!editPath.trim()) {
-      toast.error("Path is required");
+      setEditError("Path is required");
       return;
     }
+    setEditError(null);
     setEditSaving(true);
     try {
       const res = await fetch(`/api/clusters/${clusterId}/files/write`, {
@@ -227,13 +238,25 @@ export default function FilesPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        toast.error(err.error ?? "Save failed");
+        // Show inline in the dialog instead of a toast — the user is staring
+        // at the editor, the error belongs next to it, and toasts disappear
+        // before they can read a long stderr trace.
+        setEditError(err.error ?? `Save failed (HTTP ${res.status})`);
         return;
       }
-      // load() will rewrite the URL without ?edit/?new, so the dialog
-      // state and URL stay in sync.
-      setEditOpen(false);
-      load(path, rootId);
+      // Stay in the editor on success. Closing on every save makes Ctrl/Cmd+S
+      // a destructive shortcut — users save mid-edit and lose their place.
+      // The directory listing is mildly stale (file size/timestamp) but
+      // refreshes the next time they navigate.
+      setEditError(null);
+      setEditSavedAt(Date.now());
+      // If this was a "new file" save, flip out of new-file mode so the
+      // dialog title and footer button switch from Create → Save.
+      if (editIsNew) {
+        setEditIsNew(false);
+      }
+    } catch (e) {
+      setEditError(`Save request failed: ${(e as Error).message}`);
     } finally {
       setEditSaving(false);
     }
@@ -439,16 +462,16 @@ export default function FilesPage() {
           else closeEditDialog();
         }}
       >
-        <DialogContent className="flex max-h-[90vh] max-w-3xl flex-col">
+        <DialogContent className="flex h-[92vh] max-h-[92vh] w-[95vw] max-w-[1400px] flex-col">
           <DialogHeader>
             <DialogTitle>{editIsNew ? "New file" : `Edit ${editPath.split("/").pop()}`}</DialogTitle>
             <DialogDescription>
               {editIsNew
                 ? "Path is relative to the selected root."
-                : `Saving to ${editPath}`}
+                : `Saving to ${editPath} — press ⌘/Ctrl+S to save`}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex min-h-0 flex-1 flex-col space-y-3 overflow-y-auto">
+          <div className="flex min-h-0 flex-1 flex-col space-y-3">
             {editIsNew && (
               <div className="space-y-1">
                 <Label htmlFor="file-path">Path</Label>
@@ -466,17 +489,41 @@ export default function FilesPage() {
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading file...
               </div>
             ) : (
-              <Textarea
-                className="min-h-[300px] flex-1 resize-none font-mono text-xs"
+              <CodeEditor
+                className="min-h-0 flex-1 overflow-hidden rounded-md border"
                 value={editContent}
-                onChange={(e) => setEditContent(e.target.value)}
+                onChange={(v) => {
+                  setEditContent(v);
+                  // First keystroke after a successful save invalidates the
+                  // "Saved at HH:MM:SS" indicator — the file no longer
+                  // matches what's on disk.
+                  if (editSavedAt) setEditSavedAt(null);
+                  if (editError) setEditError(null);
+                }}
+                filename={editPath}
+                onSave={saveFile}
+                fontSize={12}
                 placeholder={editIsNew ? "#!/bin/bash\n# your script" : ""}
               />
             )}
           </div>
-          <DialogFooter>
+          {editError && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs">
+              <div className="mb-1 font-medium text-destructive">Save failed</div>
+              <pre className="whitespace-pre-wrap break-words font-mono text-destructive">
+                {editError}
+              </pre>
+            </div>
+          )}
+          <DialogFooter className="items-center">
+            {editSavedAt && !editSaving && !editError && (
+              <span className="mr-auto inline-flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+                <Save className="h-3 w-3" />
+                Saved at {new Date(editSavedAt).toLocaleTimeString()}
+              </span>
+            )}
             <DialogClose asChild>
-              <Button variant="outline" disabled={editSaving}>Cancel</Button>
+              <Button variant="outline" disabled={editSaving}>Close</Button>
             </DialogClose>
             <Button onClick={saveFile} disabled={editSaving || editLoading}>
               {editSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}

@@ -83,20 +83,46 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const marker = `__WRITE_${Date.now()}__`;
   const b64Lines = payload.match(/.{1,76}/g) ?? [payload];
   const catBlock = b64Lines.map((l: string) => `echo "${l}"`).join("\n");
+  // Capture stderr from mkdir and the base64 redirect so the user sees the
+  // actual reason a write failed ("Permission denied", "Read-only file
+  // system", "No such file or directory" — the typical NFS/mount errors).
+  // Previously the script just echoed "FAIL" on failure and stderr was
+  // dropped, leaving the UI with a useless "Write failed".
   const script = `#!/bin/bash
 set +e
 echo "${marker}_START"
-mkdir -p "$(dirname ${JSON.stringify(abs)})" 2>/dev/null
-(
+MKDIR_ERR=$(mkdir -p "$(dirname ${JSON.stringify(abs)})" 2>&1)
+MKDIR_RC=$?
+if [ $MKDIR_RC -ne 0 ]; then
+  echo "FAIL"
+  echo "mkdir: $MKDIR_ERR"
+  echo "${marker}_END"
+  exit 0
+fi
+WRITE_ERR=$( ( (
 ${catBlock}
-) | base64 -d > ${JSON.stringify(abs)} && echo "OK" || echo "FAIL"
+) | base64 -d > ${JSON.stringify(abs)} ) 2>&1 )
+WRITE_RC=$?
+if [ $WRITE_RC -eq 0 ]; then
+  echo "OK"
+else
+  echo "FAIL"
+  echo "$WRITE_ERR"
+  # Extra context that's almost always what's wrong with mount-based writes.
+  echo "--- filesystem context for ${JSON.stringify(abs)} ---"
+  PARENT=$(dirname ${JSON.stringify(abs)})
+  echo "parent dir: $PARENT"
+  ls -ld "$PARENT" 2>&1
+  df -h "$PARENT" 2>&1 | tail -1
+fi
 echo "${marker}_END"
 `;
 
   const chunks: string[] = [];
   await new Promise<void>((resolve) => {
     sshExecScript(target, script, {
-      onStream: (line) => { if (!line.startsWith("[stderr]")) chunks.push(line); },
+      // Keep stderr too — most "Write failed" diagnostics live there.
+      onStream: (line) => chunks.push(line),
       onComplete: () => resolve(),
     });
   });
@@ -108,7 +134,12 @@ echo "${marker}_END"
     : full.trim();
 
   if (!out.includes("OK")) {
-    return NextResponse.json({ error: "Write failed", detail: out }, { status: 500 });
+    // Strip the "FAIL" marker line so the visible message is just the cause.
+    const detail = out.replace(/^FAIL\s*/m, "").trim();
+    return NextResponse.json({
+      error: detail || "Write failed (no error detail captured)",
+      detail,
+    }, { status: 500 });
   }
   return NextResponse.json({ ok: true, path: abs, bytes: bytesLen });
 }

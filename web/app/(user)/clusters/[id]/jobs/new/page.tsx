@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScriptEditor } from "@/components/jobs/script-editor";
+import { CodeEditor } from "@/components/ui/code-editor";
 import { toast } from "sonner";
 import { Send, Sparkles, ChevronDown, X, Check, AlertTriangle, Info, ServerCrash } from "lucide-react";
 
@@ -1262,22 +1263,27 @@ export default function NewJobPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="command">Command</Label>
-                <Textarea
-                  id="command"
-                  placeholder={`vllm serve your-model \\\n  --tensor-parallel-size 2`}
-                  rows={10}
-                  className="font-mono text-sm"
+                <CodeEditor
+                  className="h-[420px] overflow-hidden rounded-md border"
                   value={command}
-                  onChange={(e) => setCommand(e.target.value)}
+                  onChange={setCommand}
+                  filename="cmd.sh"
+                  fontSize={12}
+                  placeholder={"vllm serve your-model \\\n  --tensor-parallel-size 2"}
                 />
               </div>
 
               {command && (
                 <div className="space-y-2">
                   <Label className="text-xs text-muted-foreground">Preview</Label>
-                  <pre className="rounded-md border bg-muted p-3 text-xs font-mono overflow-x-auto">
-                    {buildScriptFromForm()}
-                  </pre>
+                  <CodeEditor
+                    className="h-[280px] overflow-hidden rounded-md border"
+                    value={buildScriptFromForm()}
+                    onChange={() => {}}
+                    filename="job.sh"
+                    fontSize={12}
+                    readOnly
+                  />
                 </div>
               )}
             </TabsContent>

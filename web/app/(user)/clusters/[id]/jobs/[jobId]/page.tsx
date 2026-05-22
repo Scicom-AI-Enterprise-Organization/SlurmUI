@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { XCircle, RefreshCw, RotateCw, Repeat2, Pencil, X } from "lucide-react";
-import { Textarea } from "@/components/ui/textarea";
+import { CodeEditor } from "@/components/ui/code-editor";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 import { ErrorExplainer } from "@/components/jobs/error-explainer";
 import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
@@ -801,18 +801,14 @@ export default function JobDetailPage() {
             </div>
           )}
         </div>
-        {editingScript ? (
-          <Textarea
-            value={editedScript}
-            onChange={(e) => setEditedScript(e.target.value)}
-            spellCheck={false}
-            className="min-h-64 font-mono text-sm"
-          />
-        ) : (
-          <ScrollArea className="h-64 rounded-md border">
-            <pre className="p-4 font-mono text-sm">{job.script}</pre>
-          </ScrollArea>
-        )}
+        <CodeEditor
+          className="h-64 overflow-hidden rounded-md border"
+          value={editingScript ? editedScript : (job.script ?? "")}
+          onChange={editingScript ? setEditedScript : () => {}}
+          filename="job.sh"
+          fontSize={12}
+          readOnly={!editingScript}
+        />
       </div>
 
       {/* Confirm cancel dialog */}

@@ -7,6 +7,13 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+interface HostEntry {
+  hostname: string;
+  ip: string;
+  user?: string;
+  port?: number;
+}
+
 // POST /api/clusters/[id]/storage/test — test NFS/S3 connectivity via SSH
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
@@ -24,7 +31,16 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   if (!cluster.sshKey) return NextResponse.json({ error: "No SSH key" }, { status: 412 });
 
   const body = await req.json();
-  const { type, nfsServer, nfsPath, s3Bucket, s3Endpoint, s3AccessKey, s3SecretKey, s3Region } = body;
+  const {
+    type,
+    nfsServer,
+    nfsPath,
+    s3Bucket,
+    s3Endpoint,
+    s3AccessKey,
+    s3SecretKey,
+    s3Region,
+  } = body;
 
   const target = {
     host: cluster.controllerHost,
@@ -38,21 +54,48 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const marker = `__AURA_TEST_${Date.now()}__`;
 
   if (type === "nfs") {
-    script = `#!/bin/bash
+    // Probe the NFS server FROM EVERY CLUSTER NODE — one node having
+    // connectivity from the controller doesn't mean the workers can reach
+    // it (firewall rules, separate subnets, etc.). For each node we run
+    // a TCP 2049 probe (and ping as a fallback diagnostic) over SSH and
+    // emit a `RESULT|<hostname>|<ok|fail>|<detail>` line for the upstream
+    // parser to aggregate.
+    const config = cluster.config as Record<string, unknown>;
+    const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
+    if (hostsEntries.length === 0) {
+      // No nodes registered yet — fall back to a controller-side probe so
+      // the user at least gets a signal during early bootstrap.
+      script = `#!/bin/bash
 echo "${marker}_START"
-
-# Simple reachability check: ping (ICMP) then fallback to TCP port 2049
-if ping -c 2 -W 3 ${nfsServer} > /dev/null 2>&1; then
-  echo "RESULT_OK"
-elif (echo > /dev/tcp/${nfsServer}/2049) 2>/dev/null; then
-  echo "RESULT_OK"
+if (echo > /dev/tcp/${nfsServer}/2049) 2>/dev/null; then
+  echo "RESULT|controller|ok|TCP 2049 reachable"
 else
-  echo "RESULT_FAIL"
-  echo "NFS server ${nfsServer} is not reachable"
+  echo "RESULT|controller|fail|Cannot reach ${nfsServer}:2049 from controller"
 fi
-
 echo "${marker}_END"
 `;
+    } else {
+      const probeBlock = hostsEntries.map((h) => {
+        const u = h.user || "root";
+        const p = h.port || 22;
+        // Per-node script: TCP 2049 probe via /dev/tcp, ping as additional
+        // diagnostic when 2049 fails. Quote-safe single-line shell.
+        const remote = `if (echo > /dev/tcp/${nfsServer}/2049) 2>/dev/null; then echo "ok|TCP 2049 reachable"; elif ping -c 1 -W 2 ${nfsServer} >/dev/null 2>&1; then echo "fail|Host pingable but TCP 2049 closed (NFS not running?)"; else echo "fail|Cannot reach ${nfsServer} (no ICMP, no TCP 2049)"; fi`;
+        return `
+LINE=$(ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${h.ip} '${remote}' 2>&1)
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo "RESULT|${h.hostname}|fail|ssh into ${h.ip} failed (rc=$RC): $(echo "$LINE" | head -1)"
+else
+  echo "RESULT|${h.hostname}|$LINE"
+fi`;
+      }).join("\n");
+      script = `#!/bin/bash
+echo "${marker}_START"
+${probeBlock}
+echo "${marker}_END"
+`;
+    }
   } else {
     // S3: validate credentials by making a signed HEAD request to the bucket.
     // Use python's hmac/hashlib which is always available, no extra packages needed.
@@ -180,15 +223,52 @@ echo "${marker}_END"
   const body_output = full.slice(startIdx + `${marker}_START`.length, endIdx).replace(/\r/g, "").trim();
   const lines = body_output.split("\n").filter(Boolean);
 
-  // Find the RESULT_OK or RESULT_FAIL line (may be preceded by warnings/noise)
+  if (type === "nfs") {
+    // Aggregate the per-node RESULT|<host>|<ok|fail>|<detail> lines.
+    const results: Array<{ hostname: string; ok: boolean; detail: string }> = [];
+    for (const line of lines) {
+      if (!line.startsWith("RESULT|")) continue;
+      const parts = line.slice("RESULT|".length).split("|");
+      if (parts.length < 2) continue;
+      const [hostname, state, ...rest] = parts;
+      results.push({
+        hostname,
+        ok: state === "ok",
+        detail: rest.join("|"),
+      });
+    }
+    if (results.length === 0) {
+      return NextResponse.json({
+        success: false,
+        error: `Unexpected output:\n${body_output.slice(0, 500)}`,
+      });
+    }
+    const okCount = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length === 0) {
+      return NextResponse.json({
+        success: true,
+        message: `${nfsServer}:${nfsPath ?? ""} reachable from all ${results.length} node(s).`,
+        nodes: results,
+      });
+    }
+    return NextResponse.json({
+      success: false,
+      error:
+        `${nfsServer}:${nfsPath ?? ""} not reachable from ${failed.length}/${results.length} node(s):\n` +
+        failed.map((f) => `  • ${f.hostname}: ${f.detail}`).join("\n"),
+      nodes: results,
+      okCount,
+    });
+  }
+
+  // S3: existing single-controller credential check.
   const resultIdx = lines.findIndex((l) => l === "RESULT_OK" || l === "RESULT_FAIL");
 
   if (resultIdx !== -1 && lines[resultIdx] === "RESULT_OK") {
     return NextResponse.json({
       success: true,
-      message: type === "nfs"
-        ? `NFS server ${nfsServer} is reachable`
-        : `S3 bucket "${s3Bucket}" is accessible`,
+      message: `S3 bucket "${s3Bucket}" is accessible`,
     });
   }
 

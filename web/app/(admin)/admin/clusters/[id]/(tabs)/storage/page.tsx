@@ -16,5 +16,19 @@ export default async function StoragePage({ params }: PageProps) {
 
   const config = cluster.config as Record<string, unknown>;
   const storageMounts = (config.storage_mounts ?? []) as any[];
-  return <StorageTab clusterId={id} initialMounts={storageMounts} />;
+  const nfsServers = (config.nfs_servers ?? []) as any[];
+  const hostsEntries = (config.slurm_hosts_entries ?? []) as Array<{
+    hostname: string;
+    ip: string;
+    user?: string;
+    port?: number;
+  }>;
+  return (
+    <StorageTab
+      clusterId={id}
+      initialMounts={storageMounts}
+      initialNfsServers={nfsServers}
+      nodes={hostsEntries}
+    />
+  );
 }

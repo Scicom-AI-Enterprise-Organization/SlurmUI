@@ -22,6 +22,14 @@ interface StorageMount {
   mountPath: string;
   nfsServer?: string;
   nfsPath?: string;
+  /**
+   * When set, this mount sources from a self-hosted NFS server entry in
+   * cluster.config.nfs_servers (matched by id). Implies "mount on every
+   * cluster node including the server" so the path resolves uniformly.
+   * Server provisioning happens via /api/clusters/[id]/storage/nfs-server,
+   * not here.
+   */
+  nfsServerId?: string;
   s3Bucket?: string;
   s3Endpoint?: string;
   s3AccessKey?: string;
@@ -29,10 +37,17 @@ interface StorageMount {
   s3Region?: string;
 }
 
-function buildNfsScript(mount: StorageMount, workers: HostEntry[]): string {
+function buildNfsScript(
+  mount: StorageMount,
+  workers: HostEntry[],
+  hostedSummary: string | null,
+): string {
   const workerBlock = workers.map((w) => {
     const u = w.user || "root";
     const p = w.port || 22;
+    // Mount only the target path, NOT `mount -a` — the latter re-runs every
+    // entry in fstab, which trips up unrelated failing entries (e.g. a stale
+    // s3fs line on a different path) and kills the deploy mid-flight.
     return `
 echo "  Setting up ${w.hostname} (${w.ip})..."
 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${p} ${u}@${w.ip} bash -s <<'NODE_EOF'
@@ -40,19 +55,27 @@ set -euo pipefail
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
 $S apt-get install -y -qq nfs-common 2>/dev/null || $S yum install -y -q nfs-utils 2>/dev/null || true
 $S mkdir -p ${mount.mountPath}
-$S grep -q '${mount.nfsServer}:${mount.nfsPath}' /etc/fstab || echo '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} nfs defaults,_netdev 0 0' | $S tee -a /etc/fstab > /dev/null
-$S mount -a
+$S grep -q '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} ' /etc/fstab || echo '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} nfs defaults,_netdev 0 0' | $S tee -a /etc/fstab > /dev/null
+if mountpoint -q ${mount.mountPath}; then
+  echo "  ${mount.mountPath} already mounted"
+else
+  $S mount ${mount.mountPath}
+fi
 df -h ${mount.mountPath}
 echo "  Done"
 NODE_EOF`;
   }).join("\n");
+
+  const sourceLine = hostedSummary
+    ? `Source: ${mount.nfsServer}:${mount.nfsPath} (hosted on ${hostedSummary})`
+    : `Source: ${mount.nfsServer}:${mount.nfsPath}`;
 
   return `#!/bin/bash
 set -euo pipefail
 
 echo "============================================"
 echo "  Deploying NFS mount: ${mount.mountPath}"
-echo "  Source: ${mount.nfsServer}:${mount.nfsPath}"
+echo "  ${sourceLine}"
 echo "  Targets: ${workers.length} node(s)"
 echo "============================================"
 echo ""
@@ -226,10 +249,31 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const config = cluster.config as Record<string, unknown>;
   const controllerHost = config.slurm_controller_host as string;
   const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
-  const workers = hostsEntries.filter((h) => h.hostname !== controllerHost);
+  const nfsServers = (config.nfs_servers ?? []) as Array<{
+    id: string;
+    hostNode: string;
+    exportPath: string;
+  }>;
 
-  // If no workers, target the controller itself
-  const targets = workers.length > 0 ? workers : hostsEntries;
+  // Self-hosted NFS mounts (nfsServerId set) imply mounting on every node
+  // including the server node itself, so the path resolves uniformly across
+  // the cluster. External mounts keep the original behaviour: workers only,
+  // falling back to all hosts when there are no workers.
+  let hostedSummary: string | null = null;
+  if (mount.type === "nfs" && mount.nfsServerId) {
+    const srv = nfsServers.find((s) => s.id === mount.nfsServerId);
+    if (!srv) {
+      return NextResponse.json({
+        error: `NFS server '${mount.nfsServerId}' no longer exists. Recreate it under NFS Servers and update the mount.`,
+      }, { status: 400 });
+    }
+    hostedSummary = `${srv.hostNode}:${srv.exportPath}`;
+  }
+
+  const workers = hostsEntries.filter((h) => h.hostname !== controllerHost);
+  const targets = hostedSummary
+    ? hostsEntries
+    : (workers.length > 0 ? workers : hostsEntries);
 
   const target = {
     host: cluster.controllerHost,
@@ -243,17 +287,25 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const script = action === "remove"
     ? buildRemoveScript(mount, targets)
     : mount.type === "nfs"
-      ? buildNfsScript(mount, targets)
+      ? buildNfsScript(mount, targets, hostedSummary)
       : buildS3fsScript(mount, targets);
 
   const task = await prisma.backgroundTask.create({
     data: { clusterId: id, type: action === "remove" ? "storage_remove" : "storage_deploy" },
   });
 
-  const appendLog = async (line: string) => {
-    try {
-      await prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${task.id}`;
-    } catch {}
+  // onStream fires every line synchronously; if we kicked off independent
+  // async UPDATEs the DB would interleave them and the UI log would show
+  // lines out of order. Serialise through a chained promise so each append
+  // waits for the previous to flush.
+  let writeChain: Promise<unknown> = Promise.resolve();
+  const appendLog = (line: string) => {
+    writeChain = writeChain
+      .then(() =>
+        prisma.$executeRaw`UPDATE "BackgroundTask" SET logs = logs || ${line + "\n"} WHERE id = ${task.id}`,
+      )
+      .catch(() => {});
+    return writeChain;
   };
 
   (async () => {
