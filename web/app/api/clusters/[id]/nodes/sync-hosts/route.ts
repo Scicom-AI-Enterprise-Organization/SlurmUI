@@ -56,6 +56,8 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   // Collect each node's actual hostname (what slurmd registers with slurmctld)

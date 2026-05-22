@@ -160,6 +160,9 @@ EOF`
     user: cluster.sshUser,
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
+    bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   if (detect) {

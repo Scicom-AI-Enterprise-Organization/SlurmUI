@@ -73,6 +73,8 @@ export async function POST(req: NextRequest, { params }: P) {
             port: cluster.sshPort,
             privateKey: cluster.sshKey.privateKey,
             bastion: cluster.sshBastion,
+            proxyCommand: cluster.sshProxyCommand,
+            jumpProxyCommand: cluster.sshJumpProxyCommand,
           };
           // Same scancel script as the DELETE handler — sudo fallback so
           // cancelling someone else's job (admin path) still works.

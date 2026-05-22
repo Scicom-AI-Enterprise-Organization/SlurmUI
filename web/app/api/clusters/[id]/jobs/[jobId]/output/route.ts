@@ -85,6 +85,8 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   const remoteScript = `#!/bin/bash
@@ -205,6 +207,20 @@ echo "__AURA_OUT_END__"
   if (!rangeMode && output && terminal && size > 0 && returned >= size) {
     await prisma.job.update({ where: { id: jobId }, data: { output } }).catch(() => {});
     mark("cached to db");
+  }
+
+  // Fallback: a terminal job whose live SSH read came back empty (transient
+  // miss — file aged out of scontrol, hop blip, perms, completion window)
+  // should still show its log instead of "No output captured". Serve the
+  // cached snapshot. `output` is intentionally not selected in the auth query
+  // above (it can be MB), so fetch it lazily only on this miss.
+  if (!rangeMode && returned === 0 && terminal) {
+    const cached = await prisma.job.findUnique({ where: { id: jobId }, select: { output: true } });
+    if (cached?.output) {
+      const n = Buffer.byteLength(cached.output, "utf8");
+      mark("served from db cache (live read empty)");
+      return NextResponse.json({ output: cached.output, source: "cache", size: n, offset: 0, returned: n, debug: marks });
+    }
   }
 
   mark("done");

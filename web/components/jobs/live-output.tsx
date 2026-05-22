@@ -23,6 +23,7 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
   const [earlier, setEarlier] = useState<string>("");
   const [fileSize, setFileSize] = useState<number>(0);
   const [pollStatus, setPollStatus] = useState<string>("");
+  const [source, setSource] = useState<string>("");
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   // Per-tick timings from the /output poll: latest response's `debug` array
   // plus the client-side round-trip. Shown in a collapsible panel below
@@ -100,6 +101,7 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
         const disk: string = d.output ?? "";
         const elapsed = Date.now() - t0;
         setFileSize(size);
+        setSource(d.source ?? "");
         setPollStatus(`poll ok: source=${d.source} size=${size} returned=${disk.length} in ${elapsed}ms`);
         // Skip the state update (and therefore the re-render + scroll hijack)
         // when the disk snapshot is unchanged or strictly shorter than what
@@ -140,7 +142,17 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">Output</h3>
+        <h3 className="font-medium">
+          Output
+          {source === "cache" && (
+            <span
+              className="ml-2 rounded-full border border-amber-400/50 bg-amber-50 px-2 py-0.5 text-xs font-normal text-amber-700"
+              title="Live read returned nothing — showing the frozen snapshot cached in the database, not the live file."
+            >
+              cached
+            </span>
+          )}
+        </h3>
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs text-muted-foreground">
             {fileSize > 0 ? `${fmtBytes(shown)} of ${fmtBytes(fileSize)}` : "— "}
@@ -177,7 +189,7 @@ export function LiveOutput({ clusterId, jobId, isRunning }: LiveOutputProps) {
       </div>
       <div
         ref={scrollRef}
-        className="h-96 overflow-auto rounded-md border bg-black p-4"
+        className="log-scroll h-96 overflow-auto rounded-md border bg-black p-4"
       >
         <div className="font-mono text-xs text-green-400">
           {displayText ? (

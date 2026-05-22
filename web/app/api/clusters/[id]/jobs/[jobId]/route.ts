@@ -126,6 +126,8 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
         port: cluster.sshPort,
         privateKey: cluster.sshKey.privateKey,
         bastion: cluster.sshBastion,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
       };
       // --signal=KILL + --full sends SIGKILL to every step (sbatch wrapper
       // + the user's batch shell) without waiting for KillWait. Try as the

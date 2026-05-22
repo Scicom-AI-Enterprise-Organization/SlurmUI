@@ -38,6 +38,8 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   const marker = `__RESET_${Date.now()}__`;

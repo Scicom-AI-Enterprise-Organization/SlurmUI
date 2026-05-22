@@ -157,6 +157,8 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     port: cluster.sshPort,
     privateKey: cluster.sshKey.privateKey,
     bastion: cluster.sshBastion,
+    proxyCommand: cluster.sshProxyCommand,
+    jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
   // Strip any version specifier for uninstall — `uv pip uninstall numpy==1.26.4`
