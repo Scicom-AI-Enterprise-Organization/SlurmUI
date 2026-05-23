@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
@@ -11,6 +11,8 @@ interface RouteParams { params: Promise<{ id: string }> }
 interface HostEntry {
   hostname: string;
   ip: string;
+  user?: string;
+  port?: number;
 }
 
 function buildTeardownScript(
@@ -19,7 +21,14 @@ function buildTeardownScript(
   mgmtNfsPath: string,
   dataNfsPath: string,
 ): string {
-  const workerIps = workerNodes.map((n) => n.ip).join(" ");
+  // Each worker entry is encoded as "user@ip:port" so the SSH loop can use
+  // the configured ssh user / port. Pre-config'd clusters historically used
+  // ubuntu@<ip>:22 by default, but container-based clusters often use root
+  // (or expose ssh on a non-22 port). The shell below splits on '|' between
+  // entries and on '@'/':' inside each entry.
+  const workerIps = workerNodes
+    .map((n) => `${n.user || "root"}@${n.ip}:${n.port || 22}`)
+    .join("|");
   return `#!/bin/bash
 set -euo pipefail
 
@@ -61,19 +70,36 @@ stop_svc() {
     \$S systemctl disable "\$svc" 2>/dev/null || true
   else
     # pm2 branch: pm2-go has no "describe" with exit code, so we use the
-    # PID-file existence as a proxy for "is registered". Then stop+delete
-    # so a follow-up bootstrap doesn't pick up the old entry.
-    if [ ! -f /root/.pm2-go/pids/\$svc.pid ]; then
+    # PID-file existence as a proxy for "is registered". \`pm2 stop\` +
+    # \`pm2 delete\` *should* be enough — but pm2-go in 0.1.x has a known
+    # race where the daemon respawns the underlying process moments after
+    # delete (the pid file persists and autorestart kicks in once more).
+    # So we also explicitly SIGTERM (then SIGKILL) the recorded PID, scrub
+    # the leftover pid file, drop the /etc/aura/pm2/<svc>.json config so a
+    # later pm2 resurrect can't bring it back, and re-dump the (now empty)
+    # registry. That makes the verify step deterministic.
+    local pidfile=/root/.pm2-go/pids/\$svc.pid
+    if [ ! -f "\$pidfile" ] && [ ! -f /etc/aura/pm2/\$svc.json ]; then
       echo "  \$svc: not registered with pm2-go"
       return 0
     fi
-    if \$S /usr/local/bin/pm2 stop "\$svc" >/dev/null 2>&1; then
-      echo "  \$svc: stopped"
-    else
-      echo "  \$svc: STOP FAILED"
-      return 1
-    fi
+    local pid=""
+    [ -f "\$pidfile" ] && pid=\$(cat "\$pidfile" 2>/dev/null || true)
+    \$S /usr/local/bin/pm2 stop "\$svc" >/dev/null 2>&1 || true
     \$S /usr/local/bin/pm2 delete "\$svc" >/dev/null 2>&1 || true
+    if [ -n "\$pid" ] && kill -0 "\$pid" 2>/dev/null; then
+      \$S kill -TERM "\$pid" 2>/dev/null || true
+      for i in 1 2 3 4 5; do
+        kill -0 "\$pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -0 "\$pid" 2>/dev/null && \$S kill -KILL "\$pid" 2>/dev/null || true
+    fi
+    \$S rm -f "\$pidfile" /etc/aura/pm2/\$svc.json 2>/dev/null || true
+    # Persist the now-shrunken process list so a pm2-go restart doesn't
+    # resurrect this entry from the previous dump.
+    setsid --wait \$S /usr/local/bin/pm2 dump >/dev/null 2>&1 || true
+    echo "  \$svc: stopped"
   fi
 }
 
@@ -117,9 +143,21 @@ echo ""
 WORKER_IPS="${workerIps}"
 if [ -n "\$WORKER_IPS" ]; then
   echo "[4/5] Cleaning up worker nodes..."
-  for IP in \$WORKER_IPS; do
-    echo "  Cleaning \$IP..."
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes ubuntu@\$IP bash -s <<WORKER_EOF || echo "  WARNING: Failed to reach \$IP"
+  # Worker entries are "user@ip:port" joined by '|' (see route.ts).
+  # bash IFS-loop on '|' so we can parse the user/port out of each.
+  OLDIFS=\$IFS
+  IFS='|'
+  for ENTRY in \$WORKER_IPS; do
+    IFS=\$OLDIFS
+    # split user@host:port
+    USER_PART=\${ENTRY%%@*}
+    HOSTPORT=\${ENTRY#*@}
+    IP=\${HOSTPORT%%:*}
+    PORT=\${HOSTPORT##*:}
+    [ -z "\$PORT" ] && PORT=22
+    [ -z "\$USER_PART" ] && USER_PART=root
+    echo "  Cleaning \$USER_PART@\$IP:\$PORT..."
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -p "\$PORT" "\$USER_PART@\$IP" bash -s <<WORKER_EOF || echo "  WARNING: Failed to reach \$USER_PART@\$IP:\$PORT"
       RS=""
       if [ "\\\$(id -u)" != "0" ]; then RS=sudo; fi
       # Per-worker supervisor branch — fleet may be mixed during a migration
@@ -147,7 +185,9 @@ ${dataNfsPath ? `      \\\$RS umount -f ${dataNfsPath} 2>&1 || true
       \\\$RS systemctl daemon-reload 2>/dev/null || true
       echo "  done"
 WORKER_EOF
+    IFS='|'
   done
+  IFS=\$OLDIFS
   echo ""
 else
   echo "[4/5] No worker nodes to clean up"
@@ -163,8 +203,23 @@ ${dataNfsPath ? `echo "  Unexporting NFS: ${dataNfsPath}"
 \$S sed -i '\\|${dataNfsPath}|d' /etc/exports 2>&1 || true` : ""}
 \$S exportfs -ra 2>&1 || true
 \$S rm -rf /opt/aura/ansible 2>&1 || true
-# Strip the "#### slurm hosts ####" block that hosts_block role adds
-\$S sed -i '/#### start slurm hosts ####/,/#### end slurm hosts ####/d' /etc/hosts 2>&1 || true
+# Strip the "#### slurm hosts ####" block the hosts_block role adds.
+# In containers, /etc/hosts is typically a bind-mount — \`sed -i\` then
+# fails with "cannot rename /etc/sedXXX: Device or resource busy" because
+# the kernel won't let us swap the inode of a bind-mounted file. Rewrite
+# in-place via cat instead: that truncates+rewrites the existing inode
+# rather than creating a new one.
+if [ -f /etc/hosts ] && grep -q "#### start slurm hosts ####" /etc/hosts 2>/dev/null; then
+  HOSTS_TMP=\$(mktemp)
+  sed '/#### start slurm hosts ####/,/#### end slurm hosts ####/d' /etc/hosts > "\$HOSTS_TMP"
+  if \$S cp "\$HOSTS_TMP" /etc/hosts 2>/dev/null \\
+     || \$S bash -c "cat '\$HOSTS_TMP' > /etc/hosts" 2>/dev/null; then
+    echo "  stripped slurm hosts block from /etc/hosts"
+  else
+    echo "  WARNING: could not rewrite /etc/hosts (bind-mount?)"
+  fi
+  rm -f "\$HOSTS_TMP" 2>/dev/null || true
+fi
 echo "  Cleanup complete"
 echo ""
 
@@ -241,10 +296,12 @@ echo "============================================"
 `;
 }
 
-export async function POST(_req: NextRequest, { params }: RouteParams) {
+export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts session cookies (UI) and Bearer aura_* tokens (CLI).
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
