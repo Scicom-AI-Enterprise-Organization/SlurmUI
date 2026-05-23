@@ -56,6 +56,34 @@ ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${p} ${u}@${host.ip} bas
 set -euo pipefail
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
 
+# Probe the filesystem hosting the export path BEFORE installing anything.
+# Kernel NFS (nfs-kernel-server) refuses to export overlay/aufs/fuse/tmpfs/
+# encryptfs — all of which are typical for managed-GPU containers. In that
+# case bail out early with an actionable error rather than half-provisioning
+# and surfacing a cryptic "does not support NFS export" later.
+$S mkdir -p ${server.exportPath}
+FS_TYPE=$(stat -fc %T ${server.exportPath} 2>/dev/null || echo unknown)
+echo "  export path filesystem: $FS_TYPE"
+case "$FS_TYPE" in
+  overlayfs|aufs|fuseblk|tmpfs|squashfs|encryptfs|btrfs)
+    if [ "$FS_TYPE" != "btrfs" ]; then
+      echo ""
+      echo "  ERROR: '$FS_TYPE' filesystems do not support kernel NFS export."
+      echo "         The host node ${host.hostname} appears to be a container"
+      echo "         (filesystem='$FS_TYPE'), and the Linux kernel NFS server"
+      echo "         cannot export this layer."
+      echo ""
+      echo "         Options:"
+      echo "         1. Self-host NFS on a VM / bare-metal node instead, then"
+      echo "            mount that export from this container."
+      echo "         2. Use an external managed NFS endpoint."
+      echo "         3. Skip NFS — single-node clusters don't need shared FS."
+      echo ""
+      exit 17  # distinguishable exit code so the caller can surface a hint
+    fi
+  ;;
+esac
+
 if command -v exportfs >/dev/null 2>&1; then
   echo "  nfs server tools already present"
 else
@@ -66,7 +94,6 @@ else
     || { echo "  FATAL: no apt or yum on this host"; exit 1; }
 fi
 
-$S mkdir -p ${server.exportPath}
 # 1777 = world-writable with sticky bit, same as /tmp — anyone with shell
 # access can drop files in but only the owner (or root) can delete them.
 # That matches how a shared scratch NFS is usually used; admins can tighten
@@ -89,7 +116,19 @@ $S systemctl enable --now nfs-kernel-server >/dev/null 2>&1 \\
   || $S systemctl enable --now nfs-server >/dev/null 2>&1 \\
   || true
 
-$S exportfs -ra
+# exportfs -ra prints errors to stderr for each unexportable path AND keeps
+# going — capture so we can fail clearly if OUR target couldn't be exported.
+EXPORTFS_OUT=$($S exportfs -ra 2>&1 || true)
+if [ -n "$EXPORTFS_OUT" ]; then
+  echo "$EXPORTFS_OUT" | sed 's/^/    /'
+fi
+if echo "$EXPORTFS_OUT" | grep -q "${server.exportPath}.*does not support"; then
+  echo ""
+  echo "  ERROR: kernel NFS refused to export ${server.exportPath}."
+  echo "         See exportfs output above. This usually means the path's"
+  echo "         filesystem is unsupported (overlay/fuse/etc.)."
+  exit 17
+fi
 echo ""
 echo "  current exports on ${host.hostname}:"
 $S exportfs -v 2>&1 | sed 's/^/    /'

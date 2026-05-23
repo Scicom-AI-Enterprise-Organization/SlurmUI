@@ -216,6 +216,11 @@ echo "[aura] Done. Activate in jobs with: source ${venvPath}/bin/activate"
   (async () => {
     await appendLog(task.id, `[aura] Applying ${packages.length} python package(s) to ${venvPath}`);
     const handle = sshExecScript(target, script, {
+      // Heavy pip installs (vllm, torch, flash-attn) on slow networks can take
+      // 30+ minutes; the default 60s sshExecScript watchdog kills the wheel
+      // download mid-flight. Allow up to 2h. Caller can still cancel via the
+      // running-tasks registry / Cancel button.
+      timeoutMs: 2 * 60 * 60 * 1000,
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {

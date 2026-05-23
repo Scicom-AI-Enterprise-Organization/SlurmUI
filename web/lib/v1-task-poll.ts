@@ -8,11 +8,18 @@
  */
 import { prisma } from "@/lib/prisma";
 
-interface PollResult {
+export interface PollResult {
+  kind: "task";
   taskId: string;
   status: "success" | "failed";
   logs: string;
   durationMs: number;
+}
+
+export interface PollHttpError {
+  kind: "http-error";
+  status: number;
+  payload: unknown;
 }
 
 /**
@@ -31,7 +38,7 @@ export async function forwardAndPoll(opts: {
   body?: unknown;
   timeoutMs?: number;
   pollIntervalMs?: number;
-}): Promise<{ ok: boolean; status: number; payload: unknown } | PollResult> {
+}): Promise<PollResult | PollHttpError> {
   const init: RequestInit = {
     method: opts.method,
     headers: {
@@ -46,7 +53,7 @@ export async function forwardAndPoll(opts: {
   try { payload = await inner.json(); } catch {}
 
   if (!inner.ok || !payload?.taskId) {
-    return { ok: false, status: inner.status, payload };
+    return { kind: "http-error", status: inner.status, payload };
   }
 
   const taskId: string = payload.taskId;
@@ -60,10 +67,11 @@ export async function forwardAndPoll(opts: {
     task = await prisma.backgroundTask.findUnique({ where: { id: taskId } });
   }
   if (!task) {
-    return { ok: false, status: 500, payload: { error: "Task disappeared" } };
+    return { kind: "http-error", status: 500, payload: { error: "Task disappeared" } };
   }
 
   return {
+    kind: "task",
     taskId,
     status: task.status === "success" ? "success" : "failed",
     logs: task.logs ?? "",

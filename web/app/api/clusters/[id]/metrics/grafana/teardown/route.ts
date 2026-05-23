@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
@@ -25,10 +25,12 @@ async function finishTask(taskId: string, success: boolean) {
 
 const DEFAULT_DATA_PATH = "/var/lib/aura-metrics";
 
-export async function POST(_req: NextRequest, { params }: RouteParams) {
+export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies and Bearer aura_* tokens.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -65,19 +67,40 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
 S=""
 [ "$(id -u)" != "0" ] && S="sudo"
 
+# Pick the same supervisor as the deploy script picked. systemd presence is
+# detected via /run/systemd/system; otherwise pm2-go is the container path.
+if [ -d /run/systemd/system ]; then
+  SUPERVISOR=systemd
+elif command -v pm2 >/dev/null 2>&1 && [ -d /root/.pm2-go ]; then
+  SUPERVISOR=pm2
+else
+  SUPERVISOR=none
+fi
+echo "[supervisor] tearing down via: $SUPERVISOR"
+
 for svc in grafana prometheus loki; do
-  if systemctl list-unit-files | grep -q "^\${svc}\\.service"; then
-    echo "[\${svc}] stopping & disabling..."
-    $S systemctl disable --now \${svc} 2>&1 | tail -3
-    $S rm -f /etc/systemd/system/\${svc}.service
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    if systemctl list-unit-files | grep -q "^\${svc}\\.service"; then
+      echo "[\${svc}] stopping & disabling..."
+      $S systemctl disable --now \${svc} 2>&1 | tail -3
+      $S rm -f /etc/systemd/system/\${svc}.service
+    fi
+  elif [ "$SUPERVISOR" = "pm2" ]; then
+    if [ -f /etc/aura/pm2/\${svc}.json ] || [ -f /root/.pm2-go/pids/\${svc}.pid ]; then
+      echo "[\${svc}] stopping & deleting pm2 entry..."
+      $S /usr/local/bin/pm2 delete \${svc} >/dev/null 2>&1 || true
+      $S rm -f /etc/aura/pm2/\${svc}.json
+    fi
   fi
 done
+# Persist the pm2 dump so the daemons don't resurrect on pm2 daemon resurrect.
+[ "$SUPERVISOR" = "pm2" ] && setsid --wait /usr/local/bin/pm2 dump >/dev/null 2>&1 || true
 
 $S rm -f /usr/local/bin/prometheus /usr/local/bin/promtool /usr/local/bin/loki
 $S rm -rf /opt/grafana /opt/grafana-* /etc/prometheus /etc/grafana /etc/loki
 $S rm -rf ${dataPath}
 
-$S systemctl daemon-reload 2>/dev/null || true
+[ "$SUPERVISOR" = "systemd" ] && $S systemctl daemon-reload 2>/dev/null || true
 echo "[stack] removed"
 `;
 

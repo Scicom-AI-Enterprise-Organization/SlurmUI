@@ -75,7 +75,11 @@ GresTypes=gpu
 # slurmctld won't start without at least one NodeName / PartitionName, so for
 # a fresh bootstrap we register the controller itself as an all-in-one node
 # using the gathered facts. Real nodes get added via the UI's Nodes tab.
-NodeName={{ ansible_hostname }} NodeAddr={{ ansible_default_ipv4.address }} CPUs={{ ansible_processor_vcpus }} Sockets=1 CoresPerSocket={{ ansible_processor_vcpus }} ThreadsPerCore=1 RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
+{# Use the real topology Ansible gathers so `sinfo` displays accurate
+   Sockets/Cores/Threads — previously we wrote Sockets=1 / CoresPerSocket=CPUs
+   which only worked because `SlurmdParameters=config_overrides` is set; now
+   the displayed values match `lscpu` on the controller. #}
+NodeName={{ ansible_hostname }} NodeAddr={{ ansible_default_ipv4.address }} CPUs={{ ansible_processor_vcpus }} Sockets={{ ansible_processor_count | default(1) }} CoresPerSocket={{ ansible_processor_cores | default(ansible_processor_vcpus) }} ThreadsPerCore={{ ansible_processor_threads_per_core | default(1) }} RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
 PartitionName=main Nodes={{ ansible_hostname }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
 {% else %}
 {% for node in slurm_nodes %}

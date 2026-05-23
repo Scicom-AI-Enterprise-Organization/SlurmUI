@@ -38,6 +38,18 @@ interface CodeEditorProps {
   /** Editor font size in px. Defaults to 12. */
   fontSize?: number;
   placeholder?: string;
+  /**
+   * Grow the editor with its content instead of pinning to its container.
+   * When true, the editor's outer box auto-sizes between minHeight and
+   * maxHeight. Use this for small command/snippet fields; leave undefined
+   * (the default) for full-height file-pane editors.
+   */
+  autoHeight?: boolean;
+  /** Minimum visible height in autoHeight mode (e.g. "120px"). */
+  minHeight?: string;
+  /** Maximum visible height in autoHeight mode (e.g. "420px"). Beyond this,
+   *  the editor scrolls internally. */
+  maxHeight?: string;
 }
 
 /**
@@ -128,6 +140,9 @@ export function CodeEditor({
   readOnly,
   fontSize = 12,
   placeholder,
+  autoHeight,
+  minHeight,
+  maxHeight,
 }: CodeEditorProps) {
   // The app toggles dark mode via the `dark` class on <html>, no
   // ThemeProvider in the tree, so next-themes' useTheme wouldn't see it.
@@ -187,11 +202,46 @@ export function CodeEditor({
 
   const theme = isDark ? githubDark : githubLight;
 
-  // CodeMirror only scrolls when .cm-editor has a real pixel height. A
-  // height="100%" inside a flex chain often resolves to 0/auto and the
-  // editor grows with content instead. Wrap in a position: relative box and
-  // pin CodeMirror absolutely so it always inherits an explicit size from
-  // its flex parent, regardless of how deep the layout is.
+  const basicSetup = {
+    lineNumbers: true,
+    foldGutter: true,
+    highlightActiveLine: true,
+    highlightActiveLineGutter: true,
+    bracketMatching: true,
+    closeBrackets: true,
+    indentOnInput: true,
+    autocompletion: true,
+    searchKeymap: true,
+  } as const;
+
+  // autoHeight mode — editor grows with content, capped between min/max.
+  // Used for short command-style fields where pinning the height looks
+  // empty for a one-line snippet. The container is sized by CodeMirror,
+  // not by the className box, so we pass min/maxHeight directly.
+  if (autoHeight) {
+    return (
+      <div className={className} style={{ fontSize: `${fontSize}px` }}>
+        <CodeMirror
+          value={value}
+          onChange={onChange}
+          height="auto"
+          minHeight={minHeight ?? "120px"}
+          maxHeight={maxHeight ?? "420px"}
+          theme={theme}
+          readOnly={readOnly}
+          extensions={extensions}
+          placeholder={placeholder}
+          basicSetup={basicSetup}
+        />
+      </div>
+    );
+  }
+
+  // Default mode: CodeMirror only scrolls when .cm-editor has a real pixel
+  // height. A height="100%" inside a flex chain often resolves to 0/auto
+  // and the editor grows with content instead. Wrap in a position: relative
+  // box and pin CodeMirror absolutely so it always inherits an explicit
+  // size from its flex parent, regardless of how deep the layout is.
   return (
     <div
       className={className}
@@ -208,17 +258,7 @@ export function CodeEditor({
           readOnly={readOnly}
           extensions={extensions}
           placeholder={placeholder}
-          basicSetup={{
-            lineNumbers: true,
-            foldGutter: true,
-            highlightActiveLine: true,
-            highlightActiveLineGutter: true,
-            bracketMatching: true,
-            closeBrackets: true,
-            indentOnInput: true,
-            autocompletion: true,
-            searchKeymap: true,
-          }}
+          basicSetup={basicSetup}
         />
       </div>
     </div>

@@ -115,6 +115,46 @@ S=""; [ "$(id -u)" != "0" ] && S="sudo"
 # Install s3fs
 $S apt-get install -y -qq s3fs fuse 2>/dev/null || $S yum install -y -q s3fs-fuse fuse 2>/dev/null || true
 
+# Containers often don't ship /dev/fuse even when the kernel fuse module is
+# loaded (verified via /proc/filesystems). s3fs then fails with "fuse:
+# device not found". Recreate it ourselves — the device node is just
+# (10, 229) and most managed GPU containers retain CAP_MKNOD even when
+# /dev/fuse isn't pre-created. Idempotent: skip if it already exists.
+if [ ! -e /dev/fuse ]; then
+  if grep -q '^nodev\s*fuse' /proc/filesystems 2>/dev/null; then
+    $S mknod /dev/fuse c 10 229 2>/dev/null && $S chmod 666 /dev/fuse 2>/dev/null \
+      && echo "  created /dev/fuse" \
+      || echo "  WARNING: could not create /dev/fuse (no CAP_MKNOD?) — s3fs will fail"
+  else
+    echo "  WARNING: kernel fuse module not loaded — s3fs cannot work in this container"
+  fi
+fi
+
+# Even with /dev/fuse present, mount() syscall requires CAP_SYS_ADMIN.
+# Managed GPU containers (e.g. Alibaba PAI-DSW) commonly drop it. Probe via
+# a no-op tmpfs mount in /tmp; if it fails with EPERM we can be certain
+# s3fs will too, so we bail early with an actionable message instead of
+# letting fusermount fail mid-script with the same EPERM.
+PROBE_DIR=$(mktemp -d)
+if ! $S mount -t tmpfs none "$PROBE_DIR" 2>/dev/null; then
+  rm -rf "$PROBE_DIR" 2>/dev/null
+  echo ""
+  echo "  ERROR: this host doesn't grant CAP_SYS_ADMIN — the kernel will"
+  echo "         refuse ANY mount() syscall (including s3fs, NFS, tmpfs)."
+  echo "         Common in managed GPU containers (Alibaba PAI-DSW etc.)."
+  echo ""
+  echo "         Options for accessing S3 without a mount:"
+  echo "         1. Use the AWS CLI / boto3 directly inside jobs — no mount needed."
+  echo "         2. Pre-stage with rclone:"
+  echo "              rclone copy s3:huseinlabel-app-test/<prefix> /local/path"
+  echo "         3. Wrap jobs in pre/post hooks that rclone sync between S3"
+  echo "            and a local scratch dir."
+  echo ""
+  exit 18  # distinct exit code → caller can surface a hint
+fi
+$S umount "$PROBE_DIR" 2>/dev/null
+rm -rf "$PROBE_DIR" 2>/dev/null
+
 # Enable user_allow_other in FUSE config (needed for allow_other option)
 if [ -f /etc/fuse.conf ]; then
   $S sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf

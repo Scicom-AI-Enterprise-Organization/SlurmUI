@@ -1294,12 +1294,15 @@ export default function NewJobPage() {
               <div className="space-y-2">
                 <Label htmlFor="command">Command</Label>
                 <CodeEditor
-                  className="h-[420px] overflow-hidden rounded-md border"
+                  className="overflow-hidden rounded-md border"
                   value={command}
                   onChange={setCommand}
                   filename="cmd.sh"
                   fontSize={12}
                   placeholder={"vllm serve your-model \\\n  --tensor-parallel-size 2"}
+                  autoHeight
+                  minHeight="120px"
+                  maxHeight="420px"
                 />
               </div>
 

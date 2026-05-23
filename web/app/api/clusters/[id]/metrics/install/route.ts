@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
@@ -62,10 +63,70 @@ S=""
 
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64) NEARCH=amd64 ;;
-  aarch64) NEARCH=arm64 ;;
+  x86_64) NEARCH=amd64; GEARCH=x86_64 ;;   # GEARCH = nvidia_gpu_exporter naming
+  aarch64) NEARCH=arm64; GEARCH=arm64 ;;
   *) echo "[error] Unsupported arch: $ARCH"; exit 1 ;;
 esac
+
+# Detect whether this host has systemd (VM / bare metal) or only pm2-go
+# (container). pm2-go is the supervisor Aura installs during bootstrap on
+# container nodes — we reuse it here so node_exporter / gpu_exporter /
+# promtail get supervised correctly without trying to talk to a non-existent
+# systemd bus.
+# Pick supervisor. systemd presence is detected via /run/systemd/system —
+# the same probe the bootstrap heartbeat uses. Containers without systemd
+# fall through to pm2-go (which Aura installs during bootstrap).
+if [ -d /run/systemd/system ]; then
+  SUPERVISOR=systemd
+elif command -v pm2 >/dev/null 2>&1 && [ -d /root/.pm2-go ]; then
+  SUPERVISOR=pm2
+else
+  SUPERVISOR=none
+fi
+echo "[supervisor] using: $SUPERVISOR"
+PM2_DIR=/etc/aura/pm2
+[ "$SUPERVISOR" = "pm2" ] && $S mkdir -p $PM2_DIR
+
+# install_service(name, exec_path, args_json, user) — registers a daemon
+# under whichever supervisor we picked. args_json is a JSON array string,
+# eg '["--web.listen-address=:9400"]'. user is optional (systemd only).
+install_service() {
+  local svc=$1 exec=$2 args=$3 user=$4
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    local user_block=""
+    [ -n "$user" ] && user_block="User=$user
+Group=$user
+"
+    # args here is a JSON array; convert to space-separated for ExecStart.
+    local args_flat
+    args_flat=$(echo "$args" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))' 2>/dev/null || echo "")
+    $S tee /etc/systemd/system/$svc.service >/dev/null <<UNIT
+[Unit]
+Description=$svc
+After=network.target
+
+[Service]
+$user_block Type=simple
+ExecStart=$exec $args_flat
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    $S systemctl daemon-reload
+    $S systemctl enable --now $svc
+  else
+    # pm2-go expects a flat JSON array per service.
+    local cfg=$PM2_DIR/$svc.json
+    $S bash -c "cat > $cfg" <<PM2_JSON
+[{"name":"$svc","executable_path":"$exec","args":$args,"cwd":"/","autorestart":true}]
+PM2_JSON
+    # setsid so the daemon survives our SSH session terminating.
+    setsid --wait /usr/local/bin/pm2 start $cfg >/dev/null 2>&1 || true
+    setsid --wait /usr/local/bin/pm2 dump >/dev/null 2>&1 || true
+  fi
+}
 
 ############################################################
 # node_exporter — host metrics on :9100
@@ -107,27 +168,14 @@ if [ "$NE_INSTALL" = "1" ]; then
   $S install -m 0755 node_exporter-${NODE_EXPORTER_VERSION}.linux-$NEARCH/node_exporter /usr/local/bin/node_exporter
   cd / && rm -rf "$TMP"
 
-  $S id node_exporter >/dev/null 2>&1 || $S useradd --no-create-home --shell /usr/sbin/nologin node_exporter
-
-  $S tee /etc/systemd/system/node_exporter.service >/dev/null <<'UNIT'
-[Unit]
-Description=Prometheus Node Exporter
-After=network.target
-
-[Service]
-User=node_exporter
-Group=node_exporter
-Type=simple
-ExecStart=/usr/local/bin/node_exporter
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  $S systemctl daemon-reload
-  $S systemctl enable --now node_exporter
+  # pm2-supervised mode runs as root (pm2-go has no user field). systemd mode
+  # creates a dedicated unprivileged user.
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    $S id node_exporter >/dev/null 2>&1 || $S useradd --no-create-home --shell /usr/sbin/nologin node_exporter
+    install_service node_exporter /usr/local/bin/node_exporter '[]' node_exporter
+  else
+    install_service node_exporter /usr/local/bin/node_exporter '[]' ""
+  fi
 fi
 sleep 1
 NE_BIND2=$(ss -ltn 2>/dev/null | awk '$4 ~ /:9100$/ {print $4}' | head -1)
@@ -232,38 +280,31 @@ elif [ "$MODE" = "dcgm" ] && command -v nvidia-smi >/dev/null 2>&1 && command -v
     -p 0.0.0.0:9400:9400 \\
     ${DCGM_EXPORTER_IMAGE} 2>&1 | tail -5
 elif [ "$MODE" = "nvidia_smi" ] && command -v nvidia-smi >/dev/null 2>&1; then
-  if systemctl is-active --quiet nvidia_gpu_exporter 2>/dev/null && [ "$GPU_REACHABLE" = "1" ]; then
+  ALREADY_RUNNING=0
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    systemctl is-active --quiet nvidia_gpu_exporter 2>/dev/null && [ "$GPU_REACHABLE" = "1" ] && ALREADY_RUNNING=1
+  else
+    [ -f /root/.pm2-go/pids/nvidia_gpu_exporter.pid ] && kill -0 "$(cat /root/.pm2-go/pids/nvidia_gpu_exporter.pid 2>/dev/null)" 2>/dev/null && [ "$GPU_REACHABLE" = "1" ] && ALREADY_RUNNING=1
+  fi
+  if [ "$ALREADY_RUNNING" = "1" ]; then
     echo "[nvidia_gpu_exporter] already running"
   else
-    echo "[nvidia_gpu_exporter] installing v${NVIDIA_GPU_EXPORTER_VERSION} ($NEARCH)..."
+    # nvidia_gpu_exporter releases use $GEARCH (x86_64 / arm64), unlike most
+    # Go projects which use $NEARCH (amd64 / arm64). Using the wrong token
+    # produces a 404 + cryptic "tar: ge.tgz: Cannot open" downstream.
+    echo "[nvidia_gpu_exporter] installing v${NVIDIA_GPU_EXPORTER_VERSION} ($GEARCH)..."
     TMP=$(mktemp -d)
     cd "$TMP"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "https://github.com/utkuozdemir/nvidia_gpu_exporter/releases/download/v${NVIDIA_GPU_EXPORTER_VERSION}/nvidia_gpu_exporter_${NVIDIA_GPU_EXPORTER_VERSION}_linux_$NEARCH.tar.gz" -o ge.tgz
+      curl -fsSL "https://github.com/utkuozdemir/nvidia_gpu_exporter/releases/download/v${NVIDIA_GPU_EXPORTER_VERSION}/nvidia_gpu_exporter_${NVIDIA_GPU_EXPORTER_VERSION}_linux_$GEARCH.tar.gz" -o ge.tgz
     else
-      wget -q "https://github.com/utkuozdemir/nvidia_gpu_exporter/releases/download/v${NVIDIA_GPU_EXPORTER_VERSION}/nvidia_gpu_exporter_${NVIDIA_GPU_EXPORTER_VERSION}_linux_$NEARCH.tar.gz" -O ge.tgz
+      wget -q "https://github.com/utkuozdemir/nvidia_gpu_exporter/releases/download/v${NVIDIA_GPU_EXPORTER_VERSION}/nvidia_gpu_exporter_${NVIDIA_GPU_EXPORTER_VERSION}_linux_$GEARCH.tar.gz" -O ge.tgz
     fi
     tar xzf ge.tgz
     $S install -m 0755 nvidia_gpu_exporter /usr/local/bin/nvidia_gpu_exporter
     cd / && rm -rf "$TMP"
 
-    $S tee /etc/systemd/system/nvidia_gpu_exporter.service >/dev/null <<'UNIT'
-[Unit]
-Description=NVIDIA GPU Exporter (nvidia-smi)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/nvidia_gpu_exporter --web.listen-address=:9400
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-    $S systemctl daemon-reload
-    $S systemctl enable --now nvidia_gpu_exporter
+    install_service nvidia_gpu_exporter /usr/local/bin/nvidia_gpu_exporter '["--web.listen-address=:9400"]' ""
   fi
 fi
 sleep 2
@@ -360,7 +401,8 @@ scrape_configs:
 EOF
 $S chown promtail:promtail /etc/promtail/promtail.yaml
 
-$S tee /etc/systemd/system/promtail.service >/dev/null <<UNIT
+if [ "$SUPERVISOR" = "systemd" ]; then
+  $S tee /etc/systemd/system/promtail.service >/dev/null <<UNIT
 [Unit]
 Description=Grafana Promtail (log shipper to Loki)
 After=network.target
@@ -376,12 +418,14 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
-
-$S systemctl daemon-reload
-$S systemctl enable promtail
-$S systemctl restart promtail
+  $S systemctl daemon-reload
+  $S systemctl enable promtail
+  $S systemctl restart promtail
+else
+  install_service promtail /usr/local/bin/promtail '["-config.file=/etc/promtail/promtail.yaml"]' ""
+fi
 sleep 1
-ss -ltn 2>/dev/null | grep -q ':9080 ' && echo "[promtail] running, shipping to ${promtail.pushUrl}" || echo "[promtail] WARNING not listening on :9080 — check journalctl -u promtail"
+ss -ltn 2>/dev/null | grep -q ':9080 ' && echo "[promtail] running, shipping to ${promtail.pushUrl}" || echo "[promtail] WARNING not listening on :9080 — check supervisor logs"
 ` : `# Loki disabled — uninstall promtail if it exists.
 if systemctl list-unit-files 2>/dev/null | grep -q '^promtail\\.service'; then
   echo "[promtail] disabling existing promtail (lokiEnabled=false)"
@@ -397,8 +441,11 @@ exit 0
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both session cookies (UI) and Bearer aura_* tokens
+  // (CLI / v1 wrappers) via getApiUser.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

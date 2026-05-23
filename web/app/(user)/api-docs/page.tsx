@@ -541,6 +541,262 @@ EOF`,
     ],
   },
   {
+    id: "deploy-mount",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/storage/mounts",
+    navLabel: "Deploy storage mount",
+    title: "Deploy a storage mount (NFS or s3fs)",
+    description: (
+      <>
+        Drives <code>/api/clusters/[id]/storage/deploy</code> behind the
+        scenes and blocks until the underlying BackgroundTask finishes.
+        Body shape mirrors the UI&apos;s Plug button — pass the full mount
+        record from <code>cluster.config.storage_mounts</code>.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "mount", in: "body", type: "StorageMount", required: true, doc: "Full mount entry: { id, type, mountPath, nfsServer?, nfsPath?, nfsServerId?, s3Bucket?, s3Endpoint?, s3AccessKey?, s3SecretKey?, s3Region? }" },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"mount":{"id":"m-1","type":"nfs","mountPath":"/mnt/shared","nfsServerId":"nfs-1"}}' \\
+  "$AURA_BASE/api/v1/clusters/$CID/storage/mounts"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "kind": "task",
+  "taskId": "…",
+  "status": "success",
+  "logs": "Setting up node1…\\nNFS mount deployed successfully!",
+  "durationMs": 4831,
+  "clusterId": "…"
+}`,
+      },
+    ],
+  },
+  {
+    id: "remove-mount",
+    group: "provisioning",
+    method: "DELETE",
+    path: "/api/v1/clusters/:cluster/storage/mounts/:mountId",
+    navLabel: "Remove storage mount",
+    title: "Unmount + strip an existing storage mount",
+    description: <>Unmounts on every worker, removes the <code>/etc/fstab</code> entry, deletes the s3fs credentials file. Remote data untouched.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "mountId", in: "path", type: "string", required: true, doc: "Mount entry id (from cluster.config.storage_mounts)." },
+    ],
+    request: {
+      sample: `curl -s -X DELETE -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CID/storage/mounts/m-1"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "status": "success", "logs": "…", "durationMs": 3120 }` }],
+  },
+  {
+    id: "deploy-nfs-server",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/storage/nfs-servers",
+    navLabel: "Self-host NFS server",
+    title: "Provision a self-hosted NFS server on a cluster node",
+    description: <>Installs <code>nfs-kernel-server</code> on the chosen node, creates the export, manages <code>/etc/exports</code>, runs <code>exportfs -ra</code>.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "server", in: "body", type: "NfsServer", required: true, doc: "{ id, hostNode, exportPath, allowedNetwork }." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"server":{"id":"nfs-1","hostNode":"gpu1","exportPath":"/srv/aura","allowedNetwork":"*"}}' \\
+  "$AURA_BASE/api/v1/clusters/$CID/storage/nfs-servers"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "status": "success", "logs": "…", "durationMs": 2210 }` }],
+  },
+  {
+    id: "remove-nfs-server",
+    group: "provisioning",
+    method: "DELETE",
+    path: "/api/v1/clusters/:cluster/storage/nfs-servers/:serverId",
+    navLabel: "Remove NFS server",
+    title: "Strip a self-hosted NFS server's export",
+    description: <>Removes the <code>/etc/exports</code> line and re-runs <code>exportfs -ra</code>. Leaves the directory + the kernel package alone.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "serverId", in: "path", type: "string", required: true, doc: "NFS server entry id (from cluster.config.nfs_servers)." },
+    ],
+    request: {
+      sample: `curl -s -X DELETE -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CID/storage/nfs-servers/nfs-1"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "status": "success", "logs": "…", "durationMs": 1340 }` }],
+  },
+  {
+    id: "install-packages",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/packages",
+    navLabel: "Install apt packages",
+    title: "Install apt packages on every cluster node",
+    description: <>Runs <code>apt-get install -y</code> on every host. Package list is also persisted to <code>cluster.config.installed_packages</code> so re-bootstrap is idempotent.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "packages", in: "body", type: "string[]", required: true, doc: "Apt package names. Versions allowed (e.g. \"htop=3.2.2-1\")." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"packages":["htop","jq","curl"]}' \\
+  "$AURA_BASE/api/v1/clusters/$CID/packages"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "status": "success", "logs": "…", "durationMs": 18922 }` }],
+  },
+  {
+    id: "install-python-packages",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/python-packages",
+    navLabel: "Install Python packages",
+    title: "Install Python packages into the cluster venv",
+    description: (
+      <>
+        <p>
+          Two-step: persists the package list + install mode into{" "}
+          <code>cluster.config</code>, then runs the apply (uv-based pip)
+          on each target. Blocks until install finishes. Use{" "}
+          <code>installMode: &quot;per-node&quot;</code> when the venv must
+          be local to each node (typical for CUDA wheels); the default{" "}
+          <code>shared</code> writes one venv on the shared mount.
+        </p>
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "packages", in: "body", type: "Array<{name,indexUrl?,extraIndexUrl?}>", required: true, doc: "Package specs (e.g. {\"name\":\"vllm==0.19.1\"})." },
+      { name: "installMode", in: "body", type: "\"shared\" | \"per-node\"", doc: "Default \"shared\"." },
+      { name: "localVenvPath", in: "body", type: "string", doc: "per-node venv path. Default /opt/aura-venv." },
+      { name: "venvLocation", in: "body", type: "string", doc: "Shared-mode parent dir (e.g. /mnt/shared/aura)." },
+      { name: "pythonVersion", in: "body", type: "string", doc: "Default 3.12." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "packages": [{"name":"vllm==0.19.1"}],
+    "installMode": "per-node",
+    "localVenvPath": "/opt/aura-venv",
+    "pythonVersion": "3.12"
+  }' \\
+  "$AURA_BASE/api/v1/clusters/$CID/python-packages"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "status": "success", "logs": "…uv pip install vllm==0.19.1…", "durationMs": 412332 }` }],
+  },
+  {
+    id: "provision-user",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/users",
+    navLabel: "Provision a user",
+    title: "Provision an Aura user to the cluster",
+    description: <>Creates the Linux account on every node, syncs the munge key, returns the unix UID. The cluster must be <code>ACTIVE</code>.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "userId", in: "body", type: "string", required: true, doc: "Aura user UUID." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"userId":"<aura-user-uuid>"}' \\
+  "$AURA_BASE/api/v1/clusters/$CID/users"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "ok": true, "unixUsername": "alice", "unixUid": 10001 }` }],
+  },
+  {
+    id: "install-metrics",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/metrics/install",
+    navLabel: "Install metrics stack",
+    title: "Install node_exporter + nvidia_gpu_exporter + promtail",
+    description: <>Installs the Prometheus scrape agents on every node and points Prometheus at them. Optionally scope to a subset via <code>hostnames</code>.</>,
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "hostnames", in: "body", type: "string[]", doc: "Optional list of node hostnames to scope to." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" -d '{}' \\
+  "$AURA_BASE/api/v1/clusters/$CID/metrics/install"`,
+    },
+    responses: [{ code: 200, codeLabel: "OK", sample: `{ "ok": true, "scraped": 1, "log": "…" }` }],
+  },
+  {
+    id: "deploy-metrics-stack",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/metrics/stack",
+    navLabel: "Deploy Prometheus + Grafana",
+    title: "Deploy the Prometheus + Grafana (+ optional Loki) stack",
+    description: (
+      <>
+        Installs Prometheus, Grafana (and Loki when{" "}
+        <code>metrics.lokiEnabled</code>) on the cluster&apos;s stack host
+        (defaults to the controller). Supervisor-aware: VM/bare-metal
+        hosts use systemd, containers fall through to pm2-go (the same
+        supervisor the bootstrap installs). Auto-generates a Grafana
+        admin password and persists it on the cluster config.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+    ],
+    request: {
+      sample: `curl -s -X POST -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CID/metrics/stack"`,
+    },
+    responses: [
+      { code: 200, codeLabel: "OK", sample: `{
+  "kind": "task",
+  "taskId": "…",
+  "status": "success",
+  "logs": "…",
+  "durationMs": 248123,
+  "clusterId": "…"
+}` },
+    ],
+  },
+  {
+    id: "remove-metrics-stack",
+    group: "provisioning",
+    method: "DELETE",
+    path: "/api/v1/clusters/:cluster/metrics/stack",
+    navLabel: "Remove Prometheus + Grafana",
+    title: "Tear down the metrics stack",
+    description: (
+      <>
+        Stops and removes Prometheus / Grafana / Loki on the stack host
+        (via whichever supervisor the deploy used) and clears the
+        persisted Grafana password from the cluster config.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+    ],
+    request: {
+      sample: `curl -s -X DELETE \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CID/metrics/stack"`,
+    },
+    responses: [
+      { code: 200, codeLabel: "OK", sample: `{ "kind":"task","taskId":"…","status":"success","logs":"…","durationMs":12345,"clusterId":"…" }` },
+    ],
+  },
+  {
     id: "delete-node",
     group: "provisioning",
     method: "DELETE",

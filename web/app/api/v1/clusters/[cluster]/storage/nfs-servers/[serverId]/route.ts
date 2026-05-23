@@ -30,8 +30,8 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     authHeader: req.headers.get("authorization") ?? "",
     body: { server, action: "remove" },
   });
-  if ("status" in r && (r.status === "success" || r.status === "failed")) {
+  if (r.kind === "task") {
     return NextResponse.json({ ...r, clusterId: id }, { status: r.status === "success" ? 200 : 500 });
   }
-  return NextResponse.json(r.payload ?? { error: "Failed" }, { status: r.status });
+  return NextResponse.json((r.payload as object) ?? { error: "Failed" }, { status: r.status });
 }

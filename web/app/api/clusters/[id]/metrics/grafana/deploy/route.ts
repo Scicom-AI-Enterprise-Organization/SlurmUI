@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
@@ -59,8 +59,11 @@ const DEFAULT_DATA_PATH = "/var/lib/aura-metrics";
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies (UI) and Bearer aura_*
+  // tokens (CLI / v1 wrappers).
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -420,8 +423,86 @@ case "$ARCH" in
   *) echo "[error] Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
+# Pick a supervisor (systemd on VM/bare-metal, pm2-go on containers). The
+# same probe the bootstrap heartbeat uses — /run/systemd/system is created
+# by systemd itself, so its absence means we're in a container.
+if [ -d /run/systemd/system ]; then
+  SUPERVISOR=systemd
+elif command -v pm2 >/dev/null 2>&1 && [ -d /root/.pm2-go ]; then
+  SUPERVISOR=pm2
+else
+  SUPERVISOR=none
+fi
+echo "[supervisor] using: $SUPERVISOR"
+PM2_DIR=/etc/aura/pm2
+[ "$SUPERVISOR" = "pm2" ] && $S mkdir -p $PM2_DIR
+
+# install_service NAME EXEC ARGS_JSON USER [CWD]
+# Registers EXEC as a long-running daemon under whichever supervisor we
+# picked. ARGS_JSON is a JSON array string (so we can preserve arg
+# boundaries when args contain spaces / colons / equals).
+install_service() {
+  local svc=$1 exec_path=$2 args=$3 user=$4 cwd=$5
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    local user_block=""
+    [ -n "$user" ] && user_block="User=$user
+Group=$user
+"
+    local wd_block=""
+    [ -n "$cwd" ] && wd_block="WorkingDirectory=$cwd
+"
+    local args_flat
+    args_flat=$(echo "$args" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))' 2>/dev/null || echo "")
+    $S tee /etc/systemd/system/$svc.service >/dev/null <<UNIT
+[Unit]
+Description=$svc
+After=network.target
+
+[Service]
+$user_block$wd_block Type=simple
+ExecStart=$exec_path $args_flat
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=10000
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    $S systemctl daemon-reload
+    $S systemctl enable --now $svc
+    $S systemctl restart $svc
+  else
+    local cfg=$PM2_DIR/$svc.json
+    local cwd_val=\${cwd:-/}
+    $S bash -c "cat > $cfg" <<PM2_JSON
+[{"name":"$svc","executable_path":"$exec_path","args":$args,"cwd":"$cwd_val","autorestart":true}]
+PM2_JSON
+    # setsid so the daemon survives our SSH session terminating.
+    setsid --wait /usr/local/bin/pm2 start $cfg >/dev/null 2>&1 || true
+    setsid --wait /usr/local/bin/pm2 dump >/dev/null 2>&1 || true
+  fi
+}
+
+# stop_service / restart_service — supervisor-aware no-ops if the service
+# isn't registered. Used by the password-reset block (stops grafana, then
+# install_service brings it back up).
+stop_service() {
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    $S systemctl stop "$1" 2>/dev/null || true
+  else
+    $S /usr/local/bin/pm2 stop "$1" >/dev/null 2>&1 || true
+  fi
+}
+restart_service() {
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    $S systemctl restart "$1"
+  else
+    setsid --wait /usr/local/bin/pm2 restart "$1" >/dev/null 2>&1 || true
+  fi
+}
+
 ############################################################
-# Prometheus binary + systemd unit
+# Prometheus binary + supervisor service
 ############################################################
 echo "[prometheus] installing v${PROMETHEUS_VERSION} ($NEARCH)..."
 $S id prometheus >/dev/null 2>&1 || $S useradd --no-create-home --shell /usr/sbin/nologin prometheus
@@ -451,32 +532,7 @@ echo "${promB64}" | base64 -d | $S tee /etc/prometheus/prometheus.yml >/dev/null
 $S chown -R prometheus:prometheus ${promDataDir} /etc/prometheus/sd
 $S chown prometheus:prometheus /etc/prometheus/prometheus.yml
 
-$S tee /etc/systemd/system/prometheus.service >/dev/null <<UNIT
-[Unit]
-Description=Prometheus
-After=network.target
-
-[Service]
-User=prometheus
-Group=prometheus
-Type=simple
-ExecStart=/usr/local/bin/prometheus \\
-  --config.file=/etc/prometheus/prometheus.yml \\
-  --storage.tsdb.path=${promDataDir} \\
-  --storage.tsdb.retention.time=${metrics.retention} \\
-  --web.enable-lifecycle \\
-  --web.listen-address=:${metrics.prometheusPort}
-ExecReload=/bin/kill -HUP \\$MAINPID
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-$S systemctl daemon-reload
-$S systemctl enable prometheus
-$S systemctl restart prometheus
+install_service prometheus /usr/local/bin/prometheus '["--config.file=/etc/prometheus/prometheus.yml","--storage.tsdb.path=${promDataDir}","--storage.tsdb.retention.time=${metrics.retention}","--web.enable-lifecycle","--web.listen-address=:${metrics.prometheusPort}"]' prometheus
 
 ${lokiEnabled ? `############################################################
 # Loki binary + systemd unit (optional log aggregation)
@@ -511,41 +567,35 @@ $S mkdir -p /etc/loki ${lokiDataDir} ${lokiDataDir}/chunks ${lokiDataDir}/rules 
 echo "${lokiB64}" | base64 -d | $S tee /etc/loki/loki.yaml >/dev/null
 $S chown -R loki:loki ${lokiDataDir} /etc/loki
 
-$S tee /etc/systemd/system/loki.service >/dev/null <<UNIT
-[Unit]
-Description=Loki log aggregator
-After=network.target
-
-[Service]
-User=loki
-Group=loki
-Type=simple
-ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yaml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-$S systemctl daemon-reload
-$S systemctl enable loki
-$S systemctl restart loki
+install_service loki /usr/local/bin/loki '["-config.file=/etc/loki/loki.yaml"]' loki
 ` : `############################################################
 # Loki DISABLED in cluster config — tear down Loki on the stack host
 # AND sweep promtail off every node (since they were paired together).
 ############################################################
 echo "[loki] log aggregation disabled in config — tearing down"
-if systemctl list-unit-files 2>/dev/null | grep -q '^loki\\.service'; then
-  echo "[loki] stopping & disabling unit"
-  $S systemctl disable --now loki 2>&1 | tail -3
-  $S rm -f /etc/systemd/system/loki.service /usr/local/bin/loki
+LOKI_PRESENT=0
+if [ "$SUPERVISOR" = "systemd" ] && systemctl list-unit-files 2>/dev/null | grep -q '^loki\\.service'; then
+  LOKI_PRESENT=1
+elif [ "$SUPERVISOR" = "pm2" ] && [ -f $PM2_DIR/loki.json ]; then
+  LOKI_PRESENT=1
+fi
+if [ "$LOKI_PRESENT" = "1" ]; then
+  echo "[loki] stopping & removing"
+  if [ "$SUPERVISOR" = "systemd" ]; then
+    $S systemctl disable --now loki 2>&1 | tail -3
+    $S rm -f /etc/systemd/system/loki.service
+    $S systemctl daemon-reload 2>/dev/null || true
+  else
+    $S /usr/local/bin/pm2 delete loki >/dev/null 2>&1 || true
+    setsid --wait /usr/local/bin/pm2 dump >/dev/null 2>&1 || true
+    $S rm -f $PM2_DIR/loki.json
+  fi
+  $S rm -f /usr/local/bin/loki
   $S rm -rf /etc/loki ${lokiDataDir}
-  $S systemctl daemon-reload 2>/dev/null || true
   $S id loki >/dev/null 2>&1 && $S userdel loki 2>/dev/null || true
   echo "[loki] removed"
 else
-  echo "[loki] no unit installed — nothing to remove on stack host"
+  echo "[loki] not registered with $SUPERVISOR — nothing to remove on stack host"
 fi
 
 echo "[promtail] sweeping every node to remove promtail (lokiEnabled=false)"
@@ -659,27 +709,15 @@ done
 
 $S chown -R grafana:grafana ${grafDataDir} /etc/grafana
 
-$S tee /etc/systemd/system/grafana.service >/dev/null <<UNIT
-[Unit]
-Description=Grafana
-After=network.target prometheus.service
-
-[Service]
-User=grafana
-Group=grafana
-Type=simple
-WorkingDirectory=/opt/grafana
-ExecStart=$GRAFANA_BIN $GRAFANA_ARGS --homepath=/opt/grafana --config=/etc/grafana/grafana.ini
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=10000
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-$S systemctl daemon-reload
-$S systemctl enable grafana
+# Build the JSON args array. The "server" subcommand is only present on
+# Grafana 11+ (where the entry binary is /opt/grafana/bin/grafana). On
+# older releases (grafana-server) we skip it.
+if [ -n "$GRAFANA_ARGS" ]; then
+  GRAFANA_ARGS_JSON="[\\"$GRAFANA_ARGS\\",\\"--homepath=/opt/grafana\\",\\"--config=/etc/grafana/grafana.ini\\"]"
+else
+  GRAFANA_ARGS_JSON='["--homepath=/opt/grafana","--config=/etc/grafana/grafana.ini"]'
+fi
+install_service grafana "$GRAFANA_BIN" "$GRAFANA_ARGS_JSON" grafana /opt/grafana
 
 # admin_password in grafana.ini is only honoured when Grafana initialises
 # the SQLite DB for the first time. On every subsequent deploy we rotate
@@ -716,7 +754,7 @@ else
 fi
 
 if [ -f ${grafDataDir}/grafana.db ] && [ -n "$GRAFANA_CLI_CMD" ]; then
-  $S systemctl stop grafana 2>/dev/null || true
+  stop_service grafana
   sleep 1
   $S $GRAFANA_CLI_CMD --homepath=/opt/grafana --config=/etc/grafana/grafana.ini admin reset-admin-password "$PWD_NEW" 2>&1 | tail -20
   RESET_RC=\${PIPESTATUS[0]}
@@ -725,7 +763,7 @@ if [ -f ${grafDataDir}/grafana.db ] && [ -n "$GRAFANA_CLI_CMD" ]; then
 elif [ -f ${grafDataDir}/grafana.db ]; then
   echo "[grafana] WARNING db exists but no CLI binary found — admin password NOT rotated; teardown the stack and re-deploy to reset"
 fi
-$S systemctl restart grafana
+restart_service grafana
 
 echo ""
 echo "[stack] Probing endpoints..."
