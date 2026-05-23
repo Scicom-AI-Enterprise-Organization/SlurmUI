@@ -11,3 +11,9 @@
     marker_end: "end"
     block: "{{ hosts_block_content }}"
     create: false
+    # Write atomically into /etc/hosts BY VALUE rather than the default
+    # tmp-rename-replace dance. Containers usually bind-mount /etc/hosts
+    # from the host so the inode can't be renamed over (EBUSY: "Device
+    # or resource busy"). `unsafe_writes` falls back to a truncate+write
+    # in place which works with bind mounts.
+    unsafe_writes: true

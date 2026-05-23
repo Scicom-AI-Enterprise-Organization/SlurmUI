@@ -32,11 +32,21 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   };
 
   const marker = `__ACCT_${Date.now()}__`;
+  // Detect supervisor inline so a containerised controller (pm2) reports
+  // slurmdbd liveness via pm2-go's PID file instead of systemctl.
   const script = `#!/bin/bash
 set +e
 echo "${marker}_START"
 grep -E '^AccountingStorageType=|^AccountingStorageEnforce=|^PriorityType=' /etc/slurm/slurm.conf 2>/dev/null || echo "NO_CONF"
-echo "DBD_ACTIVE=$(systemctl is-active slurmdbd 2>/dev/null)"
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  echo "DBD_ACTIVE=$(systemctl is-active slurmdbd 2>/dev/null)"
+else
+  if [ -f /root/.pm2-go/pids/slurmdbd.pid ] && kill -0 "$(cat /root/.pm2-go/pids/slurmdbd.pid)" 2>/dev/null; then
+    echo "DBD_ACTIVE=active"
+  else
+    echo "DBD_ACTIVE=inactive"
+  fi
+fi
 echo "${marker}_END"
 `;
 

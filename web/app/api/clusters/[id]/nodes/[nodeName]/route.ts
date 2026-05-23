@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
@@ -9,11 +10,11 @@ interface RouteParams {
 }
 
 // DELETE /api/clusters/[id]/nodes/[nodeName] — remove a node from slurm.conf and DB
-export async function DELETE(_req: NextRequest, { params }: RouteParams) {
+export async function DELETE(req: NextRequest, { params }: RouteParams) {
   const { id, nodeName } = await params;
-  const session = await auth();
-
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -62,9 +63,24 @@ set +e
 S=""
 if [ "$(id -u)" != "0" ]; then S="sudo"; fi
 
+# Detect supervisor inline — slurm.conf editing is the same on systemd
+# and pm2 hosts, but the stop/start commands differ. Without this branch
+# a container controller fails with "System has not been booted with
+# systemd as init system (PID 1). Can't operate."
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  SUPERVISOR=systemd
+else
+  SUPERVISOR=pm2
+fi
+
 # Stop slurmctld and slurmd so we can clear state
-$S systemctl stop slurmctld 2>&1 || true
-$S systemctl stop slurmd 2>&1 || true
+if [ "$SUPERVISOR" = "systemd" ]; then
+  $S systemctl stop slurmctld 2>&1 || true
+  $S systemctl stop slurmd 2>&1 || true
+else
+  $S /usr/local/bin/pm2 stop slurmctld 2>&1 || true
+  $S /usr/local/bin/pm2 stop slurmd 2>&1 || true
+fi
 
 # Remove NodeName line
 $S sed -i "/^NodeName=${nodeName} /d" /etc/slurm/slurm.conf
@@ -94,10 +110,18 @@ echo "  cleared cached slurmctld state"
 # state, so both need to come back. If we skip slurmd, the controller node
 # (which also runs slurmd in single-VM / all-in-one setups) ends up stuck
 # in UNKNOWN/NOT_RESPONDING after every delete.
-$S systemctl start slurmctld 2>&1 || true
-echo "  slurmctld restarted"
-$S systemctl start slurmd 2>&1 || true
-echo "  slurmd restarted"
+if [ "$SUPERVISOR" = "systemd" ]; then
+  $S systemctl start slurmctld 2>&1 || true
+  echo "  slurmctld restarted"
+  $S systemctl start slurmd 2>&1 || true
+  echo "  slurmd restarted"
+else
+  # pm2-go start command re-spawns the stopped entry.
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 || true
+  echo "  slurmctld restarted"
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmd.json 2>&1 || true
+  echo "  slurmd restarted"
+fi
 `;
 
   // Run the script via sshExecScript (handles bastion mode properly via base64)
@@ -307,8 +331,14 @@ echo "    ${nodeLine}"
 
 # Bounce slurmctld + slurmd so the new config is picked up. slurmd on this
 # box may be the controller's (all-in-one single-VM); restart is cheap.
-$S systemctl restart slurmctld 2>&1 | head -3
-$S systemctl restart slurmd 2>&1 | head -3 || true
+# Same supervisor branch as the delete path above.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  $S systemctl restart slurmctld 2>&1 | head -3
+  $S systemctl restart slurmd 2>&1 | head -3 || true
+else
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | head -3
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmd.json 2>&1 | head -3 || true
+fi
 echo "  slurmctld + slurmd restarted"
 
 # If the IP changed, try to nudge the node out of DOWN/DRAIN so it picks

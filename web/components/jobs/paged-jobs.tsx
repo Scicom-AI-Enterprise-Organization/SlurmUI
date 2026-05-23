@@ -23,6 +23,7 @@ interface Job {
   createdAt: string;
   name?: string | null;
   cluster?: { name: string };
+  experimentRunUrl?: string | null;
 }
 
 interface Pagination { page: number; limit: number; total: number; pages: number }

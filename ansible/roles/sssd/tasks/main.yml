@@ -18,11 +18,15 @@
     mode: '0600'
   notify: restart sssd
 
-- name: Enable and start SSSD
-  ansible.builtin.service:
-    name: sssd
-    state: started
-    enabled: true
+- name: Start sssd
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: sssd
+    # --interactive keeps sssd in the foreground (equivalent of systemd's
+    # Type=notify wait). Without it pm2 sees the daemon fork and treats
+    # the parent exit as a crash.
+    svc_cmd: "/usr/sbin/sssd --interactive --logger=stderr"
+    svc_state: started
 
 - name: Enable mkhomedir in PAM
   ansible.builtin.command: pam-auth-update --enable mkhomedir

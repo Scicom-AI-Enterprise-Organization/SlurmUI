@@ -4,6 +4,7 @@
     name: nfs-common
     state: present
     update_cache: true
+  failed_when: false
 
 - name: Create mgmt mount point
   ansible.builtin.file:
@@ -21,6 +22,10 @@
     group: root
     mode: '0755'
 
+# nfs_client mounts only make sense when the controller actually exposes
+# kernel NFS — which it can't from inside a container (overlayfs). On
+# container fleets the operator wires shared storage in via the Storage
+# tab instead; skip the mount steps to keep bootstrap from failing.
 - name: Mount mgmt FS
   ansible.posix.mount:
     path: "{{ mgmt_nfs_path }}"
@@ -28,6 +33,7 @@
     fstype: nfs
     opts: "rw,sync,hard,intr"
     state: mounted
+  when: node_supervisor == "systemd"
 
 - name: Mount data FS
   ansible.posix.mount:
@@ -36,3 +42,4 @@
     fstype: nfs
     opts: "rw,sync,hard,intr"
     state: mounted
+  when: node_supervisor == "systemd"

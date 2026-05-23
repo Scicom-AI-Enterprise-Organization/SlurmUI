@@ -15,6 +15,38 @@
     group: "{{ munge_group }}"
     mode: '0711'
 
+# /var/lib/munge holds the PRNG seed dir. munged refuses to start with
+# "PRNG seed dir is insecure: invalid ownership" unless it's owned by
+# the munge user and chmod 0700. On a fresh container the apt postinst
+# is blocked by policy-rc.d so it never fixes the perms — set them here.
+- name: Ensure /var/lib/munge has correct ownership / perms
+  ansible.builtin.file:
+    path: /var/lib/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0700'
+
+# /run/munge is where munged drops its socket. systemd's munge.service
+# creates it as a RuntimeDirectory; under pm2-go nothing does — so we
+# create it ourselves so the very first start has a place to put
+# munge.socket.2 (slurmctld and slurmd look for that path).
+- name: Ensure /run/munge exists with correct ownership / perms
+  ansible.builtin.file:
+    path: /run/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0755'
+
+- name: Ensure /var/log/munge has correct ownership
+  ansible.builtin.file:
+    path: /var/log/munge
+    state: directory
+    owner: "{{ munge_user }}"
+    group: "{{ munge_group }}"
+    mode: '0700'
+
 # Controller key handling has three cases:
 #   1. /etc/munge/munge.key exists  → leave it alone
 #   2. /mgmt/munge.key exists, local missing → copy from mgmt
@@ -91,8 +123,18 @@
   when: inventory_hostname in groups['slurm_workers']
   notify: restart munge
 
-- name: Enable and start munge
-  ansible.builtin.service:
-    name: munge
-    state: started
-    enabled: true
+# Start munged via whichever supervisor this host has. munged needs to stay
+# in the foreground for pm2 to track it; --foreground is the systemd-friendly
+# flag too so the same command line works everywhere.
+#
+# Drop to the munge user via runuser before exec'ing munged: pm2-go v0.1.2
+# has no `user` field in its JSON schema (confirmed against
+# github.com/dunstorm/pm2-go/app/file.go::Data), so the supervisor would
+# run as root by default — and munged refuses to use a seed dir whose
+# owner != EUID. systemd's unit uses User=munge for the same reason.
+- name: Start munged
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: munge
+    svc_cmd: "/usr/sbin/runuser -u {{ munge_user }} -- /usr/sbin/munged --foreground"
+    svc_state: started

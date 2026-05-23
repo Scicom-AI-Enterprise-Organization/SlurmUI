@@ -1,9 +1,12 @@
 # Managed by Aura — do not edit manually
 ClusterName={{ slurm_cluster_name }}
-# slurmctld validates that its local hostname matches SlurmctldHost — pass the
-# hostname (with the IP as the addr override) so a single-VM bootstrap works
-# regardless of what the user typed for `slurm_controller_host` (often an IP).
-SlurmctldHost={{ ansible_hostname }}({{ slurm_controller_host }})
+# slurmctld validates that its local hostname matches SlurmctldHost. We use
+# the controller's primary INTERNAL IP (the address bound to the default-
+# route interface) rather than `slurm_controller_host` because the latter
+# is what Aura uses to SSH in — often an *external* / NATed IP that isn't
+# reachable from inside a container. slurmd on the same host needs to
+# dial the controller via an address that's actually bound locally.
+SlurmctldHost={{ ansible_hostname }}({{ ansible_default_ipv4.address }})
 
 AuthType=auth/munge
 SlurmUser={{ slurm_user }}
@@ -34,7 +37,15 @@ AccountingStorageType=accounting_storage/none
 # works in VMs and containers. Admins running on bare metal with cgroup v1
 # or a properly-configured v2 cluster can switch this back.
 ProctrackType=proctrack/linuxproc
-TaskPlugin=task/affinity
+# task/affinity needs sched_setaffinity(), which fails with EPERM inside
+# containers that don't grant CAP_SYS_NICE — slurmstepd then dies with
+# "task_g_set_affinity: Operation not permitted" and the job never
+# launches. task/none skips CPU pinning entirely; on a container node
+# that's the right default (the scheduler still tracks CPUs, just
+# doesn't bind processes to specific cores). VM/bare-metal admins can
+# switch back via cluster-config.json: { "slurm_task_plugin":
+# "task/affinity" }.
+TaskPlugin={{ slurm_task_plugin | default('task/none') }}
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
@@ -64,7 +75,7 @@ GresTypes=gpu
 # slurmctld won't start without at least one NodeName / PartitionName, so for
 # a fresh bootstrap we register the controller itself as an all-in-one node
 # using the gathered facts. Real nodes get added via the UI's Nodes tab.
-NodeName={{ ansible_hostname }} NodeAddr={{ slurm_controller_host }} CPUs={{ ansible_processor_vcpus }} Sockets=1 CoresPerSocket={{ ansible_processor_vcpus }} ThreadsPerCore=1 RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
+NodeName={{ ansible_hostname }} NodeAddr={{ ansible_default_ipv4.address }} CPUs={{ ansible_processor_vcpus }} Sockets=1 CoresPerSocket={{ ansible_processor_vcpus }} ThreadsPerCore=1 RealMemory={{ (ansible_memtotal_mb * 0.9) | int }} State=UNKNOWN
 PartitionName=main Nodes={{ ansible_hostname }} Default=YES MaxTime=INFINITE State=UP OverSubscribe=YES
 {% else %}
 {% for node in slurm_nodes %}
@@ -85,9 +96,14 @@ PartitionName=main Nodes={{ slurm_nodes | map(attribute='expression') | join(','
 {% for partition in slurm_partitions %}
 {# `partition.nodes` may legitimately be either a list (from the Partitions
    tab) or a comma-separated string (from add-node). Normalise so jinja's
-   join doesn't iterate the characters of a string. #}
-{% set _node_str = partition.nodes if (partition.nodes is string) else (partition.nodes | join(',')) %}
-PartitionName={{ partition.name }} Nodes={{ _node_str }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time }} State=UP OverSubscribe=YES
+   join doesn't iterate the characters of a string. When `.nodes` is
+   missing entirely (e.g. an early seed that pre-dates real node
+   registration) fall back to Slurm's `ALL` wildcard so the bootstrap
+   doesn't blow up. #}
+{% set _raw_nodes = partition.nodes | default('ALL') %}
+{% set _node_str = _raw_nodes if (_raw_nodes is string) else (_raw_nodes | join(',')) %}
+{% set _node_str = _node_str if _node_str | length > 0 else 'ALL' %}
+PartitionName={{ partition.name }} Nodes={{ _node_str }} Default={{ 'YES' if partition.default else 'NO' }} MaxTime={{ partition.max_time | default('INFINITE') }} State=UP OverSubscribe=YES
 {% endfor %}
 {% endif %}
 {% endif %}

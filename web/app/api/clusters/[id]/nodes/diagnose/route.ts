@@ -95,10 +95,24 @@ echo ""
 echo "[4/6] slurmd status on the node (via SSH)..."
 timeout 10 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
   echo "  Uptime: $(uptime)"
-  echo "  slurmd:"
   S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
-  $S systemctl is-active slurmd && echo "    active" || echo "    NOT active"
-  $S systemctl status slurmd --no-pager -l 2>&1 | head -15 | sed "s/^/    /"
+  # Detect supervisor on the node itself so a container worker reports
+  # via pm2 even when the controller is on systemd (and vice versa).
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    echo "  supervisor: systemd"
+    echo "  slurmd:"
+    $S systemctl is-active --quiet slurmd && echo "    active" || echo "    NOT active"
+    $S systemctl status slurmd --no-pager -l 2>&1 | head -15 | sed "s/^/    /"
+  else
+    echo "  supervisor: pm2-go"
+    echo "  slurmd:"
+    if $S [ -f /root/.pm2-go/pids/slurmd.pid ] && $S kill -0 "$(cat /root/.pm2-go/pids/slurmd.pid 2>/dev/null)" 2>/dev/null; then
+      echo "    active (pid $(cat /root/.pm2-go/pids/slurmd.pid))"
+    else
+      echo "    NOT active"
+    fi
+    $S /usr/local/bin/pm2 ls 2>&1 | head -25 | sed "s/^/    /"
+  fi
   echo ""
   echo "  slurmd process state (D = stuck in I/O, likely NFS/s3fs):"
   ps -eo pid,stat,comm | grep -E "\\bslurmd\\b|PID" | head -5 | sed "s/^/    /"
@@ -118,7 +132,11 @@ echo ""
 echo "[6/6] Last 15 slurmd log lines on the node..."
 timeout 10 ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 -p ${nodePort} ${nodeUser}@${nodeIp} '
   S=""; [ "$(id -u)" != "0" ] && S="sudo -n"
-  $S journalctl -u slurmd -n 15 --no-pager 2>&1 || $S tail -n 15 /var/log/slurm/slurmd.log 2>&1
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    $S journalctl -u slurmd -n 15 --no-pager 2>&1 || $S tail -n 15 /var/log/slurm/slurmd.log 2>&1
+  else
+    $S tail -n 15 /root/.pm2-go/logs/slurmd-out.log /root/.pm2-go/logs/slurmd-err.log 2>&1
+  fi
 ' 2>&1 | sed 's/^/  /' || true
 echo ""
 

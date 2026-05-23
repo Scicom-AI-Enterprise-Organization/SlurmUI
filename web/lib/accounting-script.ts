@@ -7,6 +7,98 @@
 // any provided users. Safe to re-run (idempotent-ish — ALTER USER resets the
 // password each time so auth drift is self-healing).
 
+/**
+ * Bash that restarts slurmctld via whichever supervisor the host runs
+ * (systemd / pm2-go) and prints the resulting active state. Shared
+ * between the disable + fifo paths below.
+ */
+function restartSlurmctldSnippet(): string {
+  return `if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  $S systemctl restart slurmctld 2>&1 | tail -5 || true
+  sleep 2
+  $S systemctl is-active --quiet slurmctld && echo "[aura] slurmctld is active" || echo "[aura] slurmctld NOT active"
+else
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | tail -5 || true
+  sleep 2
+  if $S [ -f /root/.pm2-go/pids/slurmctld.pid ] && $S kill -0 "$(cat /root/.pm2-go/pids/slurmctld.pid)" 2>/dev/null; then
+    echo "[aura] slurmctld is active"
+  else
+    echo "[aura] slurmctld NOT active"
+  fi
+fi`;
+}
+
+/** Strip accounting from slurm.conf and restart slurmctld so jobs flow
+ *  through without account enforcement. */
+export function buildDisableAccountingScript(): string {
+  return `#!/bin/bash
+set -euo pipefail
+S=""; [ "$(id -u)" != "0" ] && S="sudo"
+
+echo "============================================"
+echo "  Disabling Slurm accounting"
+echo "============================================"
+
+CONF=/etc/slurm/slurm.conf
+if [ ! -f "$CONF" ]; then
+  echo "[error] $CONF not found — run Bootstrap first"
+  exit 1
+fi
+
+echo "[aura] Current AccountingStorageType lines:"
+$S grep -n '^AccountingStorage' "$CONF" || echo "  (none)"
+
+$S sed -i '/^AccountingStorageType=/d;/^AccountingStorageEnforce=/d;/^AccountingStorageHost=/d;/^AccountingStoragePass=/d;/^AccountingStorageUser=/d;/^AccountingStoragePort=/d;/^AccountingStorageLoc=/d' "$CONF"
+echo "AccountingStorageType=accounting_storage/none" | $S tee -a "$CONF" > /dev/null
+
+echo ""
+echo "[aura] After:"
+$S grep -n '^AccountingStorage' "$CONF"
+
+echo ""
+echo "[aura] Restarting slurmctld..."
+${restartSlurmctldSnippet()}
+
+echo ""
+echo "[aura] Done. Jobs submit without account enforcement."
+`;
+}
+
+/** Swap PriorityType to FIFO ordering. */
+export function buildFifoSchedulerScript(): string {
+  return `#!/bin/bash
+set -euo pipefail
+S=""; [ "$(id -u)" != "0" ] && S="sudo"
+
+echo "============================================"
+echo "  Switching to FIFO priority scheduling"
+echo "============================================"
+
+CONF=/etc/slurm/slurm.conf
+if [ ! -f "$CONF" ]; then
+  echo "[error] $CONF not found — run Bootstrap first"
+  exit 1
+fi
+
+echo "[aura] Current scheduler config:"
+$S grep -nE '^PriorityType=|^SchedulerType=' "$CONF" || echo "  (defaults)"
+
+$S sed -i '/^PriorityType=/d' "$CONF"
+echo "PriorityType=priority/basic" | $S tee -a "$CONF" > /dev/null
+
+echo ""
+echo "[aura] After:"
+$S grep -nE '^PriorityType=' "$CONF"
+
+echo ""
+echo "[aura] Restarting slurmctld..."
+${restartSlurmctldSnippet()}
+
+echo ""
+echo "[aura] Done. Jobs are now ordered FIFO — no fair-share math."
+`;
+}
+
 export function buildEnableSlurmdbdScript(args: {
   dbPass: string;
   clusterSlurmName: string;
@@ -38,7 +130,44 @@ $S apt-get update -qq 2>&1 | tail -3
 $S apt-get install -y -qq mariadb-server slurmdbd 2>&1 | tail -3
 
 echo "[aura] Starting MariaDB..."
-$S systemctl enable --now mariadb 2>&1 | tail -3
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  $S systemctl enable --now mariadb 2>&1 | tail -3
+else
+  # Container path (pm2-go): apt's postinst gets blocked by policy-rc.d
+  # so neither the data dir nor the unix socket exist. Initialize both,
+  # register with pm2-go, then wait for the socket to appear.
+  $S mkdir -p /run/mysqld
+  $S chown mysql:mysql /run/mysqld
+  $S mkdir -p /var/lib/mysql /etc/aura/pm2 /var/log/aura
+  if [ ! -f /var/lib/mysql/aria_log_control ]; then
+    echo "  initialising /var/lib/mysql data dir..."
+    $S mariadb-install-db --user=mysql --datadir=/var/lib/mysql 2>&1 | tail -3 || true
+  fi
+  $S bash -c 'cat > /etc/aura/pm2/mariadb.json' <<'MARIA_JSON'
+[
+  {
+    "name": "mariadb",
+    "executable_path": "/usr/sbin/mariadbd",
+    "args": ["--user=mysql", "--datadir=/var/lib/mysql", "--socket=/run/mysqld/mysqld.sock", "--pid-file=/run/mysqld/mariadb.pid"],
+    "cwd": "/",
+    "autorestart": true
+  }
+]
+MARIA_JSON
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/mariadb.json 2>&1 | tail -3
+  echo "  waiting for /run/mysqld/mysqld.sock..."
+  for i in $(seq 1 30); do
+    if $S [ -S /run/mysqld/mysqld.sock ]; then
+      echo "    socket ready"; break
+    fi
+    if [ $i -eq 30 ]; then
+      echo "[error] MariaDB socket never appeared. Last 30 pm2 log lines:"
+      $S tail -30 /root/.pm2-go/logs/mariadb-err.log /root/.pm2-go/logs/mariadb-out.log 2>/dev/null | sed 's/^/    /' || true
+      exit 1
+    fi
+    sleep 1
+  done
+fi
 sleep 2
 
 DBPASS='${dbPass}'
@@ -71,8 +200,12 @@ $S chown slurm:slurm /etc/slurm/slurmdbd.conf
 $S chmod 600 /etc/slurm/slurmdbd.conf
 
 echo "[aura] Starting slurmdbd..."
-$S systemctl restart slurmdbd 2>&1 | tail -3 || true
-$S systemctl enable slurmdbd 2>&1 | tail -3 || true
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  $S systemctl restart slurmdbd 2>&1 | tail -3 || true
+  $S systemctl enable slurmdbd 2>&1 | tail -3 || true
+else
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmdbd.json 2>&1 | tail -3 || true
+fi
 sleep 5
 
 echo "[aura] Verifying slurmdbd is actually listening on 6819..."
@@ -83,8 +216,12 @@ for i in $(seq 1 10); do
   fi
   if [ $i -eq 10 ]; then
     echo "[error] slurmdbd is not listening on 6819 after 10s. Last 30 log lines:"
-    $S journalctl -u slurmdbd -n 30 --no-pager 2>&1 | sed 's/^/    /' || \
-      $S tail -30 /var/log/slurm/slurmdbd.log 2>&1 | sed 's/^/    /' || true
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      $S journalctl -u slurmdbd -n 30 --no-pager 2>&1 | sed 's/^/    /' || \
+        $S tail -30 /var/log/slurm/slurmdbd.log 2>&1 | sed 's/^/    /' || true
+    else
+      $S tail -n 30 /root/.pm2-go/logs/slurmdbd-out.log /root/.pm2-go/logs/slurmdbd-err.log 2>&1 | sed 's/^/    /' || true
+    fi
     exit 1
   fi
   sleep 1
@@ -99,7 +236,11 @@ AccountingStorageEnforce=associations
 SLURM_ACCT_EOF
 
 echo "[aura] Restarting slurmctld..."
-$S systemctl restart slurmctld 2>&1 | tail -5
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  $S systemctl restart slurmctld 2>&1 | tail -5
+else
+  $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | tail -5
+fi
 sleep 3
 
 echo "[aura] Registering cluster '${clusterSlurmName}' in sacctmgr..."

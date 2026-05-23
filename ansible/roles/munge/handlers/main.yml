@@ -1,5 +1,7 @@
 ---
 - name: restart munge
-  ansible.builtin.service:
-    name: munge
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: munge
+    svc_cmd: "/usr/sbin/runuser -u {{ munge_user }} -- /usr/sbin/munged --foreground"
+    svc_state: restarted

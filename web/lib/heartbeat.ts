@@ -136,6 +136,11 @@ async function checkSshClusters(): Promise<void> {
     if (!cluster.sshKey) continue;
 
     try {
+      // Probe systemd-presence at the same time as the slurm liveness
+      // check so we can detect-and-persist `node_supervisor` on first
+      // probe — cluster config doesn't have the field until we run this
+      // for the first time. SUP_SYSTEMD/SUP_PM2 markers let us classify
+      // without taking a second round-trip.
       const result = await sshExecSimple(
         {
           host: cluster.controllerHost,
@@ -143,11 +148,38 @@ async function checkSshClusters(): Promise<void> {
           port: cluster.sshPort,
           privateKey: cluster.sshKey.privateKey,
         },
-        // Quick health check: is the host reachable and is slurmctld running?
-        "echo '__OK__' && (systemctl is-active slurmctld 2>/dev/null || echo 'slurm_down')"
+        `echo '__OK__' && \
+(if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then \
+  echo 'SUP_SYSTEMD'; (systemctl is-active --quiet slurmctld || echo 'slurm_down'); \
+else \
+  echo 'SUP_PM2'; \
+  ([ -f /root/.pm2-go/pids/slurmctld.pid ] && kill -0 "$(cat /root/.pm2-go/pids/slurmctld.pid)" 2>/dev/null || echo 'slurm_down'); \
+fi)`,
       );
 
       if (result.success && result.stdout.includes("__OK__")) {
+        // Persist the supervisor on the first heartbeat that learns it,
+        // so the rest of the app (logs, node-diagnose, etc.) doesn't have
+        // to re-probe.
+        const detected: "systemd" | "pm2" =
+          result.stdout.includes("SUP_PM2") ? "pm2" : "systemd";
+        const existing = ((cluster.config ?? {}) as Record<string, unknown>).node_supervisor;
+        if (existing !== detected) {
+          await prisma.cluster
+            .update({
+              where: { id: cluster.id },
+              data: {
+                config: {
+                  ...((cluster.config ?? {}) as Record<string, unknown>),
+                  node_supervisor: detected,
+                } as never,
+              },
+            })
+            .catch((err) =>
+              console.warn(`[Heartbeat] failed to persist node_supervisor for ${cluster.id}:`, err),
+            );
+        }
+
         if (result.stdout.includes("slurm_down")) {
           await updateStatus(cluster.id, "DEGRADED");
         } else {

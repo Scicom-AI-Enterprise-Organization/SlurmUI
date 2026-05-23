@@ -63,6 +63,7 @@ export default async function JobsListServerPage({ params }: Props) {
           sourceName: true,
           name: true,
           script: true,
+          experimentRunUrl: true,
         },
       }),
       prisma.job.count({ where }),

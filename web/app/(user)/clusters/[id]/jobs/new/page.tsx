@@ -752,6 +752,20 @@ export default function NewJobPage() {
   const [submitting, setSubmitting] = useState(false);
   const [gitopsOnly, setGitopsOnly] = useState(false);
 
+  // Experiment-tracker linkage. "none" maps to "don't link", an id maps to
+  // the chosen cluster.config.experiment_trackers entry. defaultExperimentName
+  // is hydrated from the tracker config when picked.
+  const [trackers, setTrackers] = useState<Array<{
+    id: string;
+    name: string;
+    backend: string;
+    trackingUri: string;
+    defaultExperimentName?: string;
+  }>>([]);
+  const [trackerId, setTrackerId] = useState<string>("none");
+  const [trackerExperimentName, setTrackerExperimentName] = useState<string>("");
+  const [trackerRunName, setTrackerRunName] = useState<string>("");
+
   useEffect(() => {
     fetch(`/api/clusters/${clusterId}/gitops-only`)
       .then((r) => (r.ok ? r.json() : { enabled: false }))
@@ -778,6 +792,15 @@ export default function NewJobPage() {
 
         const mounts = (config.storage_mounts ?? []) as Array<{ id: string; mountPath: string; type: string }>;
         setStorageMounts(mounts);
+
+        const trackerList = (config.experiment_trackers ?? []) as Array<{
+          id: string;
+          name: string;
+          backend: string;
+          trackingUri: string;
+          defaultExperimentName?: string;
+        }>;
+        setTrackers(trackerList);
         // /opt is root-only on most distros — slurmd can't cd into it as the
         // submitting user and the job dies before it starts. /tmp is world-
         // writable and exists on every node, so it's a safe default when no
@@ -907,10 +930,17 @@ export default function NewJobPage() {
 
     setSubmitting(true);
     try {
+      const trackerPayload = trackerId !== "none"
+        ? {
+            trackerId,
+            experimentName: trackerExperimentName.trim() || undefined,
+            runName: trackerRunName.trim() || undefined,
+          }
+        : undefined;
       const res = await fetch(`/api/clusters/${clusterId}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, partition }),
+        body: JSON.stringify({ script, partition, tracker: trackerPayload }),
       });
 
       if (res.ok || res.status === 201) {
@@ -1333,6 +1363,80 @@ export default function NewJobPage() {
               <ScriptEditor value={rawScript} onChange={setRawScript} />
             </TabsContent>
           </Tabs>
+
+          {/*
+            Experiment tracker selector — orthogonal to form/raw mode, so it
+            sits outside the Tabs. Only renders when the cluster has at
+            least one tracker configured under Integrations.
+          */}
+          {trackers.length > 0 && (
+            <div className="space-y-3 rounded-md border bg-muted/30 p-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">Experiment Tracker</span>
+                <span className="text-xs text-muted-foreground">
+                  optional — auto-links this job to a tracker run
+                </span>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Tracker</Label>
+                  <Select
+                    value={trackerId}
+                    onValueChange={(v) => {
+                      setTrackerId(v);
+                      // Hydrate the experiment-name field with the tracker's
+                      // default so the user sees what it will be set to.
+                      const t = trackers.find((x) => x.id === v);
+                      if (t?.defaultExperimentName) {
+                        setTrackerExperimentName(t.defaultExperimentName);
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">— no tracker —</SelectItem>
+                      {trackers.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {t.name} ({t.backend})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Experiment Name</Label>
+                  <Input
+                    value={trackerExperimentName}
+                    onChange={(e) => setTrackerExperimentName(e.target.value)}
+                    placeholder="aura-jobs"
+                    disabled={trackerId === "none"}
+                    className="font-mono"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Run Name</Label>
+                  <Input
+                    value={trackerRunName}
+                    onChange={(e) => setTrackerRunName(e.target.value)}
+                    placeholder={jobName || "(uses job name)"}
+                    disabled={trackerId === "none"}
+                    className="font-mono"
+                  />
+                </div>
+              </div>
+              {trackerId !== "none" && (
+                <p className="text-xs text-muted-foreground">
+                  Aura will create the run on submit and inject{" "}
+                  <code className="font-mono">MLFLOW_TRACKING_URI</code> +{" "}
+                  <code className="font-mono">MLFLOW_RUN_ID</code> into the job environment.
+                  Your code can call <code className="font-mono">mlflow.log_metric(...)</code>{" "}
+                  without any extra setup.
+                </p>
+              )}
+            </div>
+          )}
 
           {(() => {
             // Resource availability check (form mode only — raw-mode users

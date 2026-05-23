@@ -46,8 +46,12 @@
     group: "{{ slurm_group }}"
     recurse: true
 
-- name: Enable and start slurmd
-  ansible.builtin.service:
-    name: slurmd
-    state: started
-    enabled: true
+# Start slurmd via whichever supervisor this host advertised (systemd on VMs,
+# pm2-go on container nodes). Run with -D so the daemon stays in the
+# foreground when supervised by pm2; systemd ignores the flag.
+- name: Start slurmd
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmd
+    svc_cmd: "/usr/sbin/slurmd -D -f {{ slurm_config_dir }}/slurm.conf"
+    svc_state: started

@@ -5,6 +5,17 @@ export default auth((req) => {
   const { nextUrl, auth: session } = req;
   const isLoggedIn = !!session?.user;
   const isAuthRoute = nextUrl.pathname.startsWith("/api/auth");
+
+  // Bearer-token requests bypass the session gate so the calling route
+  // can resolve the user via lib/api-auth.ts's getApiUser. Without this
+  // a Bearer-only client can only hit /api/v1/* — anything else 401s
+  // here before reaching the route. The route itself still re-checks
+  // role via getApiUser, so this is just unblocking the pipe, not
+  // weakening auth.
+  const authHeader = req.headers.get("authorization") ?? "";
+  if (authHeader.toLowerCase().startsWith("bearer aura_")) {
+    return NextResponse.next();
+  }
   const isAdminRoute =
     nextUrl.pathname.startsWith("/admin") ||
     nextUrl.pathname.startsWith("/api/clusters") && req.method !== "GET";

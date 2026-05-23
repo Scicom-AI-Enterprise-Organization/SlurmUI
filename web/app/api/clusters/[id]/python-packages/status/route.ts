@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { sshExecScript } from "@/lib/ssh-exec";
 
@@ -8,10 +9,13 @@ interface RouteParams { params: Promise<{ id: string }> }
 // POST — check which python packages are currently installed in the shared venv.
 // Since the venv lives on shared storage, a single `pip list` on the controller
 // is authoritative for every node.
-export async function POST(_req: NextRequest, { params }: RouteParams) {
+export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies (UI) and Bearer aura_*
+  // tokens (CLI / v1 wrappers) via getApiUser.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

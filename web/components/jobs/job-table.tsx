@@ -26,6 +26,7 @@ interface Job {
   createdAt: string;
   name?: string | null;
   cluster?: { name: string };
+  experimentRunUrl?: string | null;
 }
 
 interface JobTableProps {
@@ -129,7 +130,21 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
               )}
               <TableCell>{job.partition}</TableCell>
               <TableCell>
-                <JobStatusBadge status={job.status} />
+                <div className="flex items-center gap-2">
+                  <JobStatusBadge status={job.status} />
+                  {job.experimentRunUrl && (
+                    <a
+                      href={job.experimentRunUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open MLflow run"
+                      onClick={(e) => e.stopPropagation()}
+                      className="rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
+                    >
+                      MLflow
+                    </a>
+                  )}
+                </div>
               </TableCell>
               <TableCell>
                 {/* Use suppressHydrationWarning — server renders in its own

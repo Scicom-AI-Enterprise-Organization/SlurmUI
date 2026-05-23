@@ -4,6 +4,10 @@
     path: /etc/hosts
     regexp: '^127\.0\.1\.1\s'
     state: absent
+    # Same reason as hosts_block — /etc/hosts is bind-mounted in
+    # containers, so the default tmp-rename-replace dance fails with
+    # "Device or resource busy".
+    unsafe_writes: true
 
 - name: Create munge group
   ansible.builtin.group:
@@ -54,4 +58,74 @@
       - acl
     state: present
     update_cache: true
+
+# ---- Process supervisor detection ---------------------------------------
+# Sets the `node_supervisor` host fact ("systemd" | "pm2") that the
+# tasks/_supervisor.yml include reads when starting / restarting services.
+# We probe the running OS at each play start so the same role works on
+# both VM nodes (systemd) and container nodes (pm2-go); admins can
+# override by setting `node_supervisor` explicitly in cluster-config.json.
+- name: Probe for a working systemd
+  # Two checks because container images sometimes ship the `systemctl`
+  # binary without a running PID1 systemd — `systemctl is-system-running`
+  # returns "offline" or non-zero in that case, which we treat as "not
+  # systemd". The `/run/systemd/system` directory is the canonical signal
+  # the daemon actually booted.
+  ansible.builtin.command: test -d /run/systemd/system
+  register: _aura_systemd_probe
+  changed_when: false
+  failed_when: false
+  when: node_supervisor is not defined
+
+- name: Set node_supervisor fact
+  ansible.builtin.set_fact:
+    node_supervisor: "{{ 'systemd' if _aura_systemd_probe.rc == 0 else 'pm2' }}"
+  when: node_supervisor is not defined
+
+- name: Announce supervisor choice
+  ansible.builtin.debug:
+    msg: "Using {{ node_supervisor }} as the process supervisor on {{ inventory_hostname }}"
+
+# Install pm2-go when supervisor=pm2. Skipped entirely on systemd hosts.
+# We pin via PM2_GO_VERSION (overridable in cluster-config.json) so the
+# bootstrap is reproducible — "latest" tags can move under us.
+- name: Install pm2-go (container nodes)
+  when: node_supervisor == "pm2"
+  block:
+    - name: Ensure /usr/local/bin exists
+      ansible.builtin.file:
+        path: /usr/local/bin
+        state: directory
+        mode: '0755'
+
+    - name: Check if pm2 is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/pm2
+      register: _aura_pm2_stat
+
+    - name: Download pm2-go binary
+      # dunstorm/pm2-go publishes bare binaries (no tarball wrapper),
+      # named `pm2-go_<os>_<arch>` — see
+      # https://github.com/dunstorm/pm2-go/releases/tag/v0.1.2.
+      # ansible_architecture is x86_64 / aarch64 on the typical fleet.
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/dunstorm/pm2-go/releases/download/{{ pm2_go_version | default('v0.1.2') }}/pm2-go_linux_{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}
+        dest: /usr/local/bin/pm2-go
+        mode: '0755'
+      when: not _aura_pm2_stat.stat.exists
+
+    - name: Symlink /usr/local/bin/pm2 → pm2-go
+      ansible.builtin.file:
+        src: /usr/local/bin/pm2-go
+        dest: /usr/local/bin/pm2
+        state: link
+        force: true
+      when: not _aura_pm2_stat.stat.exists
+
+    - name: Create pm2 config dir
+      ansible.builtin.file:
+        path: /etc/aura
+        state: directory
+        mode: '0755'
 

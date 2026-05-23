@@ -115,6 +115,16 @@ model Job {
   // demo / dashboard with people who don't have accounts. Off by default;
   // the URL is unguessable enough to be safe with this opt-in.
   proxyPublic Boolean @default(false)
+  // Experiment-tracker linkage. Populated when the submitting user picked a
+  // tracker on the new-job form (cluster.config.experiment_trackers[id]).
+  // experimentRunId is the tracker-side run identifier (MLflow run UUID,
+  // W&B run id, Comet experiment key). experimentRunUrl is cached so we
+  // can render a deep-link without re-querying the tracker. The fields
+  // are deliberately backend-agnostic — Phase 1 is MLflow only but the
+  // shape is unchanged for W&B / Comet in later phases.
+  experimentTrackerId String?
+  experimentRunId     String?
+  experimentRunUrl    String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

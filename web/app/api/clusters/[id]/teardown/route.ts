@@ -27,28 +27,54 @@ set -euo pipefail
 S=""
 if [ "$(id -u)" != "0" ]; then S="sudo"; fi
 
-# Helper: run \$1 (a service name); print whether we actually stopped it
-# (vs. it was already inactive). We probe state BEFORE issuing the stop so
-# the report matches reality, instead of relying on stop's exit code.
+# Detect supervisor for the whole teardown — controllers vs workers may
+# theoretically differ, but teardown runs on the controller first; if its
+# /run/systemd/system isn't there we treat the whole flow as pm2.
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  SUPERVISOR=systemd
+else
+  SUPERVISOR=pm2
+fi
+echo "supervisor: \$SUPERVISOR"
+
+# Helper: stop a service by name. Prints what actually happened so the
+# teardown log matches reality even when nothing was running.
 stop_svc() {
   local svc="\$1"
-  if ! systemctl list-unit-files 2>/dev/null | grep -q "^\${svc}\\."; then
-    echo "  \$svc: unit not installed"
-    return 0
-  fi
-  local state
-  state=\$(systemctl is-active "\$svc" 2>/dev/null || true)
-  if [ "\$state" = "active" ] || [ "\$state" = "activating" ] || [ "\$state" = "reloading" ]; then
-    if \$S systemctl stop "\$svc" 2>&1; then
+  if [ "\$SUPERVISOR" = "systemd" ]; then
+    if ! systemctl list-unit-files 2>/dev/null | grep -q "^\${svc}\\."; then
+      echo "  \$svc: unit not installed"
+      return 0
+    fi
+    local state
+    state=\$(systemctl is-active "\$svc" 2>/dev/null || true)
+    if [ "\$state" = "active" ] || [ "\$state" = "activating" ] || [ "\$state" = "reloading" ]; then
+      if \$S systemctl stop "\$svc" 2>&1; then
+        echo "  \$svc: stopped"
+      else
+        echo "  \$svc: STOP FAILED (was \$state)"
+        return 1
+      fi
+    else
+      echo "  \$svc: not running (\$state)"
+    fi
+    \$S systemctl disable "\$svc" 2>/dev/null || true
+  else
+    # pm2 branch: pm2-go has no "describe" with exit code, so we use the
+    # PID-file existence as a proxy for "is registered". Then stop+delete
+    # so a follow-up bootstrap doesn't pick up the old entry.
+    if [ ! -f /root/.pm2-go/pids/\$svc.pid ]; then
+      echo "  \$svc: not registered with pm2-go"
+      return 0
+    fi
+    if \$S /usr/local/bin/pm2 stop "\$svc" >/dev/null 2>&1; then
       echo "  \$svc: stopped"
     else
-      echo "  \$svc: STOP FAILED (was \$state)"
+      echo "  \$svc: STOP FAILED"
       return 1
     fi
-  else
-    echo "  \$svc: not running (\$state)"
+    \$S /usr/local/bin/pm2 delete "\$svc" >/dev/null 2>&1 || true
   fi
-  \$S systemctl disable "\$svc" 2>/dev/null || true
 }
 
 echo "============================================"
@@ -96,18 +122,29 @@ if [ -n "\$WORKER_IPS" ]; then
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes ubuntu@\$IP bash -s <<WORKER_EOF || echo "  WARNING: Failed to reach \$IP"
       RS=""
       if [ "\\\$(id -u)" != "0" ]; then RS=sudo; fi
-      \\\$RS systemctl stop slurmd munge 2>&1 || true
-      \\\$RS systemctl disable slurmd munge 2>&1 || true
+      # Per-worker supervisor branch — fleet may be mixed during a migration
+      # so we re-detect on every node rather than trusting the controller's
+      # value.
+      if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        \\\$RS systemctl stop slurmd munge 2>&1 || true
+        \\\$RS systemctl disable slurmd munge 2>&1 || true
+      else
+        \\\$RS /usr/local/bin/pm2 delete slurmd munge 2>&1 || true
+      fi
       \\\$RS rm -rf /etc/slurm /etc/slurm-llnl /etc/munge/munge.key 2>&1 || true
 ${mgmtNfsPath ? `      \\\$RS umount -f ${mgmtNfsPath} 2>&1 || true
       \\\$RS sed -i '\\|${mgmtNfsPath}|d' /etc/fstab 2>&1 || true` : ""}
 ${dataNfsPath ? `      \\\$RS umount -f ${dataNfsPath} 2>&1 || true
       \\\$RS sed -i '\\|${dataNfsPath}|d' /etc/fstab 2>&1 || true` : ""}
-      \\\$RS systemctl stop aura-agent 2>&1 || true
-      \\\$RS systemctl disable aura-agent 2>&1 || true
+      if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        \\\$RS systemctl stop aura-agent 2>&1 || true
+        \\\$RS systemctl disable aura-agent 2>&1 || true
+      else
+        \\\$RS /usr/local/bin/pm2 delete aura-agent 2>&1 || true
+      fi
       \\\$RS rm -f /etc/systemd/system/aura-agent.service /usr/local/bin/aura-agent 2>&1 || true
       \\\$RS rm -rf /etc/aura-agent 2>&1 || true
-      \\\$RS systemctl daemon-reload 2>&1 || true
+      \\\$RS systemctl daemon-reload 2>/dev/null || true
       echo "  done"
 WORKER_EOF
   done
@@ -142,15 +179,25 @@ fail() { echo "  FAIL: \$1"; FAILS=\$((FAILS + 1)); }
 pass() { echo "  ok:   \$1"; }
 
 for s in slurmctld slurmdbd slurmd munge aura-agent; do
-  if systemctl list-unit-files 2>/dev/null | grep -q "^\${s}\\."; then
-    state=\$(systemctl is-active "\$s" 2>/dev/null || true)
-    if [ "\$state" = "active" ] || [ "\$state" = "activating" ]; then
-      fail "\$s still \$state"
+  if [ "\$SUPERVISOR" = "systemd" ]; then
+    if systemctl list-unit-files 2>/dev/null | grep -q "^\${s}\\."; then
+      state=\$(systemctl is-active "\$s" 2>/dev/null || true)
+      if [ "\$state" = "active" ] || [ "\$state" = "activating" ]; then
+        fail "\$s still \$state"
+      else
+        pass "\$s \$state"
+      fi
     else
-      pass "\$s \$state"
+      pass "\$s unit not present"
     fi
   else
-    pass "\$s unit not present"
+    # pm2: still-online means the stop_svc step missed it; absent PID
+    # file means properly cleaned up.
+    if [ -f /root/.pm2-go/pids/\$s.pid ] && kill -0 "\$(cat /root/.pm2-go/pids/\$s.pid)" 2>/dev/null; then
+      fail "\$s still online (pm2)"
+    else
+      pass "\$s gone from pm2"
+    fi
   fi
 done
 

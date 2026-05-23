@@ -89,6 +89,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         // for legacy rows whose `name` column wasn't backfilled.
         name: true,
         script: true,
+        experimentRunUrl: true,
       },
     }),
     prisma.job.count({ where }),
@@ -178,6 +179,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   const body = await req.json();
   const { script, partition } = body;
+  // Optional experiment-tracker selection from the new-job form.
+  // Validation is loose at the wire layer; submitJob raises if the
+  // tracker id doesn't exist on this cluster.
+  const tracker =
+    body.tracker && typeof body.tracker === "object" && typeof body.tracker.trackerId === "string"
+      ? {
+          trackerId: body.tracker.trackerId as string,
+          experimentName: typeof body.tracker.experimentName === "string" ? body.tracker.experimentName : undefined,
+          runName: typeof body.tracker.runName === "string" ? body.tracker.runName : undefined,
+        }
+      : undefined;
 
   if (!script || !partition) {
     return NextResponse.json({ error: "Missing required fields: script, partition" }, { status: 400 });
@@ -189,6 +201,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       userId: session.user.id,
       script,
       partition,
+      tracker,
     });
     return NextResponse.json(updated, { status: 201 });
   } catch (err) {

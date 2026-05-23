@@ -1,5 +1,7 @@
 ---
 - name: restart chrony
-  ansible.builtin.service:
-    name: chrony
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: chrony
+    svc_cmd: "/usr/sbin/chronyd -d"
+    svc_state: restarted

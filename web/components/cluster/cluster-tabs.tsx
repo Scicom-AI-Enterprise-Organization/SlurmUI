@@ -19,6 +19,7 @@ const tabs = [
   { slug: "reservations", label: "Reservations", requiresActive: true },
   { slug: "qos", label: "QoS", requiresActive: true },
   { slug: "metrics", label: "Metrics", requiresActive: true },
+  { slug: "integrations", label: "Integrations", requiresActive: true },
 ];
 
 interface Health {

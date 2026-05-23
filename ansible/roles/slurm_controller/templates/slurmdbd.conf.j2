@@ -9,4 +9,7 @@ StorageType=accounting_storage/mysql
 StorageHost={{ slurmdbd_storage_host }}
 StorageUser={{ slurmdbd_storage_user }}
 StoragePass={{ slurmdbd_storage_pass }}
-StorageDB={{ slurmdbd_storage_db }}
+{# slurmdbd's config parser is strict: the db-name key is `StorageLoc`,
+   not `StorageDB`. The latter is unrecognised and slurmdbd refuses to
+   start with "Could not open/read/parse slurmdbd.conf". #}
+StorageLoc={{ slurmdbd_storage_db }}

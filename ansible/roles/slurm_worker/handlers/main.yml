@@ -1,5 +1,7 @@
 ---
 - name: restart slurmd
-  ansible.builtin.service:
-    name: slurmd
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmd
+    svc_cmd: "/usr/sbin/slurmd -D -f {{ slurm_config_dir }}/slurm.conf"
+    svc_state: restarted

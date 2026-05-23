@@ -109,6 +109,7 @@ interface Group {
 const GROUPS: Group[] = [
   { id: "clusters", title: "Clusters", blurb: <>Discover the clusters this token can submit to.</> },
   { id: "jobs", title: "Jobs", blurb: <>Submit, list, inspect, resync and cancel jobs.</> },
+  { id: "provisioning", title: "Provisioning", blurb: <>Synchronous endpoints for bootstrap, accounting, node management, log fetching, and ad-hoc exec. Useful for CLI / CI loops. Admin only.</> },
   { id: "admin", title: "Admin & Maintenance", blurb: <>Operator-only endpoints. Tokens minted by an <code>ADMIN</code>-role user.</> },
 ];
 
@@ -344,6 +345,274 @@ EOF`,
   "squeue": "",
   "sacct": "",
   "error": "Slurm returned no state — accounting unavailable or job expired from records"
+}`,
+      },
+    ],
+  },
+  // ───── Provisioning ─────────────────────────────────────────────────
+  {
+    id: "bootstrap-cluster",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/bootstrap",
+    navLabel: "Bootstrap cluster",
+    title: "Bootstrap a cluster (synchronous)",
+    description: (
+      <>
+        <p>
+          Runs the same ansible playbook the UI&apos;s <b>Bootstrap</b> button drives,
+          but BLOCKS until ansible exits and returns the full stdout / stderr
+          in the response body. Skips the BackgroundTask + audit + controller
+          auto-seed post-steps so the run is fast to iterate.
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          On success the cluster&apos;s status flips to <code>ACTIVE</code> and the
+          template&apos;s default <code>main</code> partition is mirrored into{" "}
+          <code>cluster.config.slurm_partitions</code>.
+        </p>
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+    ],
+    request: {
+      sample: `curl -s -X POST \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/bootstrap"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "status": "success",
+  "exitCode": 0,
+  "durationMs": 155234,
+  "clusterId": "99df89d4-…",
+  "clusterName": "tm-h20",
+  "stdout": "PLAY [Bootstrap master node] …\\nPLAY RECAP …",
+  "stderr": ""
+}`,
+      },
+      {
+        code: 500,
+        codeLabel: "Failed",
+        doc: "Ansible exited non-zero. Full logs are in stdout/stderr — grep for `failed:` to find the offending task.",
+        sample: `{
+  "status": "failed",
+  "exitCode": 2,
+  "durationMs": 14210,
+  "stdout": "…",
+  "stderr": "ERROR! 'failed_when' is not a valid attribute for a TaskInclude"
+}`,
+      },
+    ],
+  },
+  {
+    id: "accounting-apply",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/accounting",
+    navLabel: "Apply accounting mode",
+    title: "Apply Slurm accounting mode (synchronous)",
+    description: (
+      <>
+        <p>
+          Mirrors the <b>Accounting</b> tab. Body picks the mode:
+        </p>
+        <ul className="mt-2 list-disc pl-5 text-sm">
+          <li><code>slurmdbd</code> — install MariaDB + slurmdbd, wire <code>slurm.conf</code>, register users.</li>
+          <li><code>none</code> — strip <code>AccountingStorage*</code> lines, switch to <code>accounting_storage/none</code>.</li>
+          <li><code>fifo</code> — switch <code>PriorityType=priority/basic</code> (fairshare off, plain FIFO).</li>
+        </ul>
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "mode", in: "body", type: "string", required: true, doc: "One of slurmdbd | none | fifo." },
+    ],
+    request: {
+      sample: `curl -s -X POST \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"mode":"slurmdbd"}' \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/accounting"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "status": "success",
+  "mode": "slurmdbd",
+  "durationMs": 13402,
+  "clusterId": "99df89d4-…",
+  "stdout": "[aura] Starting MariaDB…\\n[aura] Done. slurmdbd running, accounts created.",
+  "stderr": ""
+}`,
+      },
+    ],
+  },
+  {
+    id: "fetch-logs",
+    group: "provisioning",
+    method: "GET",
+    path: "/api/v1/clusters/:cluster/logs",
+    navLabel: "Fetch service logs",
+    title: "Fetch a service's logs from the controller",
+    description: (
+      <>
+        Reads the last N log lines for a named Slurm/system service. Auto-branches
+        on <code>cluster.config.node_supervisor</code> — runs{" "}
+        <code>journalctl -u …</code> on systemd hosts, tails the per-service
+        out/err files under <code>/root/.pm2-go/logs/</code> on container hosts.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "service", in: "query", type: "string", required: true, doc: "One of: slurmctld | slurmd | slurmdbd | munge | mariadb | mysql | chrony | sssd | nfs-kernel-server | aura-agent." },
+      { name: "lines", in: "query", type: "number", doc: "Default 200, clamped to [10, 5000]." },
+    ],
+    request: {
+      sample: `curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/logs?service=slurmctld&lines=200"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "clusterId": "99df89d4-…",
+  "clusterName": "tm-h20",
+  "service": "slurmctld",
+  "supervisor": "pm2",
+  "lines": 200,
+  "durationMs": 482,
+  "success": true,
+  "output": "==> /root/.pm2-go/logs/slurmctld-err.log <==\\nslurmctld: Running as primary controller\\n…",
+  "stderr": ""
+}`,
+      },
+    ],
+  },
+  {
+    id: "add-node",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/nodes",
+    navLabel: "Add a node",
+    title: "Add a worker node to a cluster",
+    description: (
+      <>
+        Drives the same install script as the <b>Nodes → Add</b> dialog
+        (slurmd + munge + key sync over SSH), then blocks until the
+        underlying BackgroundTask finishes. Returns the task&apos;s full log.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "nodeName", in: "body", type: "string", required: true, doc: "Slurm node name." },
+      { name: "ip", in: "body", type: "string", required: true, doc: "Reachable IP / hostname for SSH." },
+      { name: "sshUser", in: "body", type: "string", doc: "Defaults to root." },
+      { name: "sshPort", in: "body", type: "number", doc: "Defaults to 22." },
+      { name: "cpus", in: "body", type: "number", required: true, doc: "" },
+      { name: "memoryMb", in: "body", type: "number", required: true, doc: "" },
+      { name: "gpus", in: "body", type: "number", doc: "Defaults to 0." },
+    ],
+    request: {
+      sample: `curl -s -X POST \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"nodeName":"gpu1","ip":"localhost","sshUser":"root","cpus":8,"gpus":0,"memoryMb":16384}' \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/nodes"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "status": "success",
+  "taskId": "…-uuid-…",
+  "logs": "[1/7] Updating cluster config\\n[2/7] Copying munge key\\n…",
+  "nodeName": "gpu1",
+  "clusterId": "99df89d4-…"
+}`,
+      },
+    ],
+  },
+  {
+    id: "delete-node",
+    group: "provisioning",
+    method: "DELETE",
+    path: "/api/v1/clusters/:cluster/nodes/:nodeName",
+    navLabel: "Delete a node",
+    title: "Delete a node from a cluster",
+    description: (
+      <>
+        Removes the node from <code>cluster.config</code> and from{" "}
+        <code>slurm.conf</code>, then restarts slurmctld + slurmd via the
+        host&apos;s configured supervisor (systemd or pm2-go).
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "nodeName", in: "path", type: "string", required: true, doc: "Slurm node name to remove." },
+    ],
+    request: {
+      sample: `curl -s -X DELETE \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/nodes/gpu1"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "ok": true,
+  "nodeName": "gpu1",
+  "log": "[1/3] Removed gpu1 from cluster config\\n[2/3] Removing gpu1 from slurm.conf\\n  slurm.conf updated\\n  cleared cached slurmctld state\\n  slurmctld restarted\\n  slurmd restarted\\n[3/3] Done."
+}`,
+      },
+    ],
+  },
+  {
+    id: "exec",
+    group: "provisioning",
+    method: "POST",
+    path: "/api/v1/clusters/:cluster/exec",
+    navLabel: "Run a shell command",
+    title: "Run an arbitrary shell command on the controller",
+    description: (
+      <>
+        SSHes into the cluster&apos;s controller and runs <code>command</code>{" "}
+        verbatim. Useful for probing state during iteration — for example{" "}
+        <code>stat -c %U:%G:%a /var/lib/munge</code> or{" "}
+        <code>scontrol show node</code>. Admin only.
+      </>
+    ),
+    parameters: [
+      { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
+      { name: "command", in: "body", type: "string", required: true, doc: "Bash command to run as the cluster's SSH user." },
+    ],
+    request: {
+      sample: `curl -s -X POST \\
+  -H "Authorization: Bearer $AURA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"command":"scontrol show node"}' \\
+  "$AURA_BASE/api/v1/clusters/$CLUSTER_ID/exec"`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "clusterId": "99df89d4-…",
+  "command": "scontrol show node",
+  "success": true,
+  "exitCode": 0,
+  "stdout": "NodeName=gpu1 Arch=x86_64 …",
+  "stderr": "",
+  "durationMs": 312
 }`,
       },
     ],

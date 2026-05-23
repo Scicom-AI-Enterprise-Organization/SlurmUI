@@ -5,7 +5,11 @@ import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { registerRunningTask } from "@/lib/running-tasks";
 import { randomUUID } from "crypto";
-import { buildEnableSlurmdbdScript } from "@/lib/accounting-script";
+import {
+  buildEnableSlurmdbdScript,
+  buildDisableAccountingScript,
+  buildFifoSchedulerScript,
+} from "@/lib/accounting-script";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -89,79 +93,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     ? existingPass
     : randomUUID().replace(/-/g, "");
 
-  const scriptDisable = `#!/bin/bash
-set -euo pipefail
-S=""; [ "$(id -u)" != "0" ] && S="sudo"
-
-echo "============================================"
-echo "  Disabling Slurm accounting"
-echo "============================================"
-
-CONF=/etc/slurm/slurm.conf
-if [ ! -f "$CONF" ]; then
-  echo "[error] $CONF not found — run Bootstrap first"
-  exit 1
-fi
-
-echo "[aura] Current AccountingStorageType lines:"
-$S grep -n '^AccountingStorage' "$CONF" || echo "  (none)"
-
-$S sed -i '/^AccountingStorageType=/d;/^AccountingStorageEnforce=/d;/^AccountingStorageHost=/d;/^AccountingStoragePass=/d;/^AccountingStorageUser=/d;/^AccountingStoragePort=/d;/^AccountingStorageLoc=/d' "$CONF"
-echo "AccountingStorageType=accounting_storage/none" | $S tee -a "$CONF" > /dev/null
-
-echo ""
-echo "[aura] After:"
-$S grep -n '^AccountingStorage' "$CONF"
-
-echo ""
-echo "[aura] Restarting slurmctld..."
-$S systemctl restart slurmctld 2>&1 | tail -5 || true
-sleep 2
-$S systemctl is-active slurmctld && echo "[aura] slurmctld is active" || echo "[aura] slurmctld NOT active"
-
-echo ""
-echo "[aura] Done. Jobs submit without account enforcement."
-`;
-
-  const scriptEnable = buildEnableSlurmdbdScript({ dbPass, clusterSlurmName, usernames });
-
-  const scriptFifo = `#!/bin/bash
-set -euo pipefail
-S=""; [ "$(id -u)" != "0" ] && S="sudo"
-
-echo "============================================"
-echo "  Switching to FIFO priority scheduling"
-echo "============================================"
-
-CONF=/etc/slurm/slurm.conf
-if [ ! -f "$CONF" ]; then
-  echo "[error] $CONF not found — run Bootstrap first"
-  exit 1
-fi
-
-echo "[aura] Current scheduler config:"
-$S grep -nE '^PriorityType=|^SchedulerType=' "$CONF" || echo "  (defaults)"
-
-$S sed -i '/^PriorityType=/d' "$CONF"
-echo "PriorityType=priority/basic" | $S tee -a "$CONF" > /dev/null
-
-echo ""
-echo "[aura] After:"
-$S grep -nE '^PriorityType=' "$CONF"
-
-echo ""
-echo "[aura] Restarting slurmctld..."
-$S systemctl restart slurmctld 2>&1 | tail -5 || true
-sleep 2
-$S systemctl is-active slurmctld && echo "[aura] slurmctld is active" || echo "[aura] slurmctld NOT active"
-
-echo ""
-echo "[aura] Done. Jobs are now ordered FIFO — no fair-share math."
-`;
-
+  // Script builders moved to lib/accounting-script.ts so the synchronous
+  // /api/v1/clusters/[cluster]/accounting variant can share them.
   const script =
-    mode === "fifo" ? scriptFifo :
-    mode === "none" ? scriptDisable : scriptEnable;
+    mode === "fifo" ? buildFifoSchedulerScript() :
+    mode === "none" ? buildDisableAccountingScript() :
+    buildEnableSlurmdbdScript({ dbPass, clusterSlurmName, usernames });
 
   (async () => {
     await appendLog(task.id, `[aura] Applying accounting mode: ${mode}`);

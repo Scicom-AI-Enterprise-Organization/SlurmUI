@@ -1,5 +1,7 @@
 ---
 - name: restart sssd
-  ansible.builtin.service:
-    name: sssd
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: sssd
+    svc_cmd: "/usr/sbin/sssd --interactive --logger=stderr"
+    svc_state: restarted

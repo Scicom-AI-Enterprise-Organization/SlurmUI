@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshExecScript } from "@/lib/ssh-exec";
@@ -21,10 +22,13 @@ async function finishTask(taskId: string, success: boolean) {
 }
 
 // GET — list python packages + venv location + available storage mounts
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies (UI) and Bearer aura_*
+  // tokens (CLI / v1 wrappers) via getApiUser.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const cluster = await prisma.cluster.findUnique({ where: { id } });
@@ -65,8 +69,11 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 // PUT — save package list + venv location
 export async function PUT(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies (UI) and Bearer aura_*
+  // tokens (CLI / v1 wrappers) via getApiUser.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -118,8 +125,11 @@ export async function PUT(req: NextRequest, { params }: RouteParams) {
 // succeeds. Body: { packages: string[] } (just the names; no index/url).
 export async function DELETE(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts both NextAuth session cookies (UI) and Bearer aura_*
+  // tokens (CLI / v1 wrappers) via getApiUser.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

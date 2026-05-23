@@ -4,6 +4,10 @@
     name: nfs-kernel-server
     state: present
     update_cache: true
+  # nfs-kernel-server's postinst doesn't try to start the service on
+  # containerised hosts (no systemd PID 1), so the package install itself
+  # is harmless here. We just won't drive it on the supervisor side below.
+  failed_when: false
 
 - name: Create mgmt directory
   ansible.builtin.file:
@@ -21,6 +25,42 @@
     group: root
     mode: '0755'
 
+# ----------------------------------------------------------------------------
+# Probe whether the host's filesystem actually supports kernel NFS export.
+#
+# Kernel NFS refuses to export overlayfs / aufs / fuse / many container
+# root filesystems with "does not support NFS export". When that's the
+# case (typical for container compute nodes) we silently skip the export
+# half of this role — the directories above still exist for local use and
+# the cluster operator can wire shared storage in via the Storage tab
+# (external NFS / s3fs / self-hosted NFS on a separate host).
+# ----------------------------------------------------------------------------
+- name: Detect filesystem type of mgmt_nfs_path
+  ansible.builtin.command: "stat -fc %T {{ mgmt_nfs_path }}"
+  register: _aura_mgmt_fstype
+  changed_when: false
+
+- name: Decide whether to run kernel NFS export
+  ansible.builtin.set_fact:
+    aura_can_export_nfs: >-
+      {{
+        node_supervisor == 'systemd'
+        and _aura_mgmt_fstype.stdout not in [
+          'overlayfs', 'aufs', 'fuseblk', 'fuse', 'tmpfs', 'squashfs', 'ramfs'
+        ]
+      }}
+
+- name: Skip NFS server (container / unsupported FS)
+  ansible.builtin.debug:
+    msg: >-
+      Skipping kernel NFS export on {{ inventory_hostname }} —
+      supervisor={{ node_supervisor }}, fs={{ _aura_mgmt_fstype.stdout }}.
+      The directories {{ mgmt_nfs_path }} and {{ data_nfs_path }} exist
+      locally. For multi-node sharing, attach external NFS or S3 storage
+      via the Storage tab.
+  when: not aura_can_export_nfs
+
+# ---- NFS export config + service (systemd + supported FS only) -------------
 - name: Write NFS exports
   ansible.builtin.template:
     src: exports.j2
@@ -29,12 +69,18 @@
     group: root
     mode: '0644'
   register: _aura_exports
+  when: aura_can_export_nfs
 
-- name: Enable and start NFS server
-  ansible.builtin.service:
-    name: nfs-kernel-server
-    state: started
-    enabled: true
+- name: Start nfs-kernel-server
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: nfs-kernel-server
+    # svc_cmd is unused on the systemd branch (which is the only path
+    # this include is reached from now), but kept here as a no-op
+    # placeholder so the include's required-vars assertion passes.
+    svc_cmd: "/usr/sbin/rpc.nfsd"
+    svc_state: started
+  when: aura_can_export_nfs
 
 # Re-export immediately (not via handler). Handlers flush at end-of-play, but
 # the worker play starts the NFS-client mount before then — so we'd race and
@@ -43,9 +89,14 @@
 - name: Re-export NFS shares now
   ansible.builtin.command: exportfs -ra
   changed_when: true
+  when: aura_can_export_nfs
 
 - name: Restart NFS server to pick up new exports
-  ansible.builtin.service:
-    name: nfs-kernel-server
-    state: restarted
-  when: _aura_exports.changed
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: nfs-kernel-server
+    svc_cmd: "/usr/sbin/rpc.nfsd"
+    svc_state: restarted
+  when:
+    - aura_can_export_nfs
+    - _aura_exports.changed | default(false)

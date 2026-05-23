@@ -1,10 +1,14 @@
 ---
 - name: restart slurmctld
-  ansible.builtin.service:
-    name: slurmctld
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmctld
+    svc_cmd: "/usr/sbin/slurmctld -D -f {{ slurm_config_dir }}/slurm.conf"
+    svc_state: restarted
 
 - name: restart slurmdbd
-  ansible.builtin.service:
-    name: slurmdbd
-    state: restarted
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmdbd
+    svc_cmd: "/usr/sbin/slurmdbd -D -v"
+    svc_state: restarted

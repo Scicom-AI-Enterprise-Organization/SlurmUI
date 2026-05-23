@@ -10,63 +10,17 @@ import { spawn } from "child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { buildInventory, type ClusterSsh } from "@/lib/bootstrap-inventory";
+import { seedDefaultPartition } from "@/lib/bootstrap-seed";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
-interface HostEntry {
-  hostname: string;
-  ip: string;
-  port?: number;
-}
-
-interface ClusterSsh {
-  host: string;
-  user: string;
-  port: number;
-  sshKeyFile?: string;
-  // Raw -o ProxyCommand to reach the controller (e.g. `cloudflared access ssh
-  // --hostname %h`). When set, every ansible_host line gets a matching
-  // ansible_ssh_common_args entry so the underlying ssh client honours it.
-  // Without this, ansible bypasses the cluster's ProxyCommand and tries to
-  // TCP-connect directly to ansible_host — which fails ("Network unreachable")
-  // for tunnel-only controllers like Cloudflare Tunnel-fronted hosts.
-  proxyCommand?: string | null;
-}
-
-function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>): string {
-  const controllerHost = config.slurm_controller_host as string;
-  const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
-  // The controllerHost is usually an IP, but hostsEntries' hostname is the
-  // logical Slurm node name (often different). Exclude workers whose IP OR
-  // hostname matches the controller — otherwise a single-VM bootstrap loops
-  // back to itself as a worker, which fails NFS self-mount.
-  const workerEntries = hostsEntries.filter(
-    (h) => h.hostname !== controllerHost && h.ip !== controllerHost,
-  );
-
-  const keyArg = clusterSsh.sshKeyFile ? ` ansible_ssh_private_key_file=${clusterSsh.sshKeyFile}` : "";
-
-  // Honour the cluster's Host ProxyCommand (e.g. cloudflared access ssh) so
-  // ansible's ssh client reaches the controller through the configured
-  // transport instead of trying a direct TCP connection.
-  const proxyArg = clusterSsh.proxyCommand && clusterSsh.proxyCommand.trim()
-    ? ` ansible_ssh_common_args='-o ProxyCommand="${clusterSsh.proxyCommand.replace(/'/g, "'\\''")}"'`
-    : "";
-
-  const controllerLine = `${controllerHost} ansible_host=${clusterSsh.host} ansible_user=${clusterSsh.user} ansible_port=${clusterSsh.port} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
-
-  const workerLines = workerEntries
-    .map((h) => {
-      const user = (h as any).user || clusterSsh.user;
-      const port = (h as any).port || 22;
-      return `${h.hostname} ansible_host=${h.ip} ansible_user=${user} ansible_port=${port} ansible_python_interpreter=/usr/bin/python3${keyArg}${proxyArg}`;
-    })
-    .join("\n");
-
-  return `[slurm_controllers]\n${controllerLine}\n\n[slurm_workers]\n${workerLines}\n`;
-}
+// buildInventory + ClusterSsh moved to lib/bootstrap-inventory.ts so the
+// /api/v1/clusters/[id]/bootstrap synchronous-Bearer-auth variant can share
+// them. Next App-Router routes may only export HTTP-method handlers, so
+// keeping `buildInventory` in this file blocked compilation.
 
 function buildBootstrapScript(seed?: {
   hostname: string;
@@ -290,6 +244,7 @@ async function runBastionBootstrap(taskId: string, clusterId: string, cluster: a
     onComplete: async (success) => {
       if (success) {
         await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
+        await seedDefaultPartition(clusterId).catch(() => {});
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "bastion" } });
         // Note: seedControllerAsNode already ran as a preflight above,
@@ -386,6 +341,7 @@ function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, co
       const success = code === 0;
       if (success) {
         await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
+        await seedDefaultPartition(clusterId).catch(() => {});
         await appendLog(taskId, "\n[aura] Bootstrap completed successfully. Cluster is now ACTIVE.");
         logAudit({ action: "cluster.bootstrap", entity: "Cluster", entityId: clusterId, metadata: { name: cluster.name, mode: "ansible" } });
 

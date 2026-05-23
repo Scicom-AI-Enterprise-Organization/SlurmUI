@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { publishCommand } from "@/lib/nats";
@@ -28,9 +28,11 @@ async function finishTask(taskId: string, success: boolean) {
 // POST /api/clusters/[id]/nodes/add
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-
-  if (!session?.user || (session.user as { role?: string }).role !== "ADMIN") {
+  // getApiUser accepts both NextAuth session cookies and Bearer aura_*
+  // tokens so the v1 wrapper can drive this route over HTTP.
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -324,7 +326,33 @@ WORKER_SETUP
 # overwritten it) and only then restart munge+slurmd on the worker, so both
 # daemons come up with a key that matches the controller's.
 if $S ls /etc/munge/munge.key >/dev/null 2>&1; then
-  $S cat /etc/munge/munge.key | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c 'S=; [ "$(id -u)" != "0" ] && S=sudo; $S tee /etc/munge/munge.key > /dev/null; $S chmod 400 /etc/munge/munge.key; $S chown munge:munge /etc/munge/munge.key 2>/dev/null || true; $S systemctl enable munge slurmd 2>/dev/null || true; $S systemctl restart munge 2>&1 | head -3; sleep 1; $S systemctl restart slurmd 2>&1 | head -5; $S systemctl is-active slurmd >/dev/null 2>&1 && echo "  slurmd: active" || echo "  slurmd: FAILED — see journalctl -u slurmd"'
+  # The remote node may be on systemd OR pm2 (container worker). Probe and
+  # branch inside the SSH so a new container worker does not hard-fail at
+  # the systemctl restart call below.
+  $S cat /etc/munge/munge.key | ssh -o StrictHostKeyChecking=no -p ${nodePort} ${nodeUser}@${ip} bash -c '
+    S=; [ "$(id -u)" != "0" ] && S=sudo
+    $S tee /etc/munge/munge.key > /dev/null
+    $S chmod 400 /etc/munge/munge.key
+    $S chown munge:munge /etc/munge/munge.key 2>/dev/null || true
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      $S systemctl enable munge slurmd 2>/dev/null || true
+      $S systemctl restart munge 2>&1 | head -3
+      sleep 1
+      $S systemctl restart slurmd 2>&1 | head -5
+      $S systemctl is-active --quiet slurmd \\
+        && echo "  slurmd: active" \\
+        || echo "  slurmd: FAILED — see journalctl -u slurmd"
+    else
+      $S /usr/local/bin/pm2 start /etc/aura/pm2/munge.json 2>&1 | head -3 || true
+      sleep 1
+      $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmd.json 2>&1 | head -5 || true
+      if $S [ -f /root/.pm2-go/pids/slurmd.pid ] && $S kill -0 "$(cat /root/.pm2-go/pids/slurmd.pid 2>/dev/null)" 2>/dev/null; then
+        echo "  slurmd: active"
+      else
+        echo "  slurmd: FAILED — see /root/.pm2-go/logs/slurmd-err.log"
+      fi
+    fi
+  '
   echo "  munge key re-synced post-install"
 fi
 echo ""

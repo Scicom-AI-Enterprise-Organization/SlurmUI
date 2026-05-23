@@ -27,34 +27,56 @@
   # ships in a half-broken state (e.g. apparmor + missing libs on 24.04).
   when: vault_slurmdbd_storage_pass | default('') | length > 0
 
-# Start MySQL inside a block so that if systemd refuses to bring the unit
-# up we can surface the actual error (journalctl + systemctl status +
-# mysqld error log) in the ansible log. Without this the caller only sees
-# systemd's generic "Job for mysql.service failed … see journalctl" line,
-# which is useless over SSH in our bootstrap UI.
+# MySQL initialization for container nodes (pm2): the apt install puts a
+# fresh data dir under /var/lib/mysql, but the systemd unit normally
+# completes that init on first boot. Under pm2 nothing does, so mysqld
+# won't start. `mysqld --initialize-insecure` populates the system
+# tables idempotently — it no-ops on a populated datadir.
+- name: Initialise MySQL data directory (pm2 hosts only)
+  ansible.builtin.command: mysqld --initialize-insecure --user=mysql
+  args:
+    creates: /var/lib/mysql/mysql/user.frm
+  when:
+    - node_supervisor == "pm2"
+    - vault_slurmdbd_storage_pass | default('') | length > 0
+
+# Start MySQL via whichever supervisor this host runs under. On systemd
+# we keep the rescue/diagnostics block (mysql failures are the #1 source
+# of broken-bootstrap reports). pm2 just runs mysqld in the foreground;
+# its logs land under /var/log/aura/pm2/mysql.{out,err}.log and surface
+# in the per-node Logs dialog with no extra glue.
 - name: Enable and start MySQL (with failure diagnostics)
   when: vault_slurmdbd_storage_pass | default('') | length > 0
   block:
-    - name: Enable and start MySQL
-      ansible.builtin.service:
-        name: mysql
-        state: started
-        enabled: true
+    - name: Start MySQL
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+      vars:
+        svc_name: mysql
+        svc_cmd: "/usr/sbin/mysqld --user=mysql"
+        svc_state: started
   rescue:
     - name: Capture mysql systemctl status
       ansible.builtin.command: systemctl status mysql.service --no-pager -l
       register: mysql_status
       changed_when: false
       failed_when: false
+      when: node_supervisor == "systemd"
     - name: Capture mysql journalctl (last 200 lines)
       ansible.builtin.command: journalctl -u mysql.service --no-pager -n 200
       register: mysql_journal
       changed_when: false
       failed_when: false
+      when: node_supervisor == "systemd"
+    - name: Capture mysql pm2 logs (last 200 lines)
+      ansible.builtin.command: /usr/local/bin/pm2 logs mysql --nostream --lines 200
+      register: mysql_pm2_logs
+      changed_when: false
+      failed_when: false
+      when: node_supervisor == "pm2"
     - name: Capture mysqld error log tail (if present)
       ansible.builtin.shell: |
         set +e
-        for f in /var/log/mysql/error.log /var/log/mysqld.log /var/log/mysql/mysql.err; do
+        for f in /var/log/mysql/error.log /var/log/mysqld.log /var/log/mysql/mysql.err /var/log/aura/pm2/mysql.err.log; do
           if [ -f "$f" ]; then echo "---- $f ----"; tail -n 200 "$f"; fi
         done
       register: mysql_errlog
@@ -63,21 +85,25 @@
     - name: Print mysql failure diagnostics
       ansible.builtin.debug:
         msg: |
-          mysql.service failed to start — diagnostics:
+          mysql failed to start — diagnostics:
 
           == systemctl status ==
-          {{ mysql_status.stdout | default('(no output)') }}
+          {{ mysql_status.stdout | default('(skipped — pm2 host)') }}
           {{ mysql_status.stderr | default('') }}
 
           == journalctl -u mysql.service (last 200) ==
-          {{ mysql_journal.stdout | default('(no output)') }}
+          {{ mysql_journal.stdout | default('(skipped — pm2 host)') }}
           {{ mysql_journal.stderr | default('') }}
+
+          == pm2 logs mysql (last 200) ==
+          {{ mysql_pm2_logs.stdout | default('(skipped — systemd host)') }}
+          {{ mysql_pm2_logs.stderr | default('') }}
 
           == mysqld error logs ==
           {{ mysql_errlog.stdout | default('(none)') }}
     - name: Re-fail the play so the caller sees bootstrap as failed
       ansible.builtin.fail:
-        msg: "mysql.service failed to start — see diagnostics above."
+        msg: "mysql failed to start — see diagnostics above."
 
 - name: Create slurm accounting database
   community.mysql.mysql_db:
@@ -189,32 +215,45 @@
     group: "{{ slurm_group }}"
     recurse: true
 
-- name: Enable and start slurmdbd
-  ansible.builtin.service:
-    name: slurmdbd
-    state: started
-    enabled: true
+- name: Start slurmdbd
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmdbd
+    svc_cmd: "/usr/sbin/slurmdbd -D -v"
+    svc_state: started
   when: vault_slurmdbd_storage_pass | default('') | length > 0
 
-- name: Stop and disable slurmdbd when accounting disabled
-  ansible.builtin.service:
-    name: slurmdbd
-    state: stopped
-    enabled: false
+# When accounting is disabled we try to stop slurmdbd, but on a clean
+# host it may not be installed at all — the service: module errors out
+# in that case. Ansible doesn't allow `failed_when` on include_tasks,
+# so we wrap in a block+rescue to swallow that path.
+- name: Stop slurmdbd when accounting disabled
   when: vault_slurmdbd_storage_pass | default('') | length == 0
-  failed_when: false
+  block:
+    - name: Stop slurmdbd (best-effort)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+      vars:
+        svc_name: slurmdbd
+        svc_cmd: "/usr/sbin/slurmdbd -D -v"
+        svc_state: stopped
+  rescue:
+    - name: slurmdbd stop skipped
+      ansible.builtin.debug:
+        msg: "slurmdbd stop was a no-op (not installed or not registered) — accounting disabled."
 
-- name: Enable and start slurmctld
-  ansible.builtin.service:
-    name: slurmctld
-    state: started
-    enabled: true
+- name: Start slurmctld
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmctld
+    svc_cmd: "/usr/sbin/slurmctld -D -f {{ slurm_config_dir }}/slurm.conf"
+    svc_state: started
 
-- name: Enable and start slurmd
+- name: Start slurmd on controller
   # The controller doubles as a worker in single-VM bootstraps and is also
   # used as a compute host on smaller real clusters. Either way, slurmd needs
   # to be running for jobs to actually execute on this box.
-  ansible.builtin.service:
-    name: slurmd
-    state: started
-    enabled: true
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: slurmd
+    svc_cmd: "/usr/sbin/slurmd -D -f {{ slurm_config_dir }}/slurm.conf"
+    svc_state: started

@@ -46,9 +46,20 @@ export function LogsButton({ clusterId }: LogsButtonProps) {
     setError("");
 
     try {
+      // Branch on the controller's supervisor at probe time so a container
+      // cluster (pm2-go) gets the pm2 log files instead of an empty
+      // journalctl response. dmesg is universal — no branch needed.
       const cmd = src === "system"
         ? "dmesg --time-format iso | tail -100"
-        : `journalctl -u ${src} --no-pager -n 100 --output short-iso 2>/dev/null || echo 'Service ${src} not found'`;
+        : `if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+  journalctl -u ${src} --no-pager -n 100 --output short-iso 2>/dev/null || echo 'Service ${src} not found'
+else
+  if [ -f /root/.pm2-go/logs/${src}-out.log ] || [ -f /root/.pm2-go/logs/${src}-err.log ]; then
+    tail -n 100 /root/.pm2-go/logs/${src}-out.log /root/.pm2-go/logs/${src}-err.log 2>/dev/null
+  else
+    echo "No pm2-go logs for ${src} at /root/.pm2-go/logs/${src}-*.log"
+  fi
+fi`;
 
       const res = await fetch(`/api/clusters/${clusterId}/exec`, {
         method: "POST",

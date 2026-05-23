@@ -1,0 +1,116 @@
+# ----------------------------------------------------------------------------
+# Reusable "start/restart a service" task file.
+#
+# Branches on the `node_supervisor` host fact (set by roles/common):
+#   - systemd → ansible.builtin.service (existing behaviour)
+#   - pm2     → dunstorm/pm2-go CLI driven via /usr/local/bin/pm2
+#
+# Inputs (vars):
+#   svc_name      (required) — short name, e.g. "slurmd", "munge"
+#   svc_cmd       (required) — full command line; first word is the
+#                              executable, remaining words become its args.
+#                              e.g. "/usr/sbin/slurmd -D -f /etc/slurm/slurm.conf"
+#   svc_state     (optional) — "started" (default), "restarted", "stopped"
+#   svc_enabled   (optional) — true (default) | false. systemd-only signal.
+#   svc_user      (optional) — drop privileges to this unix user (systemd
+#                              uses unit-file User=; pm2-go v0.1.2 does not
+#                              expose a `user` field in its JSON schema and
+#                              ignores this on the pm2 branch).
+#
+# pm2-go schema reference: github.com/dunstorm/pm2-go (v0.1.2)
+#   - JSON file is a flat array: [{...}, ...]
+#   - Fields: name, executable_path, args (array), autorestart, cwd,
+#             scripts, cron_restart
+#   - `pm2 start <json>` is idempotent: if the named process exists it
+#     restarts it with the new params (see app/file.go::StartFile).
+#   - State files live at $HOME/.pm2-go/{pids,logs}/.
+# ----------------------------------------------------------------------------
+
+- name: "Sanity: svc_name/svc_cmd present"
+  ansible.builtin.assert:
+    that:
+      - svc_name is defined
+      - svc_name | length > 0
+      - svc_cmd is defined
+      - svc_cmd | length > 0
+    fail_msg: "_supervisor.yml: svc_name and svc_cmd are both required."
+
+# --- systemd branch -----------------------------------------------------------
+- name: "[{{ svc_name }}] systemd: state={{ svc_state | default('started') }}"
+  ansible.builtin.service:
+    name: "{{ svc_name }}"
+    state: "{{ svc_state | default('started') }}"
+    enabled: "{{ svc_enabled | default(true) }}"
+  when: node_supervisor == "systemd"
+
+# --- pm2-go branch ------------------------------------------------------------
+# We write the ecosystem JSON unconditionally so a later state transition
+# (e.g. svc_state=stopped) doesn't need a different code path; the JSON
+# itself is the source of truth and `pm2 start <json>` is idempotent.
+- name: "[{{ svc_name }}] pm2: ensure config dir"
+  ansible.builtin.file:
+    path: /etc/aura/pm2
+    state: directory
+    mode: '0755'
+  when: node_supervisor == "pm2"
+
+- name: "[{{ svc_name }}] pm2: write service config"
+  ansible.builtin.copy:
+    dest: "/etc/aura/pm2/{{ svc_name }}.json"
+    mode: '0644'
+    # Flat JSON array per pm2-go v0.1.2's StartFile parser
+    # (app/file.go). Using `to_nice_json` here so args land as a real
+    # JSON array rather than a stringified one. Everything pm2-go ignores
+    # at this version (max_restarts, restart_delay, out_file, …) is
+    # omitted to keep the file lean and matching the upstream schema.
+    content: "{{ [pm2_app] | to_nice_json }}\n"
+  vars:
+    pm2_app:
+      name: "{{ svc_name }}"
+      executable_path: "{{ svc_cmd.split() | first }}"
+      args: "{{ svc_cmd.split()[1:] }}"
+      cwd: "/"
+      autorestart: true
+  when: node_supervisor == "pm2"
+  register: _aura_pm2_config
+
+# pm2-go writes per-service state under $HOME/.pm2-go (== /root/.pm2-go
+# when running under sudo). `pm2 start <json>` auto-spawns the daemon,
+# then for each entry: if a process with that name already exists, stops
+# and restarts it with the new params; else spawns it from scratch.
+# `setsid` detaches pm2 from ansible's SSH process group, so when the
+# SSH connection closes at the end of the task the SIGHUP that follows
+# the controlling tty doesn't kill the pm2 daemon (and the daemons it
+# supervises). Without this every bootstrap leaves the cluster with no
+# running services because `pm2 start` returned 0 but the children got
+# killed milliseconds later. `--wait` keeps ansible blocking until the
+# setsid'd child finishes its initial registration with the pm2 daemon
+# so we don't race the next task.
+- name: "[{{ svc_name }}] pm2: start (idempotent)"
+  ansible.builtin.command: >-
+    setsid --wait /usr/local/bin/pm2 start /etc/aura/pm2/{{ svc_name }}.json
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') in ['started', 'restarted']
+  changed_when: true
+
+- name: "[{{ svc_name }}] pm2: stop"
+  ansible.builtin.command: "/usr/local/bin/pm2 stop {{ svc_name }}"
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') == 'stopped'
+  changed_when: true
+  # "process not found" is fine when transitioning to stopped — service
+  # may never have been started on this host.
+  failed_when: false
+
+# Persist the current process list so a container restart can re-run
+# `pm2 restore` (manual or via the container entrypoint) and bring the
+# fleet back online without ansible.
+- name: "[{{ svc_name }}] pm2: dump state"
+  # setsid same reason as above — pm2 dump spawns the daemon if it's not
+  # already running, and if the daemon is parent-ed to ansible's SSH
+  # session the SIGHUP at task close kills it.
+  ansible.builtin.command: setsid --wait /usr/local/bin/pm2 dump
+  when: node_supervisor == "pm2"
+  changed_when: true

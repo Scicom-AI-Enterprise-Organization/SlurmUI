@@ -17,6 +17,8 @@ import { effectiveClusterStatus } from "./cluster-health";
 import { sshExecScript, sshExecSimple } from "./ssh-exec";
 import { startJobWatcher } from "./job-watcher";
 import { extractJobName } from "./job-list-transform";
+import { adapterFor, findTrackerInConfig } from "./experiment-trackers";
+import type { CreatedRun, ExperimentTracker, RunContext } from "./experiment-trackers/types";
 
 interface ClusterForSlurmQuery {
   id: string;
@@ -124,10 +126,37 @@ export interface SubmitJobInput {
    * in addition to the internal buffer. Lets callers (e.g. the resubmit
    * route) tee output into a BackgroundTask so the UI can show a live log. */
   onLogLine?: (line: string) => void;
+  /**
+   * Optional experiment-tracker linkage. When set, submitJob looks up the
+   * tracker on cluster.config.experiment_trackers, pre-creates a run on the
+   * backend (MLflow / W&B / Comet), persists the run id + deep link to the
+   * Job row, and prepends the adapter's preStartShell snippet to the job
+   * script so user code can log into the right run via env vars.
+   */
+  tracker?: {
+    trackerId: string;
+    experimentName?: string;
+    runName?: string;
+  };
+}
+
+/**
+ * Insert the adapter's prelude into a shell script just after the shebang
+ * (or at the very top if there's no shebang). Keeps `#!/bin/bash` on line
+ * one — sbatch reads it for the interpreter; injecting before it breaks
+ * that contract.
+ */
+function injectPrelude(script: string, prelude: string): string {
+  const lines = script.split("\n");
+  if (lines.length > 0 && lines[0].startsWith("#!")) {
+    return [lines[0], prelude, ...lines.slice(1)].join("\n");
+  }
+  return prelude + "\n" + script;
 }
 
 export async function submitJob(input: SubmitJobInput): Promise<Job> {
-  const { clusterId, userId, script, partition, name, sourceRef, sourceName, auditExtra } = input;
+  const { clusterId, userId, partition, name, sourceRef, sourceName, auditExtra } = input;
+  let { script } = input;
 
   // Resolve + validate the job name BEFORE any DB writes — easier to
   // surface as a 400 to the caller than to roll back a half-created row.
@@ -152,6 +181,48 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
 
   const dbUser = await prisma.user.findUnique({ where: { id: userId } });
   if (!dbUser) throw new Error("User not found");
+
+  // Experiment-tracker pre-create. We do this BEFORE the Job row is inserted
+  // so the Job is born with the run id stamped onto it — avoids a second
+  // DB write right after the create, and means a transient tracker outage
+  // shows up at submit time (visible) instead of after sbatch has already
+  // accepted the job (invisible).
+  let resolvedTracker: ExperimentTracker | null = null;
+  let createdRun: CreatedRun | null = null;
+  let runContext: RunContext | null = null;
+  if (input.tracker) {
+    resolvedTracker = findTrackerInConfig(
+      cluster.config as Record<string, unknown> | null,
+      input.tracker.trackerId,
+    );
+    if (!resolvedTracker) {
+      throw new Error(`Experiment tracker '${input.tracker.trackerId}' not found on this cluster.`);
+    }
+    const adapter = adapterFor(resolvedTracker);
+    if (!adapter) {
+      throw new Error(`No adapter wired for backend '${resolvedTracker.backend}'.`);
+    }
+    runContext = {
+      // Job id isn't known yet — we generate the prelude AFTER creating the
+      // Job row below. createRun only needs identification for tags, which
+      // we backfill with the cluster + user context (the run id from MLflow
+      // is what links them, not the Aura job id).
+      jobId: "(pending)",
+      clusterId,
+      clusterName: cluster.name,
+      userEmail: dbUser.email ?? undefined,
+      unixUsername: dbUser.unixUsername ?? undefined,
+      experimentName: input.tracker.experimentName,
+      runName: input.tracker.runName ?? jobName,
+    };
+    try {
+      createdRun = await adapter.createRun(resolvedTracker, runContext);
+    } catch (err) {
+      throw new Error(
+        `Tracker '${resolvedTracker.name}' rejected the new run: ${(err as Error).message}`,
+      );
+    }
+  }
 
   // Running-job uniqueness check. Slurm itself is the source of truth —
   // squeue --states=R lists every running job on the controller right
@@ -182,6 +253,16 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
     }
   }
 
+  // Bake the tracker prelude into the persisted script too — the Job
+  // detail page renders the exact script we submitted, and users want to
+  // see what was injected (helps debugging "why isn't my run showing
+  // metrics?"). It also means resubmit picks the prelude up automatically.
+  if (resolvedTracker && createdRun && runContext) {
+    const adapter = adapterFor(resolvedTracker)!;
+    const prelude = adapter.preStartShell(resolvedTracker, createdRun, runContext);
+    script = injectPrelude(script, prelude);
+  }
+
   const job = await prisma.job.create({
     data: {
       clusterId,
@@ -192,6 +273,9 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
       status: "PENDING",
       sourceRef: sourceRef ?? null,
       sourceName: sourceName ?? null,
+      experimentTrackerId: resolvedTracker?.id ?? null,
+      experimentRunId: createdRun?.runId ?? null,
+      experimentRunUrl: createdRun?.runUrl ?? null,
     },
   });
 
@@ -297,6 +381,9 @@ exit $RC
           slurmJobId,
           mode: "ssh",
           submittedBy: dbUser.email,
+          experimentTracker: resolvedTracker
+            ? { id: resolvedTracker.id, backend: resolvedTracker.backend, runId: createdRun?.runId }
+            : undefined,
           ...auditExtra,
         },
       });
@@ -352,6 +439,9 @@ exit $RC
         partition,
         slurmJobId: result.slurm_job_id,
         submittedBy: dbUser.email,
+        experimentTracker: resolvedTracker
+          ? { id: resolvedTracker.id, backend: resolvedTracker.backend, runId: createdRun?.runId }
+          : undefined,
         ...auditExtra,
       },
     });

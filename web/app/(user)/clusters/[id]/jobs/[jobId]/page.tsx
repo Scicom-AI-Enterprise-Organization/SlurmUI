@@ -49,6 +49,10 @@ interface JobDetail {
   updatedAt: string;
   cluster?: { name: string; status: string };
   user?: { email: string; name: string | null; unixUsername: string | null };
+  /** Experiment-tracker linkage (Phase 1: MLflow). */
+  experimentTrackerId?: string | null;
+  experimentRunId?: string | null;
+  experimentRunUrl?: string | null;
 }
 
 const TAB_VALUES = ["output", "stderr", "usage", "info", "deps", "expose", "proxy"] as const;
@@ -420,6 +424,22 @@ export default function JobDetailPage() {
               })()}
             </h1>
             <JobStatusBadge status={job.status} />
+            {job.experimentRunUrl && (
+              <a
+                href={job.experimentRunUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
+                title="Open this job's run in the experiment tracker"
+              >
+                MLflow run
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </a>
+            )}
           </div>
           <p className="text-sm text-muted-foreground">
             Cluster: {job.cluster?.name ?? clusterId} | Partition: {job.partition}

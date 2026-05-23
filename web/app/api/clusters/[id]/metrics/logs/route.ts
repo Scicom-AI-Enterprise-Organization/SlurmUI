@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { sshExecSimple, getClusterSshTarget } from "@/lib/ssh-exec";
 import { readMetricsConfig, resolveStackHost } from "@/lib/metrics-config";
+import { getSupervisor, logsCmd } from "@/lib/supervisor";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -46,10 +47,12 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   if (!target) return NextResponse.json({ error: "No SSH target" }, { status: 412 });
   const tgt = { ...target, bastion: cluster.sshBastion };
 
-  // journalctl needs to run as root for full visibility; use sudo if not
-  // already root. `--no-pager` so journalctl doesn't try to invoke `less`
-  // and stall on a non-tty session.
-  const inner = `S=""; [ "$(id -u)" != "0" ] && S="sudo"; $S journalctl -u ${service} -n ${lines} --no-pager 2>&1 || true`;
+  // journalctl needs to run as root for full visibility; sudo if not
+  // already. Same wrapper for pm2 — though pm2 logs are owned by whoever
+  // ran `pm2 startOrReload`, `sudo` is safe and matches how bootstrap
+  // installs services.
+  const supervisor = getSupervisor(cluster);
+  const inner = `S=""; [ "$(id -u)" != "0" ] && S="sudo"; $S ${logsCmd(supervisor, service, lines)} 2>&1 || true`;
 
   let cmd: string;
   if (stack.isController) {

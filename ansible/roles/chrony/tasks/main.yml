@@ -14,8 +14,13 @@
     mode: '0644'
   notify: restart chrony
 
-- name: Enable and start chrony
-  ansible.builtin.service:
-    name: chrony
-    state: started
-    enabled: true
+# chronyd in a container is usually a no-op (host owns the clock), but
+# routing through the supervisor helper keeps the role consistent and
+# survives containerised compute. -d keeps chronyd in the foreground for
+# pm2 supervision; systemd ignores it.
+- name: Start chronyd
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/_supervisor.yml"
+  vars:
+    svc_name: chrony
+    svc_cmd: "/usr/sbin/chronyd -d"
+    svc_state: started
