@@ -9,9 +9,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
-import { Copy, Trash2, ExternalLink } from "lucide-react";
+import { Copy, Check, Trash2, ExternalLink } from "lucide-react";
 import Link from "next/link";
-import { toast } from "sonner";
 
 interface Token {
   id: string;
@@ -29,6 +28,13 @@ export default function ApiTokensPage() {
   const [name, setName] = useState("");
   const [rawDialog, setRawDialog] = useState<{ raw: string; name: string } | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<Token | null>(null);
+  // Inline feedback replaces the old `toast.error` / `toast.success` calls
+  // so the UI doesn't depend on a global toast container. `createErr` /
+  // `listErr` render under the input / table respectively; `copied`
+  // swaps the dialog's Copy icon to a Check for 2 s after a click.
+  const [createErr, setCreateErr] = useState<string | null>(null);
+  const [listErr, setListErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -46,7 +52,10 @@ export default function ApiTokensPage() {
 
   const handleCreate = async () => {
     const trimmed = name.trim();
-    if (!trimmed) { toast.error("Give the token a name"); return; }
+    setCreateErr(null);
+    // The Create button is disabled when !name.trim() so a blank name
+    // can't reach here in practice — no toast/inline message needed.
+    if (!trimmed) return;
     setCreating(true);
     try {
       const res = await fetch("/api/api-tokens", {
@@ -60,7 +69,7 @@ export default function ApiTokensPage() {
       const text = await res.text();
       const d = text ? (() => { try { return JSON.parse(text); } catch { return { error: text.slice(0, 200) }; } })() : {};
       if (!res.ok) {
-        toast.error(d.error ?? `HTTP ${res.status}${res.status === 500 ? " — server error (check `docker compose logs web`; the Prisma client may need regeneration for the ApiToken model)" : ""}`);
+        setCreateErr(d.error ?? `HTTP ${res.status}${res.status === 500 ? " — server error (check `docker compose logs web`; the Prisma client may need regeneration for the ApiToken model)" : ""}`);
         return;
       }
       setRawDialog({ raw: d.raw, name: trimmed });
@@ -73,18 +82,30 @@ export default function ApiTokensPage() {
 
   const handleRevoke = async (t: Token) => {
     setConfirmRevoke(null);
+    setListErr(null);
     const res = await fetch(`/api/api-tokens/${t.id}`, { method: "DELETE" });
     if (res.ok) {
-      toast.success(`Revoked "${t.name}"`);
+      // Successful revoke is self-evident from the row dimming to
+      // "revoked" on the next load() — no toast needed.
       load();
     } else {
-      toast.error("Revoke failed");
+      setListErr(`Failed to revoke "${t.name}"`);
     }
   };
 
-  const copy = (s: string) => {
-    navigator.clipboard?.writeText(s);
-    toast.success("Copied to clipboard");
+  const copyToken = async (s: string) => {
+    try {
+      await navigator.clipboard?.writeText(s);
+      setCopied(true);
+      // Revert the icon back after a beat. The dialog usually stays open
+      // long enough for the user to notice the green check; 2 s feels
+      // right for "I saw it" without lingering after they Done out.
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API can be blocked in insecure contexts (http on a
+      // non-localhost host). Leave the icon as Copy so the user can
+      // select+ctrl-c from the visible <pre> manually.
+    }
   };
 
   return (
@@ -109,13 +130,16 @@ export default function ApiTokensPage() {
             <Input
               placeholder="e.g. ci-submit, laptop, airflow-prod"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => { setName(e.target.value); setCreateErr(null); }}
               className="max-w-sm"
             />
             <Button onClick={handleCreate} disabled={creating || !name.trim()}>
               {creating ? "Creating…" : "Create"}
             </Button>
           </div>
+          {createErr && (
+            <p className="text-xs text-red-600 dark:text-red-400">{createErr}</p>
+          )}
           <p className="text-xs text-muted-foreground">
             Tokens inherit your role (<code>ADMIN</code> or <code>VIEWER</code>). The raw token is shown exactly once — copy it now.
           </p>
@@ -125,6 +149,9 @@ export default function ApiTokensPage() {
       <Card>
         <CardHeader><CardTitle>Your tokens</CardTitle></CardHeader>
         <CardContent>
+          {listErr && (
+            <p className="mb-2 text-xs text-red-600 dark:text-red-400">{listErr}</p>
+          )}
           {loading ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
           ) : tokens.length === 0 ? (
@@ -175,7 +202,17 @@ export default function ApiTokensPage() {
       </Card>
 
       {/* Raw-token one-shot dialog */}
-      <Dialog open={!!rawDialog} onOpenChange={(o) => { if (!o) setRawDialog(null); }}>
+      <Dialog
+        open={!!rawDialog}
+        onOpenChange={(o) => {
+          if (!o) {
+            setRawDialog(null);
+            // Reset the copy-feedback state so the next dialog open
+            // doesn't briefly flash a stale ✓ icon.
+            setCopied(false);
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>New token — "{rawDialog?.name}"</DialogTitle>
@@ -185,8 +222,16 @@ export default function ApiTokensPage() {
           </DialogHeader>
           <pre className="break-all rounded-md border bg-muted p-3 font-mono text-xs">{rawDialog?.raw}</pre>
           <DialogFooter>
-            <Button variant="outline" onClick={() => copy(rawDialog?.raw ?? "")}>
-              <Copy className="mr-2 h-3 w-3" /> Copy
+            {/* Icon swaps Copy → Check for 2 s on successful clipboard
+                write so the user gets confirmation without a toast. */}
+            <Button
+              variant="outline"
+              onClick={() => copyToken(rawDialog?.raw ?? "")}
+              aria-live="polite"
+            >
+              {copied
+                ? <><Check className="mr-2 h-3 w-3 text-green-600 dark:text-green-400" /> Copied</>
+                : <><Copy className="mr-2 h-3 w-3" /> Copy</>}
             </Button>
             <Button onClick={() => setRawDialog(null)}>Done</Button>
           </DialogFooter>

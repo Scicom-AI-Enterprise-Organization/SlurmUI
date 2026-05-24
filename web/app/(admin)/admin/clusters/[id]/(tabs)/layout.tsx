@@ -6,6 +6,7 @@ import { DeleteClusterButton } from "@/components/cluster/delete-cluster-button"
 import { BootstrapButton } from "@/components/cluster/bootstrap-button";
 import { TerminalButton } from "@/components/cluster/terminal-button";
 import { LogsButton } from "@/components/cluster/logs-button";
+import { InlineRename } from "@/components/cluster/inline-rename";
 import { ClusterTabs } from "@/components/cluster/cluster-tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -36,7 +37,7 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-3xl font-bold">{cluster.name}</h1>
+            <InlineRename clusterId={id} initialName={cluster.name} />
             <LiveClusterStatusBadge
               clusterId={id}
               initialStatus={cluster.status}

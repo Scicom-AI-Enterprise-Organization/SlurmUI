@@ -67,7 +67,16 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // cluster with a few hundred jobs that adds up to tens of MB per page
   // load. Browser only needs ~7 fields, plus enough of `script` to
   // extract the SBATCH job-name.
-  const [jobs, total, partitionsRaw, configPartitionsRaw] = await Promise.all([
+  //
+  // Use `prisma.$transaction([...])` instead of `Promise.all([...])` so
+  // all four reads run on a SINGLE connection (Prisma serialises them
+  // inside the tx). With `Promise.all` Prisma grabs four connections
+  // from the pool simultaneously — on a small pool (e.g. the 1-CPU-
+  // container default `cpus*2+1 = 3`) the 4th query waits and the
+  // page hangs for the full `pool_timeout`. Sequential-inside-tx is
+  // only ~30 ms slower than fully-parallel on a warm DB but stays
+  // pool-pressure-free.
+  const [jobs, total, partitionsRaw, configPartitionsRaw] = await prisma.$transaction([
     prisma.job.findMany({
       where,
       orderBy: { createdAt: "desc" },

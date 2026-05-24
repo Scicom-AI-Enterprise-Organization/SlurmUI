@@ -41,11 +41,21 @@ export default async function JobsListServerPage({ params }: Props) {
   // Same shape as GET /api/clusters/[id]/jobs default response. Kept in
   // sync by hand — duplicating the SQL is cheaper than an internal HTTP
   // round-trip from the server component to its own API.
+  //
+  // Use `prisma.$transaction([...])` instead of `Promise.all([...])` so
+  // the four reads share one connection (Prisma runs them sequentially
+  // inside the tx). With a small pool (`cpus*2+1 = 3` on a 1-CPU
+  // container) `Promise.all` would grab four connections at once, the
+  // fourth would wait for `pool_timeout`, and the whole pre-fetch
+  // would reject → the client component would try its own fetch
+  // against the API route (which had the same bug, also patched), so
+  // the page stayed in loading state forever. Sequential-inside-tx
+  // costs ~30 ms on a warm DB but never blocks on the pool.
   const limit = 20;
   let initialData: JobListInitialData | null = null;
   try {
     const where = { clusterId: id, ...userScope };
-    const [jobs, total, partitionsRaw, configPartitionsRaw] = await Promise.all([
+    const [jobs, total, partitionsRaw, configPartitionsRaw] = await prisma.$transaction([
       prisma.job.findMany({
         where,
         orderBy: { createdAt: "desc" },

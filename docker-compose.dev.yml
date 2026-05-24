@@ -1,11 +1,10 @@
-# Full local dev stack: infrastructure + web + agent.
+# Full local dev stack: infrastructure + web.
 #
 #   docker compose -f docker-compose.dev.yml up -d --build
 #
 # Services:
 #   Web UI       -> http://localhost:3000
 #   Keycloak     -> http://localhost:8080  (admin/admin)
-#   NATS Monitor -> http://localhost:8222
 #   Postgres     -> localhost:5432
 #
 # Test accounts (created by Keycloak realm import):
@@ -30,16 +29,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
-
-  nats:
-    image: nats:2-alpine
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
-    volumes:
-      - natsdata:/data
     restart: unless-stopped
 
   keycloak:
@@ -95,7 +84,7 @@ services:
       dockerfile: Dockerfile.dev
     working_dir: /app
     # Host networking so the container can reach Tailscale IPs and all
-    # localhost services (postgres, nats, keycloak) directly.
+    # localhost services (postgres, keycloak) directly.
     network_mode: host
     # `dev:custom` runs `tsx server.ts`, the same custom entrypoint prod uses.
     # Plain `next dev` doesn't expose the http.Server upgrade event, so the
@@ -103,7 +92,10 @@ services:
     # proxy (Jupyter terminal, etc.) silently 404 under it.
     command: sh -c "npm install && npx prisma generate && npm run dev:custom"
     environment:
-      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
+      # Pool defaults are also applied at runtime by lib/prisma.ts when not
+      # specified here — see web/.env.example. Setting them on the URL
+      # explicitly keeps everything consistent across compose / k8s / etc.
+      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public&connection_limit=15&pool_timeout=30
       NEXTAUTH_URL: http://localhost:3000
       # Same value as docker-compose.prod.yml so a session cookie set by
       # one compose file is still decryptable by the other — browser
@@ -115,7 +107,6 @@ services:
       KEYCLOAK_ID: aura-web
       KEYCLOAK_SECRET: aura-web-secret
       KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom
-      NATS_URL: nats://localhost:4222
       FREEIPA_URL: ""
       FREEIPA_USER: ""
       FREEIPA_PASSWORD: ""
@@ -132,30 +123,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      nats:
-        condition: service_started
       migrate:
         condition: service_completed_successfully
       keycloak:
         condition: service_healthy
     restart: unless-stopped
 
-  # ---- Cluster agent ----
-
-  agent:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    environment:
-      NATS_URL: nats://nats:4222
-      CLUSTER_ID: local-cluster
-      SLURM_USER: root
-    depends_on:
-      nats:
-        condition: service_started
-    restart: unless-stopped
-
 volumes:
   pgdata:
-  natsdata:
   web_node_modules:

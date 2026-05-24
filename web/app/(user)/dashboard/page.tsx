@@ -91,7 +91,12 @@ export default async function DashboardPage() {
   //     submit.
   // Both kinds are clearly labelled in the UI to avoid the cross-scope
   // surprise the QA report flagged.
-  const [recentJobs, jobs7d, liveJobs, createdAt60d] = await Promise.all([
+  // $transaction batches the four reads onto a single pool connection
+  // (Prisma serialises them inside the tx). `Promise.all` would grab
+  // four connections at once and on the prod default pool of
+  // `cpus*2+1 = 3` the dashboard would block on `pool_timeout` and
+  // stay loading forever — same shape of bug we hit on /clusters/:id/jobs.
+  const [recentJobs, jobs7d, liveJobs, createdAt60d] = await prisma.$transaction([
     prisma.job.findMany({
       where: { ...scope },
       orderBy: { createdAt: "desc" },

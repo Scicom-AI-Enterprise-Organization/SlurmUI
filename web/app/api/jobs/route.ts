@@ -60,7 +60,12 @@ export async function GET(req: NextRequest) {
     ...((session.user as any).role !== "ADMIN" ? { userId: session.user.id } : {}),
   };
 
-  const [jobs, total, partitionsRaw, clustersRaw] = await Promise.all([
+  // $transaction batches all four reads onto ONE pool connection (Prisma
+  // serialises them inside the tx). `Promise.all` would grab four
+  // connections at once and on a small pool (cpus*2+1 = 3 in a 1-CPU
+  // container) the 4th query would block on `pool_timeout` and the
+  // whole route would hang.
+  const [jobs, total, partitionsRaw, clustersRaw] = await prisma.$transaction([
     prisma.job.findMany({
       where,
       orderBy: { createdAt: "desc" },

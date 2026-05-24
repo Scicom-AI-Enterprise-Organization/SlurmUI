@@ -22,16 +22,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  nats:
-    image: nats:2-alpine
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
-    volumes:
-      - natsdata:/data
-    restart: unless-stopped
-
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     command: start-dev --import-realm
@@ -78,7 +68,10 @@ services:
       dockerfile: Dockerfile
     network_mode: host
     environment:
-      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public
+      # Pool defaults are also applied at runtime by lib/prisma.ts when not
+      # specified here — see web/.env.example. Setting them on the URL
+      # explicitly is the simplest override for prod operators.
+      DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public&connection_limit=15&pool_timeout=30
       NEXTAUTH_URL: http://localhost:3000
       # Same value as docker-compose.dev.yml so a session cookie set by
       # one compose file is still decryptable by the other — browser
@@ -90,7 +83,6 @@ services:
       KEYCLOAK_ID: aura-web
       KEYCLOAK_SECRET: aura-web-secret
       KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom
-      NATS_URL: nats://localhost:4222
       FREEIPA_URL: ""
       FREEIPA_USER: ""
       FREEIPA_PASSWORD: ""
@@ -99,27 +91,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      nats:
-        condition: service_started
       migrate:
         condition: service_completed_successfully
       keycloak:
         condition: service_healthy
     restart: unless-stopped
 
-  agent:
-    build:
-      context: ./agent
-      dockerfile: Dockerfile
-    environment:
-      NATS_URL: nats://nats:4222
-      CLUSTER_ID: local-cluster
-      SLURM_USER: root
-    depends_on:
-      nats:
-        condition: service_started
-    restart: unless-stopped
-
 volumes:
   pgdata:
-  natsdata:

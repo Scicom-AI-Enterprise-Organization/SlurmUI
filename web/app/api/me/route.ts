@@ -35,7 +35,11 @@ export async function GET(req: NextRequest) {
     orderBy: { provisionedAt: "desc" },
   });
 
-  const [jobCount, runningCount, templateCount] = await Promise.all([
+  // $transaction batches the three counts onto one pool connection.
+  // /api/me is hit on every page load — multiplying that by 3 connections
+  // each was a dominant source of "Timed out fetching a new connection
+  // from the connection pool" on the 3-connection prod default.
+  const [jobCount, runningCount, templateCount] = await prisma.$transaction([
     prisma.job.count({ where: { userId: user.id } }),
     prisma.job.count({ where: { userId: user.id, status: { in: ["PENDING", "RUNNING"] } } }),
     prisma.jobTemplate.count({ where: { userId: user.id } }),

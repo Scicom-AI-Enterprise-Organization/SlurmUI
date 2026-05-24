@@ -7,7 +7,6 @@
 #
 # Services:
 #   Postgres     → localhost:5432
-#   NATS         → localhost:4222
 #   Keycloak     → localhost:8080  (admin: admin/admin)
 #   test-cluster → localhost:2222  (SSH for Ansible bootstrap testing)
 #
@@ -32,15 +31,6 @@ services:
       timeout: 5s
       retries: 5
 
-  nats:
-    image: nats:2-alpine
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
-    volumes:
-      - natsdata:/data
-
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     command: start-dev --import-realm
@@ -61,9 +51,10 @@ services:
       retries: 20
       start_period: 60s
 
-  # Simulated Slurm cluster node for local E2E testing.
-  # Has fake sinfo/sbatch/scontrol/scancel and will run the aura-agent
-  # after the bootstrap playbook deploys it.
+  # Simulated Slurm cluster node for local E2E testing. Has fake
+  # sinfo/sbatch/scontrol/scancel installed inside the container so the
+  # bootstrap playbook can exercise the full provisioning flow without a
+  # real cluster behind it.
   test-cluster:
     build:
       context: ../test
@@ -72,12 +63,7 @@ services:
         TEST_PUBKEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFUwbKku+CDxa/NOJMmlr1YXrmzi1Ce2SMWKvEWe9oJz aura-local-test"
     ports:
       - "2222:22"
-    # The agent inside the container needs to reach NATS.
-    # On Mac Docker Desktop, host.docker.internal resolves to the host.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:
   pgdata:
-  natsdata:
