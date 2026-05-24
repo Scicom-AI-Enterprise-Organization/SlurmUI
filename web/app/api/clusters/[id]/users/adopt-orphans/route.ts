@@ -44,16 +44,19 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   if (apiUser.role !== "ADMIN") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const body = await req.json().catch(() => ({}));
-  const rawNames = Array.isArray(body.usernames) ? body.usernames : [];
+  const rawNames: unknown[] = Array.isArray(body.usernames) ? body.usernames : [];
   // Sanitise — POSIX login names plus a generous allow-list. Drop blanks
   // and silently filter anything that doesn't look like a username so the
   // caller can pass through whatever sacct emitted without pre-cleaning.
-  const usernames = Array.from(new Set(
-    rawNames
-      .filter((u: unknown): u is string => typeof u === "string" && u.length > 0)
-      .map((u: string) => u.trim())
-      .filter((u: string) => /^[A-Za-z_][A-Za-z0-9._-]*$/.test(u)),
-  ));
+  // Explicit `string[]` typing on the inner pipeline so `Array.from(Set)`
+  // doesn't widen back to `unknown[]` (which TS does when the predicate
+  // chain runs through `.map().filter()` without an intermediate
+  // string-typed local).
+  const cleaned: string[] = rawNames
+    .filter((u): u is string => typeof u === "string" && u.length > 0)
+    .map((u) => u.trim())
+    .filter((u) => /^[A-Za-z_][A-Za-z0-9._-]*$/.test(u));
+  const usernames: string[] = Array.from(new Set<string>(cleaned));
   if (usernames.length === 0) {
     return NextResponse.json({ error: "No usernames to adopt" }, { status: 400 });
   }

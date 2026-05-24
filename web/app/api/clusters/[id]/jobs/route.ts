@@ -103,13 +103,17 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }),
     prisma.job.count({ where }),
     // groupBy is the indexed path for distinct partitions; `findMany +
-    // distinct` does it client-side after fetching N rows.
+    // distinct` does it client-side after fetching N rows. `orderBy` is
+    // required by the typed-tuple form of `$transaction` (Prisma's
+    // groupBy inside a tx has a stricter type than the same call inside
+    // `Promise.all`).
     prisma.job.groupBy({
       by: ["partition"],
       where: {
         clusterId: id,
         ...(((session.user as any).role !== "ADMIN") ? { userId: session.user.id } : {}),
       },
+      orderBy: { partition: "asc" },
     }),
     // Pull just `slurm_partitions[].name` out of the cluster config via a
     // JSONB path query. The full `config` JSONB on a configured cluster

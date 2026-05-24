@@ -80,6 +80,11 @@ export default async function JobsListServerPage({ params }: Props) {
       prisma.job.groupBy({
         by: ["partition"],
         where: { clusterId: id, ...userScope },
+        // `orderBy` is required by the typed-tuple form of `$transaction`
+        // (Prisma's `groupBy` inside a transaction has a stricter type
+        // than its `Promise.all` counterpart). Sort by partition name
+        // for stable output; the result is then deduped client-side.
+        orderBy: { partition: "asc" },
       }),
       prisma.$queryRaw<Array<{ partitions: string[] | null }>>`
         SELECT jsonb_path_query_array(config, '$.slurm_partitions[*].name') AS partitions
