@@ -462,7 +462,18 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
   // Admin-only: import jobs from Slurm's live queue into the DB. Handy when
   // the DB is empty vs Slurm (fresh install, migration, CLI-submitted jobs).
   const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{ ok: boolean; summary: string; details?: string } | null>(null);
+  // orphans (when present) drive the "Adopt unmatched users" button in the
+  // result dialog — clicking it calls /users/adopt-orphans which creates
+  // placeholder Aura User rows for each unique unix username, then we
+  // re-trigger the import so the now-resolved jobs land.
+  const [importResult, setImportResult] = useState<{
+    ok: boolean;
+    summary: string;
+    details?: string;
+    orphanUsernames?: string[];
+  } | null>(null);
+  const [adopting, setAdopting] = useState(false);
+
   const handleImport = async () => {
     setImporting(true);
     try {
@@ -472,17 +483,52 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
         setImportResult({ ok: false, summary: d.error ?? `HTTP ${res.status}` });
         return;
       }
-      const summary = `imported ${d.imported}, status-updated ${d.statusUpdated ?? 0}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} sacct rows)`;
+      // adopted = number of placeholder Aura User rows the import auto-created
+      // for unix usernames that had no existing Aura user (e.g. someone
+      // submitted via raw sbatch under a Linux account that the UI didn't
+      // know about). Surface the count so the admin knows new User rows
+      // appeared.
+      const adoptedPart = d.adopted > 0 ? `, adopted ${d.adopted} new user(s)` : "";
+      const summary = `imported ${d.imported}, status-updated ${d.statusUpdated ?? 0}${adoptedPart}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} sacct rows)`;
       const orphans = (d.orphans ?? []) as Array<{ slurmJobId: number; user: string }>;
+      const orphanUsernames = Array.from(new Set(orphans.map((o) => o.user))).filter(Boolean);
       const details = orphans.length > 0
         ? `Unmatched (no local user with that unixUsername):\n${orphans.map((o) => `  ${o.slurmJobId}  ${o.user}`).join("\n")}`
         : undefined;
-      setImportResult({ ok: true, summary, details });
+      setImportResult({ ok: true, summary, details, orphanUsernames });
       fetchJobs();
     } catch (e) {
       setImportResult({ ok: false, summary: e instanceof Error ? e.message : "Network error" });
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleAdoptOrphans = async () => {
+    const usernames = importResult?.orphanUsernames ?? [];
+    if (usernames.length === 0) return;
+    setAdopting(true);
+    try {
+      const res = await fetch(`/api/clusters/${clusterId}/users/adopt-orphans`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ usernames }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Surface inline rather than via toast — the dialog already has a
+        // dedicated detail pane for messages.
+        setImportResult((prev) => prev ? { ...prev, details: `Adopt failed: ${d.error ?? `HTTP ${res.status}`}\n\n${prev.details ?? ""}` } : prev);
+        return;
+      }
+      // Close the dialog and re-import — the orphan unix users now have
+      // Aura User rows, so the previously-skipped sacct rows will be
+      // attributed and tracked. fetchJobs() inside handleImport refreshes
+      // the table.
+      setImportResult(null);
+      await handleImport();
+    } finally {
+      setAdopting(false);
     }
   };
 
@@ -723,6 +769,23 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
             </pre>
           )}
           <DialogFooter>
+            {/* When the sync surfaced orphan unix users, give the admin a
+                one-click way to create placeholder Aura User rows for
+                each (calls /users/adopt-orphans) and re-run the import.
+                Shown only when there's actually something to adopt. */}
+            {(importResult?.orphanUsernames?.length ?? 0) > 0 && (
+              <Button
+                variant="default"
+                onClick={handleAdoptOrphans}
+                disabled={adopting}
+                title="Create placeholder Aura users for the unmatched unix usernames, then re-import."
+              >
+                {adopting
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : null}
+                Adopt {importResult!.orphanUsernames!.length} user(s) & re-import
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setImportResult(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>

@@ -178,6 +178,101 @@ done`;
   });
   const userByUnix = new Map(users.map((u) => [u.unixUsername!, u.id]));
 
+  // For unix usernames that exist on the cluster (Linux + Slurm) but have
+  // no matching Aura User row, auto-create a placeholder USER-role row
+  // and link them as a ClusterUser. Otherwise sacct rows for those users
+  // get skipped on every import — and the admin has to go through the
+  // Users tab and click Adopt for each one before re-importing, which
+  // becomes painful on shared backing containers where multiple Aura
+  // instances have submitted jobs as the same Linux account. The
+  // placeholder is clearly marked (`imported:slurm:<user>` keycloakId,
+  // `<user>+imported@<clusterId-short>.aura.local` email) so an admin
+  // can find and merge it with a real user later.
+  const missing = unixNames.filter((u) => !userByUnix.has(u));
+  let adopted = 0;
+  if (missing.length > 0) {
+    // Probe the cluster for the uid/gid of each missing user. Done in a
+    // single SSH round-trip so an N-user backlog doesn't fan out into N
+    // session establishments. Fall back to null uid if getent doesn't
+    // know the user (the User row still gets created — slurm history is
+    // attributable even when the Linux account no longer exists).
+    const getentScript = missing.map((u) => `getent passwd "${u.replace(/[^A-Za-z0-9._-]/g, "")}" || echo "${u}: notfound"`).join("\n");
+    const getentRes = await sshExecSimple(
+      {
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: cluster.sshKey.privateKey,
+        bastion: cluster.sshBastion,
+        jumpHost: cluster.sshJumpHost,
+        jumpUser: cluster.sshJumpUser,
+        jumpPort: cluster.sshJumpPort,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
+      },
+      getentScript,
+    );
+    const uidByName = new Map<string, { uid: number; gid: number } | null>();
+    if (getentRes.success) {
+      for (const line of getentRes.stdout.split("\n")) {
+        // Expected formats: "user:x:UID:GID:gecos:home:shell" or "user: notfound"
+        const m = line.match(/^([A-Za-z0-9._-]+):x:(\d+):(\d+):/);
+        if (m) uidByName.set(m[1], { uid: parseInt(m[2], 10), gid: parseInt(m[3], 10) });
+        else {
+          const nf = line.match(/^([A-Za-z0-9._-]+):\s*notfound$/);
+          if (nf) uidByName.set(nf[1], null);
+        }
+      }
+    }
+
+    const shortCid = id.slice(0, 8);
+    for (const uname of missing) {
+      const idents = uidByName.get(uname) ?? null;
+      try {
+        // Use upsert keyed on unixUsername so a concurrent import (or an
+        // earlier Adopt action) doesn't duplicate. The `update` body is
+        // intentionally empty — once the User exists we don't overwrite
+        // fields a human might have edited.
+        const created = await prisma.user.upsert({
+          where: { unixUsername: uname },
+          update: {},
+          create: {
+            keycloakId: `imported:slurm:${uname}`,
+            email: `${uname}+imported.${shortCid}@aura.local`,
+            name: uname,
+            unixUsername: uname,
+            unixUid: idents?.uid,
+            unixGid: idents?.gid,
+            role: "VIEWER",
+          },
+          select: { id: true, unixUsername: true },
+        });
+        userByUnix.set(uname, created.id);
+        // Best-effort cluster-user link so the user shows up in the
+        // cluster's Users tab as ACTIVE (matches what Adopt would have
+        // done). Ignore unique-key races.
+        await prisma.clusterUser.upsert({
+          where: { userId_clusterId: { userId: created.id, clusterId: id } },
+          update: { status: "ACTIVE", provisionedAt: new Date() },
+          create: {
+            userId: created.id,
+            clusterId: id,
+            status: "ACTIVE",
+            provisionedAt: new Date(),
+          },
+        }).catch(() => {});
+        adopted++;
+      } catch (e) {
+        // unixUsername unique-collision (race) or other constraint —
+        // refresh the lookup map from DB so subsequent rows can still
+        // import under the user another concurrent request created.
+        const existing = await prisma.user.findUnique({ where: { unixUsername: uname }, select: { id: true } });
+        if (existing) userByUnix.set(uname, existing.id);
+        // Else fall through; the row stays orphan-listed.
+      }
+    }
+  }
+
   let imported = 0;
   let skippedExisting = 0;
   let skippedNoUser = 0;
@@ -278,12 +373,16 @@ done`;
     action: "jobs.import_from_slurm",
     entity: "Cluster",
     entityId: id,
-    metadata: { imported, skippedExisting, skippedNoUser, statusUpdated, backfilled, total: rows.length },
+    metadata: { imported, adopted, skippedExisting, skippedNoUser, statusUpdated, backfilled, total: rows.length },
   });
 
   return NextResponse.json({
     total: rows.length,
     imported,
+    // Number of placeholder Aura User rows auto-created during this run
+    // (one per unmatched unixUsername). 0 on steady-state imports where
+    // every job's user already has an Aura row.
+    adopted,
     skippedExisting,
     skippedNoUser,
     statusUpdated,

@@ -128,6 +128,19 @@ for path in /etc/slurm /etc/slurm-llnl /etc/munge/munge.key /var/spool/slurm /va
     echo "  \$path: already gone"
   fi
 done
+
+# Wipe per-job artifacts that bootstrap leaves behind in /tmp. Without
+# this, a re-bootstrap of the same backing container (typical with
+# managed-GPU hosts where the container persists across cluster create/
+# destroy cycles) inherits the OLD slurmJobId numbering — slurmctld
+# always restarts JobId at 1 on a fresh state dir, so the new "job 1"
+# tries to write /tmp/slurm-1.out which already exists, owned by the
+# previous cluster's Linux user. The mismatched ownership trips a
+# "Permission denied" in slurmstepd and the job dies with WTERMSIG 53
+# before any user code runs. Wipe both the per-job submit scripts
+# (.aura-job-*.sh) and the default slurm-N.out output files.
+echo "  wiping stale /tmp job artifacts (slurm-*.out, .aura-job-*.sh)..."
+\$S rm -f /tmp/slurm-*.out /tmp/.aura-job-*.sh 2>/dev/null || true
 echo ""
 
 WORKER_IPS="${workerIps}"

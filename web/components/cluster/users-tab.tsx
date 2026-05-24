@@ -29,7 +29,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2, Plus, UserPlus, Trash2, RefreshCw, Link2 } from "lucide-react";
-import { toast } from "sonner";
 
 interface ClusterUserRow {
   id: string;
@@ -235,7 +234,8 @@ export function UsersTab({ clusterId }: UsersTabProps) {
         setAdoptError(d.error ?? `HTTP ${res.status}`);
         return;
       }
-      toast.success(`Linked ${adoptTarget.username} to Aura user`);
+      // No toast — closing the dialog + the row dropping the "unmanaged"
+      // badge on the next refresh() is enough visual confirmation.
       setAdoptTarget(null);
       setAdoptUserId("");
       refresh();
@@ -271,10 +271,11 @@ export function UsersTab({ clusterId }: UsersTabProps) {
     const res = await fetch(url, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Failed" }));
+      // Error already surfaces in the remove-log dialog (setRemoveLogs +
+      // setRemoveLogStatus("failed")). Toast was duplicate noise.
       setRemoveLogs((p) => [...p, `[error] ${err.error ?? "Failed to remove user"}`]);
       setRemoveLogStatus("failed");
       setRemoving(null);
-      toast.error("Failed to remove user");
       return;
     }
 

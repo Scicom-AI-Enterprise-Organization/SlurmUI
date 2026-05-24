@@ -1,15 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { sshExecScript } from "@/lib/ssh-exec";
 
 interface RouteParams { params: Promise<{ id: string; jobId: string }> }
 
 // GET /api/clusters/[id]/jobs/[jobId]/info — scontrol/sinfo diagnostics
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { id, jobId } = await params;
-  const session = await auth();
-  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Accepts both NextAuth session cookies and Bearer aura_* tokens via
+  // getApiUser. Bearer is needed so scripted callers can probe job info
+  // without a browser session (debugging "page stuck loading", etc.).
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const job = await prisma.job.findUnique({
     where: { id: jobId },
@@ -18,7 +21,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   if (!job || job.clusterId !== id) {
     return NextResponse.json({ error: "Job not found" }, { status: 404 });
   }
-  if ((session.user as any).role !== "ADMIN" && job.userId !== session.user.id) {
+  if (apiUser.role !== "ADMIN" && job.userId !== apiUser.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   if (!job.slurmJobId) {
