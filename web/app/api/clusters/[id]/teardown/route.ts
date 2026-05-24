@@ -130,19 +130,9 @@ for path in /etc/slurm /etc/slurm-llnl /etc/munge/munge.key /var/spool/slurm /va
 done
 echo ""
 
-echo "[3/5] Stopping and removing aura-agent on controller..."
-stop_svc aura-agent
-for path in /etc/systemd/system/aura-agent.service /etc/aura-agent /usr/local/bin/aura-agent; do
-  if [ -e "\$path" ]; then
-    \$S rm -rf "\$path" && echo "  removed \$path" || echo "  FAILED to remove \$path"
-  fi
-done
-\$S systemctl daemon-reload 2>/dev/null || true
-echo ""
-
 WORKER_IPS="${workerIps}"
 if [ -n "\$WORKER_IPS" ]; then
-  echo "[4/5] Cleaning up worker nodes..."
+  echo "[3/4] Cleaning up worker nodes..."
   # Worker entries are "user@ip:port" joined by '|' (see route.ts).
   # bash IFS-loop on '|' so we can parse the user/port out of each.
   OLDIFS=\$IFS
@@ -169,19 +159,15 @@ if [ -n "\$WORKER_IPS" ]; then
       else
         \\\$RS /usr/local/bin/pm2 delete slurmd munge 2>&1 || true
       fi
-      \\\$RS rm -rf /etc/slurm /etc/slurm-llnl /etc/munge/munge.key 2>&1 || true
+      # Also wipe /var/spool/slurm so a follow-up bootstrap with a new
+      # ClusterName doesn't get "fatal: CLUSTER NAME MISMATCH" from a
+      # stale clustername file in StateSaveLocation. Same reason we drop
+      # /etc/slurm.
+      \\\$RS rm -rf /etc/slurm /etc/slurm-llnl /etc/munge/munge.key /var/spool/slurm /var/log/slurm 2>&1 || true
 ${mgmtNfsPath ? `      \\\$RS umount -f ${mgmtNfsPath} 2>&1 || true
       \\\$RS sed -i '\\|${mgmtNfsPath}|d' /etc/fstab 2>&1 || true` : ""}
 ${dataNfsPath ? `      \\\$RS umount -f ${dataNfsPath} 2>&1 || true
       \\\$RS sed -i '\\|${dataNfsPath}|d' /etc/fstab 2>&1 || true` : ""}
-      if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-        \\\$RS systemctl stop aura-agent 2>&1 || true
-        \\\$RS systemctl disable aura-agent 2>&1 || true
-      else
-        \\\$RS /usr/local/bin/pm2 delete aura-agent 2>&1 || true
-      fi
-      \\\$RS rm -f /etc/systemd/system/aura-agent.service /usr/local/bin/aura-agent 2>&1 || true
-      \\\$RS rm -rf /etc/aura-agent 2>&1 || true
       \\\$RS systemctl daemon-reload 2>/dev/null || true
       echo "  done"
 WORKER_EOF
@@ -190,11 +176,11 @@ WORKER_EOF
   IFS=\$OLDIFS
   echo ""
 else
-  echo "[4/5] No worker nodes to clean up"
+  echo "[3/4] No worker nodes to clean up"
   echo ""
 fi
 
-echo "[5/5] Final cleanup on controller..."
+echo "[4/4] Final cleanup on controller..."
 ${mgmtNfsPath ? `echo "  Unexporting NFS: ${mgmtNfsPath}"
 \$S exportfs -u "*:${mgmtNfsPath}" 2>&1 || true
 \$S sed -i '\\|${mgmtNfsPath}|d' /etc/exports 2>&1 || true` : ""}
@@ -233,7 +219,7 @@ FAILS=0
 fail() { echo "  FAIL: \$1"; FAILS=\$((FAILS + 1)); }
 pass() { echo "  ok:   \$1"; }
 
-for s in slurmctld slurmdbd slurmd munge aura-agent; do
+for s in slurmctld slurmdbd slurmd munge; do
   if [ "\$SUPERVISOR" = "systemd" ]; then
     if systemctl list-unit-files 2>/dev/null | grep -q "^\${s}\\."; then
       state=\$(systemctl is-active "\$s" 2>/dev/null || true)
@@ -256,7 +242,7 @@ for s in slurmctld slurmdbd slurmd munge aura-agent; do
   fi
 done
 
-for path in /etc/slurm /etc/slurm-llnl /etc/munge/munge.key /etc/aura-agent /usr/local/bin/aura-agent /etc/systemd/system/aura-agent.service /opt/aura/ansible; do
+for path in /etc/slurm /etc/slurm-llnl /etc/munge/munge.key /opt/aura/ansible; do
   if [ -e "\$path" ]; then
     fail "\$path still exists"
   else

@@ -278,10 +278,6 @@ async function runBastionBootstrap(taskId: string, clusterId: string, cluster: a
 
 // Run Ansible bootstrap in background
 function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, config: Record<string, unknown>) {
-  if (process.env.AURA_AGENT_BINARY_SRC) {
-    config = { ...config, aura_agent_binary_src: process.env.AURA_AGENT_BINARY_SRC };
-  }
-
   const playbookDir = process.env.ANSIBLE_PLAYBOOKS_DIR ?? "/opt/aura/ansible";
   const playbookFile = process.env.ANSIBLE_PLAYBOOK ?? "bootstrap.yml";
 
@@ -503,18 +499,40 @@ echo "memory_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
 echo "gpus=$(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
 echo "${MARKER}_END"
 `;
+  // Probe via SSH. Capture BOTH stdout AND stderr — the previous filter
+  // dropped stderr lines, so any SSH-side error ("Permission denied",
+  // "Host key verification failed", "Connection timed out") was invisible
+  // and the function silently bailed with the generic
+  // "could not probe hardware" message, leaving the controller unseeded
+  // and breaking every downstream step (storage, mounts, NFS lookup).
+  // Keep two streams so we can log them separately.
   const chunks: string[] = [];
+  const errChunks: string[] = [];
+  let probeOk = false;
   await new Promise<void>((resolve) => {
     sshExecScript(sshTarget, probe, {
-      onStream: (line) => { if (!line.startsWith("[stderr]")) chunks.push(line); },
-      onComplete: () => resolve(),
+      onStream: (line) => {
+        if (line.startsWith("[stderr]")) errChunks.push(line.slice(9));
+        else chunks.push(line);
+      },
+      onComplete: (ok) => { probeOk = ok; resolve(); },
     });
   });
   const blob = chunks.join("\n");
   const s = blob.indexOf(`${MARKER}_START`);
   const e = blob.indexOf(`${MARKER}_END`);
   if (s === -1 || e === -1) {
+    // Dump enough diagnostic to figure out what went wrong without
+    // re-running with extra instrumentation. The probe scripts are short
+    // so this stays bounded.
     await appendLog(taskId, "[aura] Controller auto-seed skipped — could not probe hardware.");
+    await appendLog(taskId, `[aura] seedControllerAsNode: probeOk=${probeOk} stdout_lines=${chunks.length} stderr_lines=${errChunks.length}`);
+    if (chunks.length > 0) {
+      await appendLog(taskId, `[aura] seedControllerAsNode stdout tail: ${chunks.slice(-10).join(" | ")}`);
+    }
+    if (errChunks.length > 0) {
+      await appendLog(taskId, `[aura] seedControllerAsNode stderr tail: ${errChunks.slice(-10).join(" | ")}`);
+    }
     return;
   }
   const body = blob.slice(s + MARKER.length + 6, e);

@@ -56,12 +56,23 @@ set -euo pipefail
 S=""; [ "$(id -u)" != "0" ] && S="sudo"
 $S apt-get install -y -qq nfs-common 2>/dev/null || $S yum install -y -q nfs-utils 2>/dev/null || true
 $S mkdir -p ${mount.mountPath}
-$S grep -q '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} ' /etc/fstab || echo '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} nfs defaults,_netdev 0 0' | $S tee -a /etc/fstab > /dev/null
+# Strip any existing fstab line for this mountpoint before appending the
+# canonical one. Older runs that wrote "undefined:undefined" (a buggy
+# deploy missing the nfsServer lookup) would otherwise leave a stale
+# entry that mount(8) picks up FIRST, breaking the new mount with
+# "Resource temporarily unavailable for undefined:undefined". sed -i is
+# safe in VMs where /etc/fstab is not bind-mounted; we do not need the
+# cat-rewrite dance the teardown script uses for containers.
+$S sed -i "\\| ${mount.mountPath} nfs |d" /etc/fstab
+echo '${mount.nfsServer}:${mount.nfsPath} ${mount.mountPath} nfs defaults,_netdev 0 0' | $S tee -a /etc/fstab > /dev/null
+# If the path is already mounted from a previous deploy (likely a stale
+# source), unmount first so the upcoming mount call re-reads fstab and
+# picks up our newly-written entry. Otherwise the syscall is a no-op
+# when the target is already mounted.
 if mountpoint -q ${mount.mountPath}; then
-  echo "  ${mount.mountPath} already mounted"
-else
-  $S mount ${mount.mountPath}
+  $S umount -f ${mount.mountPath} 2>/dev/null || $S umount -l ${mount.mountPath} 2>/dev/null || true
 fi
+$S mount ${mount.mountPath}
 df -h ${mount.mountPath}
 echo "  Done"
 NODE_EOF`;
@@ -310,6 +321,22 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         error: `NFS server '${mount.nfsServerId}' no longer exists. Recreate it under NFS Servers and update the mount.`,
       }, { status: 400 });
     }
+    // The host node is recorded by *hostname* in nfs_servers; the actual
+    // mount command needs the routable *IP* of that host (the worker that
+    // mounts the export resolves it via /etc/hosts or DNS). Look it up in
+    // slurm_hosts_entries — the same source of truth bootstrap uses.
+    const srvHost = hostsEntries.find((h) => h.hostname === srv.hostNode);
+    if (!srvHost) {
+      return NextResponse.json({
+        error: `NFS server '${mount.nfsServerId}' points at host '${srv.hostNode}' which isn't in cluster.slurm_hosts_entries — re-bootstrap or re-add the node.`,
+      }, { status: 400 });
+    }
+    // Inline the lookup result so buildNfsScript can render the actual
+    // <ip>:<path> instead of "undefined:undefined". This used to be the
+    // caller's job, but every mount referencing a self-hosted server
+    // needs the same resolution, so it's safer to do it server-side once.
+    mount.nfsServer = srvHost.ip;
+    mount.nfsPath = srv.exportPath;
     hostedSummary = `${srv.hostNode}:${srv.exportPath}`;
   }
 
@@ -356,6 +383,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   (async () => {
     await appendLog(`[aura] ${action === "remove" ? "Removing" : "Deploying"} ${mount.type} mount ${mount.mountPath}`);
     const handle = sshExecScript(target, script, {
+      // Mount deploys do an apt-install on every worker followed by the
+      // actual mount syscall; on a cold node (no nfs-common yet) the apt
+      // step can take a couple of minutes per host. The default 60s
+      // sshExecScript watchdog kills that mid-flight. 30 min ceiling
+      // matches the metrics/install path.
+      timeoutMs: 30 * 60 * 1000,
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {

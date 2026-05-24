@@ -29,6 +29,7 @@ import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { buildInventory } from "@/lib/bootstrap-inventory";
 import { seedDefaultPartition } from "@/lib/bootstrap-seed";
+import { sshExecScript } from "@/lib/ssh-exec";
 
 interface RouteParams { params: Promise<{ cluster: string }> }
 
@@ -53,9 +54,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   let config = (cluster.config ?? {}) as Record<string, unknown>;
   config = { ...config, aura_cluster_id: id };
-  if (process.env.AURA_AGENT_BINARY_SRC) {
-    config = { ...config, aura_agent_binary_src: process.env.AURA_AGENT_BINARY_SRC };
-  }
 
   const tmpDir = mkdtempSync(join(tmpdir(), "aura-bootstrap-v1-"));
   const inventoryPath = join(tmpDir, "inventory.ini");
@@ -117,6 +115,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   // On success update the cluster's status the same way the UI path does
   // — otherwise the API consumer would have to issue a second PATCH.
+  let seedDiag = "";
   if (success) {
     await prisma.cluster.update({
       where: { id },
@@ -127,6 +126,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // without an extra round-trip. No-op when the user has already added
     // partitions via the Partitions tab.
     await seedDefaultPartition(id).catch(() => {});
+    // Probe the controller's real hostname / hw + add an entry to
+    // slurm_hosts_entries + slurm_nodes. Without this, downstream paths
+    // that look up the controller by hostname (NFS server provisioning,
+    // mount deploy, scrape targets) all fail with "node not found". The
+    // UI bootstrap calls the same logic inside its onClose handler; we
+    // inline it here so v1 callers (CLI / tests / CI) get parity instead
+    // of a partially-seeded cluster.
+    try {
+      seedDiag = await seedControllerInline(id, {
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: cluster.sshKey.privateKey,
+        bastion: cluster.sshBastion,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
+      });
+    } catch (e) {
+      seedDiag = `seedControllerInline threw: ${e instanceof Error ? e.message : "unknown"}`;
+    }
   }
 
   const body = {
@@ -137,6 +156,98 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     clusterName: cluster.name,
     stdout: stdoutBuf,
     stderr: stderrBuf,
+    // Echo any post-bootstrap seed diagnostic into the response so the
+    // caller (or our e2e test) can see *why* the controller didn't end
+    // up in slurm_hosts_entries without re-running with extra
+    // instrumentation. Empty on the happy path.
+    seedDiagnostic: seedDiag || undefined,
   };
   return NextResponse.json(body, { status: success ? 200 : 500 });
+}
+
+// ─── Inline controller-seed helper (v1-local) ────────────────────────────
+// Mirrors the seedControllerAsNode function in /api/clusters/[id]/bootstrap.
+// Kept here (rather than imported) so the v1 path doesn't depend on the UI
+// route's task-logging plumbing. Returns a diagnostic string suitable for
+// echoing to the caller — empty on success.
+interface InlineSshTarget {
+  host: string;
+  user: string;
+  port: number;
+  privateKey: string;
+  bastion: boolean;
+  proxyCommand: string | null;
+  jumpProxyCommand: string | null;
+}
+async function seedControllerInline(clusterId: string, sshTarget: InlineSshTarget): Promise<string> {
+  if (!sshTarget.privateKey) return "no ssh key — skipped";
+  const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
+  if (!fresh) return "cluster row vanished";
+  const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+  const hosts = (cfg.slurm_hosts_entries ?? []) as Array<Record<string, unknown>>;
+  const nodes = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown>>;
+  if (nodes.length > 0) return `skipped — already ${nodes.length} node(s) configured`;
+
+  const MARKER = `__SEED_${Date.now()}__`;
+  const probe = `
+echo "${MARKER}_START"
+echo "hostname=$(hostname)"
+echo "cpus=$(nproc --all)"
+LSCPU=$(lscpu 2>/dev/null)
+echo "sockets=$(echo "$LSCPU" | awk -F: '/^Socket\\(s\\):/ {gsub(/ /,"",$2); print $2}')"
+echo "cores_per_socket=$(echo "$LSCPU" | awk -F: '/^Core\\(s\\) per socket:/ {gsub(/ /,"",$2); print $2}')"
+echo "threads_per_core=$(echo "$LSCPU" | awk -F: '/^Thread\\(s\\) per core:/ {gsub(/ /,"",$2); print $2}')"
+echo "memory_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+echo "gpus=$(command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
+echo "${MARKER}_END"
+`;
+  const out: string[] = [];
+  const err: string[] = [];
+  let probeOk = false;
+  await new Promise<void>((resolve) => {
+    sshExecScript(sshTarget, probe, {
+      onStream: (line) => {
+        if (line.startsWith("[stderr]")) err.push(line.slice(9));
+        else out.push(line);
+      },
+      onComplete: (ok) => { probeOk = ok; resolve(); },
+    });
+  });
+  const blob = out.join("\n");
+  const s = blob.indexOf(`${MARKER}_START`);
+  const e = blob.indexOf(`${MARKER}_END`);
+  if (s === -1 || e === -1) {
+    return `probe failed (probeOk=${probeOk} stdout=${out.length} stderr=${err.length}); err tail: ${err.slice(-5).join(" | ")}`;
+  }
+  const body = blob.slice(s + MARKER.length + 6, e);
+  const kv: Record<string, string> = {};
+  for (const line of body.split("\n")) {
+    const m = line.match(/^([a-z_]+)=(.*)$/);
+    if (m) kv[m[1]] = m[2].trim();
+  }
+  const hostname = kv.hostname || sshTarget.host;
+  const cpus = parseInt(kv.cpus, 10) || 1;
+  const sockets = parseInt(kv.sockets, 10) || 1;
+  const cores = parseInt(kv.cores_per_socket, 10) || cpus;
+  const threads = parseInt(kv.threads_per_core, 10) || 1;
+  const rawMemMb = parseInt(kv.memory_mb, 10) || 1024;
+  const memMargin = Math.max(64, Math.min(256, Math.floor(rawMemMb * 0.01)));
+  const memMb = Math.max(512, rawMemMb - memMargin);
+  const gpus = parseInt(kv.gpus, 10) || 0;
+
+  hosts.push({ hostname, ip: sshTarget.host, user: sshTarget.user, port: sshTarget.port });
+  nodes.push({
+    expression: hostname,
+    ip: sshTarget.host,
+    ssh_user: sshTarget.user,
+    ssh_port: sshTarget.port,
+    cpus, gpus, memory_mb: memMb,
+    sockets, cores_per_socket: cores, threads_per_core: threads,
+    role: "controller",
+  });
+  await prisma.cluster.update({
+    where: { id: clusterId },
+    data: { config: { ...cfg, slurm_hosts_entries: hosts, slurm_nodes: nodes } as never },
+  });
+  return `seeded ${hostname} (${cpus}C/${gpus}G/${memMb}MB)`;
 }

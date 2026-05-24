@@ -253,6 +253,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   (async () => {
     await appendLog(`[aura] ${action === "remove" ? "Tearing down" : "Provisioning"} NFS server ${server.hostNode}:${server.exportPath}`);
     const handle = sshExecScript(target, script, {
+      // apt-install nfs-kernel-server on a cold host can take ~2 min over
+      // a slow link. Default 60s kills the install mid-download. 30 min
+      // ceiling matches metrics/install + storage/deploy.
+      timeoutMs: 30 * 60 * 1000,
       onStream: (line) => {
         const trimmed = line.replace(/\r/g, "").trim();
         if (trimmed && !trimmed.match(/^[a-z]+@[^:]+:[~\/].*\$/) && !trimmed.startsWith("To run a command")) {

@@ -14,7 +14,10 @@
     "db:seed": "tsx prisma/seed.ts",
     "postinstall": "prisma generate",
     "start:custom": "tsx server.ts",
-    "dev:custom": "NODE_ENV=development tsx server.ts"
+    "dev:custom": "NODE_ENV=development tsx server.ts",
+    "test": "vitest run",
+    "test:e2e:multipass": "vitest run tests/e2e/multipass-cluster.test.ts",
+    "test:e2e:container": "vitest run tests/e2e/container-cluster.test.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",
@@ -77,6 +80,7 @@
     "postcss": "^8",
     "prisma": "^5.22.0",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^2.1.9"
   }
 }

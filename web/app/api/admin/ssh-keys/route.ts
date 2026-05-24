@@ -1,18 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sshPublicKeyFromPrivate, normaliseKey } from "@/lib/ssh-key";
-import type { Session } from "next-auth";
-
-function isAdmin(session: Session | null): boolean {
-  return !!session?.user && (session.user as any).role === "ADMIN";
-}
 
 // GET /api/admin/ssh-keys — list all SSH keys (without private key)
-export async function GET() {
-  const session = await auth();
-  if (!isAdmin(session)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+export async function GET(req: NextRequest) {
+  const apiUser = await getApiUser(req);
+  if (!apiUser || apiUser.role !== "ADMIN") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const keys = await prisma.sshKey.findMany({
     select: {
@@ -30,8 +25,8 @@ export async function GET() {
 
 // POST /api/admin/ssh-keys — create a new SSH key
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!isAdmin(session)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const apiUser = await getApiUser(req);
+  if (!apiUser || apiUser.role !== "ADMIN") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const { name, privateKey } = await req.json();
 

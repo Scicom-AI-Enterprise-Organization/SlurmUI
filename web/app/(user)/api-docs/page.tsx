@@ -470,7 +470,7 @@ EOF`,
     ),
     parameters: [
       { name: "cluster", in: "path", type: "string", required: true, doc: "Cluster UUID." },
-      { name: "service", in: "query", type: "string", required: true, doc: "One of: slurmctld | slurmd | slurmdbd | munge | mariadb | mysql | chrony | sssd | nfs-kernel-server | aura-agent." },
+      { name: "service", in: "query", type: "string", required: true, doc: "One of: slurmctld | slurmd | slurmdbd | munge | mariadb | mysql | chrony | sssd | nfs-kernel-server." },
       { name: "lines", in: "query", type: "number", doc: "Default 200, clamped to [10, 5000]." },
     ],
     request: {

@@ -35,7 +35,6 @@ const ALLOWED_SERVICES = new Set([
   "chrony",
   "sssd",
   "nfs-kernel-server",
-  "aura-agent",
 ]);
 
 export async function GET(req: NextRequest, { params }: RouteParams) {

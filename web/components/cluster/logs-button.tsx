@@ -27,7 +27,6 @@ const LOG_SOURCES = [
   { value: "slurmctld", label: "Slurm Controller (slurmctld)" },
   { value: "slurmd", label: "Slurm Worker (slurmd)" },
   { value: "munge", label: "Munge" },
-  { value: "aura-agent", label: "SlurmUI Agent" },
   { value: "system", label: "System (dmesg)" },
 ];
 

@@ -1,19 +1,21 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 // Profile endpoint — user fetches their own record + provisioned clusters.
 // Does NOT expose keycloakId (auth-system-internal) or anything scoped to
 // other users. Safe to call from the profile page without admin checks.
-export async function GET() {
-  const session = await auth();
-  if (!session?.user) {
+// Accepts either NextAuth session cookies or Bearer aura_* tokens so CI /
+// scripts can resolve "who am I" the same way the UI does.
+export async function GET(req: NextRequest) {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
+    where: { id: apiUser.id },
     select: {
       id: true, email: true, name: true, role: true,
       unixUsername: true, unixUid: true, unixGid: true,

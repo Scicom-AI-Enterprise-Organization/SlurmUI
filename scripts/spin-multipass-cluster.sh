@@ -220,7 +220,9 @@ CF_TUNNEL_URL=""
 CF_TUNNEL_LOG=""
 CF_TUNNEL_PID=""
 setup_cloudflared_tunnel() {
-  [ "$JUMP_TUNNEL_CLOUDFLARED" = "1" ] || return
+  # NOTE: explicit `return 0` — bare `return` after a failed test inherits
+  # the test's non-zero exit, which under `set -e` aborts the whole spin.
+  [ "$JUMP_TUNNEL_CLOUDFLARED" = "1" ] || return 0
   if ! command -v cloudflared >/dev/null; then
     log "cloudflared not found on PATH — skipping internet tunnel"
     log "  install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"

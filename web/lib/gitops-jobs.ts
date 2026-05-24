@@ -255,17 +255,6 @@ exit 2
       onLog(`[scancel] could not cancel job ${job.slurmJobId} — leaving DB status unchanged`);
       return false;
     }
-  } else if (c.connectionMode === "NATS") {
-    try {
-      const { publishCommand } = await import("./nats");
-      await publishCommand(c.id, {
-        request_id: job.id,
-        type: "cancel_job",
-        payload: { slurm_job_id: job.slurmJobId },
-      });
-    } catch (e) {
-      onLog(`[scancel] nats publish failed: ${e instanceof Error ? e.message : "unknown"}`);
-    }
   }
   await prisma.job.update({ where: { id: jobId }, data: { status: "CANCELLED" } }).catch(() => {});
   return true;

@@ -24,8 +24,6 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
   const [basics, setBasics] = useState<ClusterBasics>({
     clusterName: "",
     controllerHost: "",
-    connectionMode: "SSH",
-    natsUrl: "",
     sshUser: "root",
     sshPort: "22",
     sshKeyId: sshKeys.length === 1 ? sshKeys[0].id : "",
@@ -40,11 +38,7 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sshTestStatus, setSshTestStatus] = useState<SshTestStatus>("idle");
 
-  const canCreate = (() => {
-    const base = !!(basics.clusterName && basics.controllerHost && basics.sshKeyId && sshTestStatus === "ok");
-    if (basics.connectionMode === "NATS") return base && !!basics.natsUrl;
-    return base;
-  })();
+  const canCreate = !!(basics.clusterName && basics.controllerHost && basics.sshKeyId && sshTestStatus === "ok");
 
   const handleCreate = async () => {
     setCreating(true);
@@ -56,8 +50,7 @@ export function NewClusterWizard({ sshKeys }: NewClusterWizardProps) {
         body: JSON.stringify({
           name: basics.clusterName,
           controllerHost: basics.controllerHost,
-          connectionMode: basics.connectionMode,
-          natsUrl: basics.natsUrl || undefined,
+          connectionMode: "SSH",
           sshKeyId: basics.sshKeyId,
           sshUser: basics.sshUser || "root",
           sshPort: parseInt(basics.sshPort) || 22,

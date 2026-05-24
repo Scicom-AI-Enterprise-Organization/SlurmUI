@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { redactConfig } from "@/lib/redact-config";
@@ -12,8 +12,8 @@ interface RouteParams {
 // GET /api/clusters/[id] — cluster detail
 export async function GET(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user) {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   };
 
   // Only admins see install token fields
-  if ((session.user as any).role !== "ADMIN") {
+  if (apiUser.role !== "ADMIN") {
     const { installToken, installTokenExpiresAt, installTokenUsedAt, ...safe } = redacted;
     return NextResponse.json(safe);
   }
@@ -56,8 +56,9 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 // PATCH /api/clusters/[id] — update cluster (admin only)
 export async function PATCH(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -118,8 +119,9 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 // DELETE /api/clusters/[id] — delete cluster (admin only)
 export async function DELETE(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

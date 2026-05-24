@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { randomUUID } from "crypto";
 import { probeClusterHealth, effectiveClusterStatus } from "@/lib/cluster-health";
 
-export async function GET() {
-  const session = await auth();
-  if (!session?.user) {
+export async function GET(req: NextRequest) {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -38,23 +37,20 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  // auth: accepts session cookies (UI) and Bearer aura_* tokens (CLI / tests).
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const body = await req.json();
-  const { name, controllerHost, connectionMode, natsUrl, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
+  const { name, controllerHost, sshKeyId, sshUser, sshPort, sshJumpHost, sshJumpUser, sshJumpPort, sshJumpKeyId, sshProxyCommand, sshJumpProxyCommand } = body;
   if (!name || !controllerHost) {
     return NextResponse.json(
       { error: "Missing required fields: name, controllerHost" },
       { status: 400 }
     );
-  }
-
-  const mode = connectionMode === "SSH" ? "SSH" : "NATS";
-  if (mode === "NATS" && !natsUrl) {
-    return NextResponse.json({ error: "NATS URL is required for NATS mode" }, { status: 400 });
   }
 
   // Validate SSH key exists
@@ -81,16 +77,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const installToken = randomUUID();
-  const installTokenExpiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-
   try {
     const cluster = await prisma.cluster.create({
       data: {
         name,
         controllerHost,
-        connectionMode: mode,
-        natsUrl: natsUrl || null,
+        // connectionMode + natsUrl + natsCredentials + installToken are
+        // legacy schema fields from the now-removed aura-agent (NATS-mode)
+        // flow. Always SSH; we'd drop the columns but that needs a
+        // destructive migration.
+        connectionMode: "SSH",
+        natsUrl: null,
         natsCredentials: "",
         sshUser: sshUser || "root",
         sshPort: sshPort || 22,
@@ -102,8 +99,6 @@ export async function POST(req: NextRequest) {
         sshJumpProxyCommand: sshJumpProxyCommand || null,
         status: "PROVISIONING",
         config: { slurm_cluster_name: name, slurm_controller_host: controllerHost },
-        installToken,
-        installTokenExpiresAt,
         ...(sshKeyId ? { sshKeyId } : {}),
       },
     });
@@ -112,7 +107,7 @@ export async function POST(req: NextRequest) {
       action: "cluster.create",
       entity: "Cluster",
       entityId: cluster.id,
-      metadata: { name, controllerHost, connectionMode: mode },
+      metadata: { name, controllerHost },
     });
 
     return NextResponse.json(cluster, { status: 201 });

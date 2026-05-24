@@ -5,8 +5,8 @@
 **A modern web control plane for Slurm.**
 
 Provision nodes, manage users and storage, submit & monitor jobs — from a browser.
-Works with existing Slurm clusters over SSH (no agent required) or with a lightweight
-Go agent over NATS when you want pushed-state and no open SSH ports.
+Works with existing Slurm clusters over SSH (optionally through a bastion) — no
+agent binary on the cluster nodes.
 
 [Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Configuration](#configuration) · [Contributing](#contributing)
 
@@ -44,12 +44,11 @@ wraps the day-to-day operations in a single web UI:
   one-way mirror of live PENDING/RUNNING jobs back into `running/` in the
   same repo. Off by default; enable + schedule (min 180 s) from settings.
 
-Two connection modes, pick whichever fits your network:
+Connection model:
 
-| Mode | How it reaches the cluster | When to use |
-|---|---|---|
-| **SSH** | SlurmUI SSHes to the controller (optionally through a bastion), controller SSHes to workers | Existing clusters, air-gapped networks where only SSH is open, fastest to try |
-| **NATS** | Each node runs the `agent` binary and subscribes to NATS | Push model, no inbound SSH to nodes, cleaner for large fleets |
+| Mode | How it reaches the cluster |
+|---|---|
+| **SSH** | SlurmUI SSHes to the controller (optionally through a bastion), controller SSHes to workers. No agent binary required on cluster nodes. |
 
 Every long-running action (bootstrap, add-node, package install, storage
 deploy, partition apply, environment apply, fix-node, enable accounting, etc.)
@@ -85,11 +84,9 @@ This brings up:
 | Web UI + API | `:3000` | Next.js control plane |
 | Keycloak | `:8080` | OIDC identity (admin/admin on the admin console) |
 | Postgres | `:5432` | Cluster + job metadata |
-| NATS JetStream | `:4222` (monitor `:8222`) | Agent ↔ web bus |
-| Go agent | — | Demo agent speaking to NATS as `local-cluster` |
 
 Prisma migrations run automatically on first boot. Source changes in `web/`
-hot-reload; source changes in `agent/` need `docker compose restart agent`.
+hot-reload.
 
 ### First cluster
 
@@ -373,6 +370,103 @@ Route handlers get their coverage through the integration test — they
 `import` from `next/server`, which can't be loaded under a vanilla
 `node:test` process without a Next-aware runner.
 
+#### End-to-end regression
+
+Two Vitest suites cover the full provisioning + operate flow end-to-end
+against a real Slurm cluster, driven entirely through the public HTTP
+API. Pick whichever shape matches what you're shipping:
+
+| Suite | Cluster shape | Supervisor | Steps | Wall time (warm) | Catches |
+|---|---|---|---|---|---|
+| [Multipass](#end-to-end-regression-multipass--vitest) | 1 master + 2 workers + 1 jumphost VMs (Ubuntu 24.04) | systemd | 18 | ~2-3 min | VM/bare-metal regressions: NFS server self-host, mount-on-every-worker, multi-node Slurm registration, bastion ProxyJump, etc. |
+| [Container](#container-cluster-regression-docker--vitest) | 1 Ubuntu 24.04 Docker container, default cap set (CAP_SYS_ADMIN dropped) | pm2-go | 13 | ~2-3 min | Managed-GPU container regressions (Alibaba PAI-DSW, vast.ai, runpod, etc.): no systemd, no mount() syscall, /etc/hosts bind-mounted. |
+
+Both reuse infra across runs (the spin scripts are idempotent) and clean
+up on success (multipass purge / `docker rm -f`). Use `SKIP_CLEANUP=1`
+to keep state for inspection. The container suite is the same shape of
+test that's been run end-to-end against a real managed-GPU cluster
+(`8.222.165.68:1024`, 8× H20-3e) and verified bootstrap → vllm install
+→ pytorch job → Prom + Grafana → teardown.
+
+#### End-to-end regression (Multipass + Vitest)
+
+[`scripts/regression-test-multipass.sh`](./scripts/regression-test-multipass.sh)
+spins a fresh 1-master + 2-worker + 1-jump cluster on Multipass and walks
+it through the full provisioning flow against a running SlurmUI: SSH key
+upload → cluster create → bootstrap → add nodes → self-hosted NFS server
++ mount → user provision → pandas install → submit & poll a pandas job
+→ metrics exporters → Prometheus + Grafana deploy + health probe →
+teardown. The Vitest suite at [`web/tests/e2e/multipass-cluster.test.ts`](./web/tests/e2e/multipass-cluster.test.ts)
+drives every step over the public HTTP API using a Bearer token, so
+it's the closest thing to a customer install we can re-run on demand.
+
+```bash
+# Prereqs (one-time):
+sudo snap install multipass        # ubuntu host
+sudo apt install -y jq
+
+# Make sure SlurmUI is running and you have an admin token from /profile/api-tokens.
+export AURA_BASE=http://localhost:3000
+export AURA_TOKEN=aura_...
+
+./scripts/regression-test-multipass.sh
+
+# Useful overrides:
+SKIP_CLEANUP=1 ./scripts/regression-test-multipass.sh      # keep VMs after the run
+MASTER_MEM=4G WORKER_MEM=2G ./scripts/...                   # smaller / faster
+```
+
+The wrapper runs **`multipass delete --purge`** on every VM it created at
+the end of a successful run (and on the test's `afterAll` it also fires
+the Aura teardown + `DELETE /api/clusters/:id` so neither the VMs nor
+the DB row linger). Set `SKIP_CLEANUP=1` to suppress the VM purge when
+you want to inspect the cluster after the suite exits — in that case,
+clean up manually with:
+
+```bash
+multipass delete --purge \
+  aura-regress-master aura-regress-worker-1 \
+  aura-regress-worker-2 aura-regress-jump
+```
+
+Re-runnable — the multipass spin script is idempotent (existing VMs
+are reused) and the test creates a uniquely-named cluster each run.
+Total wall time is ~2-3 min once VMs are warm, ~15 min from a cold
+launch. See [`scripts/README.md`](./scripts/README.md#regression-test-multipasssh)
+for the full env-override list and what each suite step verifies.
+
+#### Container-cluster regression (Docker + Vitest)
+
+[`scripts/regression-test-container.sh`](./scripts/regression-test-container.sh)
+runs the same shape of E2E pass against a **managed-GPU-container**
+mimic: a single Ubuntu 24.04 Docker container with the default cap set
+(CAP_SYS_ADMIN dropped, just like Alibaba PAI-DSW, vast.ai, runpod,
+etc.). Verified by the suite's first assertion — the container's
+`CapBnd` matches the real GPU container we test against
+(`00000000a80425fb`). The bootstrap detects the missing systemd and
+falls through to pm2-go for daemon supervision, and the storage-deploy
+endpoints are asserted to surface the overlayfs / cap-set constraint
+with an actionable error rather than silently 500'ing.
+
+```bash
+# Prereqs:
+sudo apt install -y docker.io jq
+# (no snap / multipass needed for this one)
+
+export AURA_BASE=http://localhost:3000
+export AURA_TOKEN=aura_...
+
+./scripts/regression-test-container.sh
+```
+
+Defaults: container at `127.0.0.1:2225`, key at
+`/tmp/aura-regress-container-id_rsa`. Total wall time is ~2-3 min warm,
+~5-7 min cold (the Ubuntu image + apt install on first boot dominate).
+The wrapper runs **`docker rm -f`** on the container at the end of a
+successful run; set `SKIP_CLEANUP=1` to keep it for inspection. See
+[`scripts/README.md`](./scripts/README.md#regression-test-containersh)
+for the full step list.
+
 ### Job proxy
 
 Per-job HTTP + WebSocket reverse proxy at
@@ -495,15 +589,15 @@ effect.
                           │ (Prisma · Keycloak OIDC)    │
                           └──────────────┬──────────────┘
                                          │
-                ┌────────────────────────┼────────────────────────┐
-                │                        │                        │
-            SSH mode                 NATS mode               Observability
-                ▼                        ▼                        ▼
-       ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-       │ ssh (+ bastion) │      │ NATS JetStream  │      │  /api/metrics   │
-       │  → controller   │      │   → agent (Go)  │      │  (Prometheus)   │
-       │  → workers      │      │   → slurmd/ctld │      │                 │
-       └─────────────────┘      └─────────────────┘      └─────────────────┘
+                ┌────────────────────────┴────────────────────────┐
+                │                                                 │
+            Provisioning                                       Observability
+                ▼                                                 ▼
+       ┌─────────────────┐                              ┌─────────────────┐
+       │ ssh (+ bastion) │                              │  /api/metrics   │
+       │  → controller   │                              │  (Prometheus)   │
+       │  → workers      │                              │                 │
+       └─────────────────┘                              └─────────────────┘
 ```
 
 ### Repository layout
@@ -511,8 +605,7 @@ effect.
 | Path | What's there |
 |---|---|
 | `web/` | Next.js 15 app (App Router). Prisma schema, API routes, UI. Custom `server.ts` entrypoint. |
-| `agent/` | Go daemon for NATS-mode clusters. Ansible runner, Slurm CLI wrappers, publisher/subscriber loops. |
-| `ansible/` | Roles for `slurm_controller`, `slurm_worker`, `munge`, `nfs_{server,client}`, `sssd`, `chrony`, `aura_agent`, `aura_user`, plus `bootstrap.yml`, `add_node.yml`, `user_{provision,deprovision}.yml`. |
+| `ansible/` | Roles for `slurm_controller`, `slurm_worker`, `munge`, `nfs_{server,client}`, `sssd`, `chrony`, `aura_user`, plus `bootstrap.yml`, `add_node.yml`, `user_{provision,deprovision}.yml`. |
 | `docs/` | Design specs and implementation plans. |
 | `test/` | Integration tests (Vagrant + in-container). |
 
@@ -537,7 +630,6 @@ effect.
 | `NEXTAUTH_URL` | Public URL of the web tier | `http://localhost:3000` |
 | `NEXTAUTH_SECRET` | Session secret | — |
 | `KEYCLOAK_ID` / `KEYCLOAK_SECRET` / `KEYCLOAK_ISSUER` | OIDC client | — |
-| `NATS_URL` | NATS server used for NATS-mode clusters | `nats://localhost:4222` |
 | `ANSIBLE_PLAYBOOKS_DIR` | Host path of `ansible/` inside the web container | `/opt/aura/ansible` |
 | `METRICS_TOKEN` | Bearer token for `/api/metrics` (empty = public) | empty |
 | `SLURMUI_HEALTH_INTERVAL_SEC` | Health-monitor poll interval (clamped to ≥ 15) | `60` |
@@ -624,14 +716,13 @@ metrics from the cluster nodes themselves, see the
 
 **Dev** — `docker compose -f docker-compose.dev.yml up -d` (see above).
 
-**Prod-like local stack** — `docker compose -f docker-compose.prod.yml up -d --build` builds the real prod image (root `Dockerfile`, `npm run build`, `server.ts` compiled to an ESM bundle, no `tsx` at runtime) and wires it up against postgres / nats / keycloak / the Go agent. Same default CMD (`node -r ./preload.cjs server.mjs`) as K8s/ArgoCD.
+**Prod-like local stack** — `docker compose -f docker-compose.prod.yml up -d --build` builds the real prod image (root `Dockerfile`, `npm run build`, `server.ts` compiled to an ESM bundle, no `tsx` at runtime) and wires it up against postgres / keycloak. Same default CMD (`node -r ./preload.cjs server.mjs`) as K8s/ArgoCD.
 
-**Prod** — build the root `Dockerfile` (builds agent binaries for amd64+arm64, the web image, and bundles the Ansible playbooks) and `agent/Dockerfile`; front the web
-service with your own reverse proxy (TLS, auth proxy if you don't use
-Keycloak), point `DATABASE_URL` at managed Postgres, and either:
-
-- expose NATS JetStream for agents to dial into (NATS mode), or
-- give the web container an SSH key it can use to reach your controllers (SSH mode).
+**Prod** — build the root `Dockerfile` (builds the web image and bundles the
+Ansible playbooks); front the web service with your own reverse proxy (TLS,
+auth proxy if you don't use Keycloak), point `DATABASE_URL` at managed
+Postgres, and give the web container an SSH key it can use to reach your
+controllers.
 
 The web service is stateless; scale horizontally behind any load balancer.
 Background tasks currently track SSH processes in-process, so a task kicked
@@ -695,6 +786,5 @@ SlurmUI is built on top of excellent open-source work:
 
 - [Slurm Workload Manager](https://slurm.schedmd.com/)
 - [Next.js](https://nextjs.org/), [Prisma](https://www.prisma.io/), [Radix UI](https://www.radix-ui.com/), [Recharts](https://recharts.org/)
-- [NATS JetStream](https://docs.nats.io/nats-concepts/jetstream)
 - [Keycloak](https://www.keycloak.org/)
 - [uv](https://docs.astral.sh/uv/)
