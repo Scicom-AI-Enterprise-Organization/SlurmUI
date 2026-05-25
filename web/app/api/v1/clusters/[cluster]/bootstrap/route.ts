@@ -205,9 +205,12 @@ async function seedControllerInline(clusterId: string, sshTarget: InlineSshTarge
   const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
   if (!fresh) return "cluster row vanished";
   const cfg = (fresh.config ?? {}) as Record<string, unknown>;
-  const hosts = (cfg.slurm_hosts_entries ?? []) as Array<Record<string, unknown>>;
-  const nodes = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown>>;
-  if (nodes.length > 0) return `skipped — already ${nodes.length} node(s) configured`;
+  const hosts = (cfg.slurm_hosts_entries ?? []) as Array<Record<string, unknown> & { hostname?: string }>;
+  const nodes = (cfg.slurm_nodes ?? []) as Array<Record<string, unknown> & { expression?: string }>;
+  // Don't early-return on a non-empty node list — re-bootstraps after a
+  // controllerHost/sshPort change still need to refresh the controller's
+  // host entry so the inventory points at the new endpoint. The upsert
+  // below is keyed on hostname, so user-added workers aren't disturbed.
 
   const MARKER = `__SEED_${Date.now()}__`;
   const probe = `
@@ -256,8 +259,25 @@ echo "${MARKER}_END"
   const memMb = Math.max(512, rawMemMb - memMargin);
   const gpus = parseInt(kv.gpus, 10) || 0;
 
-  hosts.push({ hostname, ip: sshTarget.host, user: sshTarget.user, port: sshTarget.port });
-  nodes.push({
+  // Upsert by hostname so a follow-up bootstrap whose cluster row has had
+  // its controllerHost / sshPort changed since the LAST bootstrap updates
+  // the stored ip/port instead of leaving a stale entry behind. A stale
+  // entry (e.g. ip="localhost" port=22 from when the cluster was first
+  // pointed at a docker-bound endpoint) otherwise survives the rerun and
+  // leaks into [slurm_workers] in the next bootstrap's ansible inventory.
+  const hostsIdx = hosts.findIndex((h) => h.hostname === hostname);
+  const hostRow = {
+    hostname,
+    ip: sshTarget.host,
+    user: sshTarget.user,
+    port: sshTarget.port,
+    role: "controller",
+  };
+  if (hostsIdx >= 0) hosts[hostsIdx] = hostRow;
+  else hosts.push(hostRow);
+
+  const nodesIdx = nodes.findIndex((n) => n.expression === hostname);
+  const nodeRow = {
     expression: hostname,
     ip: sshTarget.host,
     ssh_user: sshTarget.user,
@@ -265,7 +285,10 @@ echo "${MARKER}_END"
     cpus, gpus, memory_mb: memMb,
     sockets, cores_per_socket: cores, threads_per_core: threads,
     role: "controller",
-  });
+  };
+  if (nodesIdx >= 0) nodes[nodesIdx] = nodeRow;
+  else nodes.push(nodeRow);
+
   await prisma.cluster.update({
     where: { id: clusterId },
     data: { config: { ...cfg, slurm_hosts_entries: hosts, slurm_nodes: nodes } as never },

@@ -12,6 +12,15 @@ interface HostEntry {
   hostname: string;
   ip: string;
   port?: number;
+  // role is populated by seedControllerAsNode / seedControllerInline. When
+  // present and equal to "controller", the entry is the controller itself
+  // and must never be rendered into [slurm_workers] — otherwise the worker
+  // play loops back through ansible_host=<controller-loopback> trying to
+  // ssh-to-self with whatever ip:port the entry was first saved with
+  // (commonly "localhost":22, which then can't be reached from the web
+  // container and the bootstrap fails at the worker `Gathering Facts`).
+  role?: string;
+  user?: string;
 }
 
 export interface ClusterSsh {
@@ -34,12 +43,29 @@ export interface ClusterSsh {
 export function buildInventory(clusterSsh: ClusterSsh, config: Record<string, unknown>): string {
   const controllerHost = config.slurm_controller_host as string;
   const hostsEntries = (config.slurm_hosts_entries ?? []) as HostEntry[];
-  // The controllerHost is usually an IP, but hostsEntries' hostname is the
+  // controllerHost is usually an IP, but hostsEntries' hostname is the
   // logical Slurm node name (often different). Exclude workers whose IP OR
   // hostname matches the controller — otherwise a single-VM bootstrap loops
   // back to itself as a worker, which fails NFS self-mount.
+  //
+  // Also exclude entries flagged role="controller" (set by
+  // seedControllerInline) AND any entry whose hostname matches a
+  // controller-role node in slurm_nodes. seedControllerInline records the
+  // hostname Ansible's `hostname` returns, which routinely differs from
+  // controllerHost (e.g. "dsw-…" vs "8.222.165.68"). Without these guards
+  // a stale localhost:22 entry from a previous bootstrap cycle leaks into
+  // [slurm_workers] and the worker play fails with `Connection refused`
+  // on localhost:22 from the web container.
+  const slurmNodes = (config.slurm_nodes ?? []) as Array<{ expression?: string; role?: string }>;
+  const controllerHostnames = new Set(
+    slurmNodes.filter((n) => n.role === "controller").map((n) => n.expression).filter(Boolean) as string[],
+  );
   const workerEntries = hostsEntries.filter(
-    (h) => h.hostname !== controllerHost && h.ip !== controllerHost,
+    (h) =>
+      h.role !== "controller" &&
+      !controllerHostnames.has(h.hostname) &&
+      h.hostname !== controllerHost &&
+      h.ip !== controllerHost,
   );
 
   const keyArg = clusterSsh.sshKeyFile ? ` ansible_ssh_private_key_file=${clusterSsh.sshKeyFile}` : "";
