@@ -86,6 +86,56 @@
 # killed milliseconds later. `--wait` keeps ansible blocking until the
 # setsid'd child finishes its initial registration with the pm2 daemon
 # so we don't race the next task.
+#
+# Before the start: pm2-go has an observed wrapper/child PID drift bug
+# where `pm2 start <json>` on an already-running entry silently no-ops
+# instead of restarting it, leaving the OLD binary running with the old
+# config. We've hit this on grafana (stale root_url after re-deploy) and
+# the same shape is plausible on every slurm service. Force-stop + SIGKILL
+# by binary basename before `pm2 start` so the next launch is always a
+# real launch — never a phantom one. First-run hosts have nothing to kill,
+# so the kill is a no-op and adds no latency.
+# Split the hard-stop into three discrete `command:` tasks rather than one
+# `shell:` block-scalar. ansible's pre-jinja argument splitter chokes on
+# multi-line `shell:` blocks containing both jinja braces and `||`/pipes:
+# even with a `|` block-scalar it tries to lex the joined script as a single
+# command line and fails with "failed at splitting arguments, either an
+# unbalanced jinja2 block or quotes". `command:` skips the shell parser, so
+# we use it three times in a row and ignore non-zero exit (best-effort).
+- name: "[{{ svc_name }}] pm2: derive binary basename"
+  ansible.builtin.set_fact:
+    _aura_pm2_bin: "{{ svc_cmd.split() | first | basename }}"
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') in ['started', 'restarted', 'stopped']
+
+- name: "[{{ svc_name }}] pm2: stop (pre-restart, best-effort)"
+  ansible.builtin.command: /usr/local/bin/pm2 stop {{ svc_name }}
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') in ['started', 'restarted']
+  failed_when: false
+  changed_when: false
+
+- name: "[{{ svc_name }}] pm2: SIGKILL stale binary (executable basename)"
+  ansible.builtin.command: pkill -9 -x {{ _aura_pm2_bin }}
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') in ['started', 'restarted']
+  failed_when: false
+  changed_when: false
+
+# munge's pm2 entry execs runuser→munged so the basename above is `runuser`,
+# which is gone by the time pkill runs. Always also pkill munged so the
+# stale daemon is killed regardless of which service we're restarting.
+- name: "[{{ svc_name }}] pm2: SIGKILL stale munged (for munge service)"
+  ansible.builtin.command: pkill -9 -x munged
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') in ['started', 'restarted']
+  failed_when: false
+  changed_when: false
+
 - name: "[{{ svc_name }}] pm2: start (idempotent)"
   ansible.builtin.command: >-
     setsid --wait /usr/local/bin/pm2 start /etc/aura/pm2/{{ svc_name }}.json
@@ -94,15 +144,32 @@
     - svc_state | default('started') in ['started', 'restarted']
   changed_when: true
 
-- name: "[{{ svc_name }}] pm2: stop"
-  ansible.builtin.command: "/usr/local/bin/pm2 stop {{ svc_name }}"
+# Same three-step pattern as the hard-stop above, for an explicit
+# svc_state=stopped transition. See comment block on the restart path
+# explaining why these are `command:` rather than `shell:`.
+- name: "[{{ svc_name }}] pm2: stop (explicit)"
+  ansible.builtin.command: /usr/local/bin/pm2 stop {{ svc_name }}
   when:
     - node_supervisor == "pm2"
     - svc_state | default('started') == 'stopped'
-  changed_when: true
-  # "process not found" is fine when transitioning to stopped — service
-  # may never have been started on this host.
   failed_when: false
+  changed_when: true
+
+- name: "[{{ svc_name }}] pm2: SIGKILL stale binary on stop"
+  ansible.builtin.command: pkill -9 -x {{ _aura_pm2_bin }}
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') == 'stopped'
+  failed_when: false
+  changed_when: false
+
+- name: "[{{ svc_name }}] pm2: SIGKILL stale munged on stop"
+  ansible.builtin.command: pkill -9 -x munged
+  when:
+    - node_supervisor == "pm2"
+    - svc_state | default('started') == 'stopped'
+  failed_when: false
+  changed_when: false
 
 # Persist the current process list so a container restart can re-run
 # `pm2 restore` (manual or via the container entrypoint) and bring the

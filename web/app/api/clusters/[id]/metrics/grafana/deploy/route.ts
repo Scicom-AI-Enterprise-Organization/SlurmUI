@@ -491,13 +491,24 @@ stop_service() {
     $S systemctl stop "$1" 2>/dev/null || true
   else
     $S /usr/local/bin/pm2 stop "$1" >/dev/null 2>&1 || true
+    # pm2-go's stop sometimes reports success without actually killing the
+    # child. Backstop with a real SIGKILL so the next start can bind its
+    # port. Match the binary name (not the pm2 service name) — they happen
+    # to agree for grafana/prometheus/loki/node_exporter, which is the only
+    # set of services we call this on.
+    $S pkill -9 -x "$1" >/dev/null 2>&1 || true
   fi
 }
 restart_service() {
   if [ "$SUPERVISOR" = "systemd" ]; then
     $S systemctl restart "$1"
   else
-    setsid --wait /usr/local/bin/pm2 restart "$1" >/dev/null 2>&1 || true
+    # Don't trust pm2's restart — it has shipped us a stale process more
+    # than once when an old PID survived a prior "stop". Do stop+kill+start
+    # explicitly so we know the new config is actually loaded.
+    $S /usr/local/bin/pm2 stop "$1" >/dev/null 2>&1 || true
+    $S pkill -9 -x "$1" >/dev/null 2>&1 || true
+    setsid --wait /usr/local/bin/pm2 start "$1" >/dev/null 2>&1 || true
   fi
 }
 

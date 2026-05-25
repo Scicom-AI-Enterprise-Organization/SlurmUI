@@ -18,6 +18,12 @@ function restartSlurmctldSnippet(): string {
   sleep 2
   $S systemctl is-active --quiet slurmctld && echo "[aura] slurmctld is active" || echo "[aura] slurmctld NOT active"
 else
+  # pm2-go's "start" is its restart primitive, but if the wrapper PID has
+  # drifted from the child the start silently no-ops and the old binary
+  # keeps running with the OLD slurm.conf. Force-stop + SIGKILL-by-binary
+  # before start so the new config is actually loaded.
+  $S /usr/local/bin/pm2 stop slurmctld 2>/dev/null || true
+  $S pkill -9 -x slurmctld 2>/dev/null || true
   $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | tail -5 || true
   sleep 2
   if $S [ -f /root/.pm2-go/pids/slurmctld.pid ] && $S kill -0 "$(cat /root/.pm2-go/pids/slurmctld.pid)" 2>/dev/null; then
@@ -154,6 +160,11 @@ else
   }
 ]
 MARIA_JSON
+  # See restartSlurmctldSnippet — same pm2-go wrapper/child drift bug. On
+  # first install there's nothing running so stop+pkill is a no-op; on
+  # re-run they ensure the prior mariadbd is really gone before we relaunch.
+  $S /usr/local/bin/pm2 stop mariadb 2>/dev/null || true
+  $S pkill -9 -x mariadbd 2>/dev/null || true
   $S /usr/local/bin/pm2 start /etc/aura/pm2/mariadb.json 2>&1 | tail -3
   echo "  waiting for /run/mysqld/mysqld.sock..."
   for i in $(seq 1 30); do
@@ -204,6 +215,9 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   $S systemctl restart slurmdbd 2>&1 | tail -3 || true
   $S systemctl enable slurmdbd 2>&1 | tail -3 || true
 else
+  # Same pm2-go drift mitigation as slurmctld above.
+  $S /usr/local/bin/pm2 stop slurmdbd 2>/dev/null || true
+  $S pkill -9 -x slurmdbd 2>/dev/null || true
   $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmdbd.json 2>&1 | tail -3 || true
 fi
 sleep 5
@@ -239,6 +253,9 @@ echo "[aura] Restarting slurmctld..."
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   $S systemctl restart slurmctld 2>&1 | tail -5
 else
+  # Same pm2-go drift mitigation as the snippet above.
+  $S /usr/local/bin/pm2 stop slurmctld 2>/dev/null || true
+  $S pkill -9 -x slurmctld 2>/dev/null || true
   $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | tail -5
 fi
 sleep 3

@@ -5,9 +5,12 @@
  *   - Bearer-token auth via getApiUser (no session cookie needed).
  *   - Runs ansible-playbook in the foreground and BLOCKS until it
  *     finishes; returns the full stdout + stderr in the JSON response.
- *   - Skips BackgroundTask / audit / controller-auto-seed /
- *     accounting-auto-enable post-steps so the run is fast to iterate
- *     against during ansible-role development.
+ *   - Skips BackgroundTask / audit post-steps so the run is fast to
+ *     iterate against during ansible-role development.
+ *   - Performs the same controller-auto-seed + slurmdbd accounting
+ *     auto-enable that the UI bootstrap does (was an intentional skip;
+ *     made consistent so v1 callers don't end up with no accounting
+ *     silently). Opt out per-call with ?skipAccounting=true.
  *   - On a non-zero ansible exit code, returns HTTP 500 with the logs
  *     so the caller can grep for the failing task and re-iterate.
  *
@@ -29,8 +32,10 @@ import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { buildInventory } from "@/lib/bootstrap-inventory";
 import { seedDefaultPartition } from "@/lib/bootstrap-seed";
-import { sshExecScript } from "@/lib/ssh-exec";
+import { sshExecScript, sshExecSimple } from "@/lib/ssh-exec";
 import { probeSlurmFirstJobId } from "@/lib/slurm-first-jobid";
+import { buildEnableSlurmdbdScript } from "@/lib/accounting-script";
+import { randomBytes } from "crypto";
 
 interface RouteParams { params: Promise<{ cluster: string }> }
 
@@ -169,6 +174,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     }
   }
 
+  // Auto-enable slurmdbd accounting unless the caller passed
+  // ?skipAccounting=true. Same logic the UI bootstrap runs as its final
+  // step. Best-effort: failures are reported in `accountingDiagnostic`
+  // but don't fail the whole bootstrap (slurm.conf is still functional
+  // with accounting_storage/none — accounting can be retried via the
+  // Accounting tab or POST /api/clusters/<id>/accounting/apply).
+  const skipAccounting = req.nextUrl.searchParams.get("skipAccounting") === "true";
+  let accountingDiag = "";
+  if (success && !skipAccounting) {
+    accountingDiag = await enableAccountingInline(id, {
+      host: cluster.controllerHost,
+      user: cluster.sshUser,
+      port: cluster.sshPort,
+      privateKey: cluster.sshKey.privateKey,
+      bastion: cluster.sshBastion,
+      proxyCommand: cluster.sshProxyCommand,
+      jumpProxyCommand: cluster.sshJumpProxyCommand,
+    }).catch((e) => `enableAccountingInline threw: ${e instanceof Error ? e.message : "unknown"}`);
+  }
+
   const body = {
     status: success ? "success" : "failed",
     exitCode,
@@ -182,8 +207,62 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     // up in slurm_hosts_entries without re-running with extra
     // instrumentation. Empty on the happy path.
     seedDiagnostic: seedDiag || undefined,
+    accountingDiagnostic: accountingDiag || undefined,
   };
   return NextResponse.json(body, { status: success ? 200 : 500 });
+}
+
+/**
+ * Best-effort slurmdbd accounting auto-enable. Mirrors the same flow the
+ * UI bootstrap runs as its final step: builds the enable script via the
+ * shared accounting-script.ts helper, ssh-execs it on the controller,
+ * then persists the generated DB password in cluster.config so a future
+ * re-run reuses the same one (preserves accounting rows across bootstrap
+ * re-runs). Returns a diagnostic string — empty on success.
+ */
+async function enableAccountingInline(clusterId: string, sshTarget: InlineSshTarget): Promise<string> {
+  if (!sshTarget.privateKey) return "no ssh key — accounting skipped";
+  const fresh = await prisma.cluster.findUnique({ where: { id: clusterId } });
+  if (!fresh) return "cluster row vanished";
+  const cfg = (fresh.config ?? {}) as Record<string, unknown>;
+  const existingPass = (cfg.vault_slurmdbd_storage_pass as string) ?? "";
+  const dbPass = existingPass || randomBytes(18).toString("base64url");
+  const clusterSlurmName = (cfg.slurm_cluster_name as string) ?? fresh.name;
+  // Re-register every active cluster user as a sacctmgr account, so
+  // jobs submitted after this point land in the DB with the right
+  // association. unixUsername lives on User (not ClusterUser); fall
+  // back to a sanitised email-local-part if missing — same as the UI
+  // bootstrap path.
+  const clusterUsers = await prisma.clusterUser.findMany({
+    where: { clusterId, status: "ACTIVE" },
+    include: { user: { select: { unixUsername: true, email: true } } },
+  }).catch(() => [] as Array<{ user: { unixUsername: string | null; email: string } }>);
+  const usernames = clusterUsers
+    .map((cu) => cu.user.unixUsername ?? cu.user.email.split("@")[0].replace(/[^a-z0-9_]/gi, "_").toLowerCase())
+    .filter((u) => u.length > 0 && /^[a-z_][a-z0-9_-]*$/i.test(u));
+  const script = buildEnableSlurmdbdScript({ dbPass, clusterSlurmName, usernames });
+  const r = await sshExecSimple({
+    host: sshTarget.host,
+    user: sshTarget.user,
+    port: sshTarget.port,
+    privateKey: sshTarget.privateKey,
+    bastion: sshTarget.bastion,
+    proxyCommand: sshTarget.proxyCommand,
+    jumpProxyCommand: sshTarget.jumpProxyCommand,
+  }, script);
+  if (!r.success) {
+    return `accounting enable rc=${r.exitCode}: ${(r.stderr || r.stdout).slice(-400)}`;
+  }
+  // Persist password so the next bootstrap re-run uses the same one
+  // and slurmdbd doesn't reject the existing rows on a credentials
+  // mismatch.
+  if (!existingPass) {
+    await prisma.cluster.update({
+      where: { id: clusterId },
+      data: { config: { ...cfg, vault_slurmdbd_storage_pass: dbPass } as never },
+    }).catch(() => {});
+  }
+  return "";
 }
 
 // ─── Inline controller-seed helper (v1-local) ────────────────────────────

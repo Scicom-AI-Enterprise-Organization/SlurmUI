@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 interface RouteParams { params: Promise<{ id: string }> }
@@ -27,10 +27,11 @@ function validate(parts: Partition[]): string | null {
 }
 
 // GET — list partitions from cluster.config
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const cluster = await prisma.cluster.findUnique({ where: { id } });
@@ -51,8 +52,9 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 // PUT — save partitions in cluster.config (without applying to slurm.conf)
 export async function PUT(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const body = await req.json();

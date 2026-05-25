@@ -78,11 +78,18 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   const cluster = await prisma.cluster.findUnique({ where: { id } });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
-  // Merge config fields into existing config instead of replacing
+  // Deep-merge config fields into existing config instead of shallow-replacing
+  // them. A shallow merge silently wiped sibling keys when the caller PATCHed
+  // a nested object (e.g. PATCH `config.metrics.grafanaAdminPassword` used to
+  // replace the WHOLE `metrics` block — including `nodes`, `grafanaPort`,
+  // `grafanaRootUrl`, etc. — leaving Prometheus with no scrape targets and
+  // the Grafana proxy pointing nowhere). Recursive merge for plain objects
+  // only; arrays + primitives still replace wholesale (the previous behaviour
+  // for those types) so a PATCH that intentionally clears a list still works.
   let mergedConfig = undefined;
   if (config) {
     const existingConfig = (cluster.config ?? {}) as Record<string, unknown>;
-    mergedConfig = { ...existingConfig, ...config };
+    mergedConfig = deepMergeConfig(existingConfig, config as Record<string, unknown>);
   }
 
   const updated = await prisma.cluster.update({
@@ -141,4 +148,43 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
   });
 
   return NextResponse.json({ success: true });
+}
+
+/**
+ * Deep-merge two plain-object config trees. Used by PATCH so a caller can
+ * update one nested leaf without wiping its siblings.
+ *
+ * - Plain objects (not arrays, not Dates) are recursed into.
+ * - Arrays + primitives in `patch` replace the corresponding value in `base`
+ *   wholesale — that matches the previous shallow-merge semantics and is
+ *   what callers want when intentionally clearing a list (e.g. emptying
+ *   `slurm_partitions` by sending `[]`).
+ * - `null` in `patch` deletes the key — symmetric with how PATCH bodies
+ *   typically express "remove this field".
+ */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (v === null || typeof v !== "object") return false;
+  if (Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function deepMergeConfig(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) {
+      delete out[k];
+      continue;
+    }
+    const existing = out[k];
+    if (isPlainObject(existing) && isPlainObject(v)) {
+      out[k] = deepMergeConfig(existing, v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }

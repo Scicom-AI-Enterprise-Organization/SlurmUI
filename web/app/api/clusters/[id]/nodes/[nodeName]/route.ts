@@ -80,6 +80,12 @@ if [ "$SUPERVISOR" = "systemd" ]; then
 else
   $S /usr/local/bin/pm2 stop slurmctld 2>&1 || true
   $S /usr/local/bin/pm2 stop slurmd 2>&1 || true
+  # pm2-go's stop sometimes returns success without actually killing the
+  # child (the wrapper PID and the child PID drift apart). Backstop with
+  # SIGKILL by binary name so the next pm2 start actually replaces the
+  # process instead of failing to bind and leaving the stale one running.
+  $S pkill -9 -x slurmctld 2>/dev/null || true
+  $S pkill -9 -x slurmd 2>/dev/null || true
 fi
 
 # Remove NodeName line
@@ -336,6 +342,14 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   $S systemctl restart slurmctld 2>&1 | head -3
   $S systemctl restart slurmd 2>&1 | head -3 || true
 else
+  # pm2 start of an already-running app is pm2-go's "restart" primitive, but
+  # if pm2's wrapper PID has drifted from the child it leaves the old process
+  # alive with the old config. Force-stop + SIGKILL-by-binary before start
+  # so the new slurm.conf is actually loaded.
+  $S /usr/local/bin/pm2 stop slurmctld 2>/dev/null || true
+  $S /usr/local/bin/pm2 stop slurmd 2>/dev/null || true
+  $S pkill -9 -x slurmctld 2>/dev/null || true
+  $S pkill -9 -x slurmd 2>/dev/null || true
   $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmctld.json 2>&1 | head -3
   $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmd.json 2>&1 | head -3 || true
 fi

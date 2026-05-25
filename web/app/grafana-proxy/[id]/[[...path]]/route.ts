@@ -214,6 +214,29 @@ async function handle(req: NextRequest, clusterId: string, pathSegs: string[]) {
     if (kl === "set-cookie") return;
     respHeaders.set(k, v);
   });
+  // Disable browser caching on HTML / JSON / API responses so a Grafana
+  // re-deploy (which rotates root_url + admin password + sometimes the
+  // dashboard provisioning JSON) is picked up immediately. Without this,
+  // the previous deploy's bootstrap HTML — which has the OLD origin baked
+  // into <base href> and the JS config blob — gets served from the
+  // browser's disk cache for hours after the redeploy, causing the
+  // "I redeployed from local but I still see prod URLs" confusion.
+  //
+  // Static assets (long-cache hashed JS/CSS in /public/build/*) keep
+  // their original Cache-Control headers so the experience stays fast —
+  // those filenames include a build hash so they're safe to cache.
+  const upCt = (upRes.headers.get("content-type") ?? "").toLowerCase();
+  const isStaticAsset = /^\/grafana-proxy\/[^/]+\/public\//.test(req.nextUrl.pathname);
+  const isCacheable =
+    isStaticAsset &&
+    (upCt.includes("font/") || upCt.includes("image/") || upCt.includes("application/octet-stream") ||
+     (upCt.includes("javascript") && req.nextUrl.pathname.includes("/build/")) ||
+     (upCt.includes("text/css") && req.nextUrl.pathname.includes("/build/")));
+  if (!isCacheable) {
+    respHeaders.set("cache-control", "no-store, must-revalidate, max-age=0");
+    respHeaders.set("pragma", "no-cache");
+    respHeaders.set("expires", "0");
+  }
   // Preserve every individual Set-Cookie header (Grafana's session cookie
   // among them) — without this the browser never gets the session, every
   // page revalidates against our injected Basic auth, and any flow that

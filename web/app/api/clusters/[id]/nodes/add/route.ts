@@ -343,6 +343,19 @@ if $S ls /etc/munge/munge.key >/dev/null 2>&1; then
         && echo "  slurmd: active" \\
         || echo "  slurmd: FAILED — see journalctl -u slurmd"
     else
+      # pm2-go start can no-op silently when its wrapper/child PID
+      # tracking has drifted, leaving an old munged/slurmd binary running
+      # with stale config. Force-stop + SIGKILL-by-binary before start so
+      # the new munge.key / slurm.conf are actually picked up. The munge
+      # pm2 entry execs runuser then munged, so the comm name in /proc is
+      # munged, which is what pkill -x matches on.
+      # NOTE: this whole block is inside ssh ... bash -c '...' — no
+      # apostrophes in comments here, or the outer single-quote closes
+      # early and the script truncates with unexpected-EOF.
+      $S /usr/local/bin/pm2 stop munge 2>/dev/null || true
+      $S /usr/local/bin/pm2 stop slurmd 2>/dev/null || true
+      $S pkill -9 -x munged 2>/dev/null || true
+      $S pkill -9 -x slurmd 2>/dev/null || true
       $S /usr/local/bin/pm2 start /etc/aura/pm2/munge.json 2>&1 | head -3 || true
       sleep 1
       $S /usr/local/bin/pm2 start /etc/aura/pm2/slurmd.json 2>&1 | head -5 || true
