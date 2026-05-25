@@ -24,7 +24,6 @@ import {
 import { JobTable } from "@/components/jobs/job-table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { TemplatesPanel } from "@/components/jobs/templates-panel";
-import { toast } from "sonner";
 import { Plus, ChevronLeft, ChevronRight, Eraser, Loader2, Cpu, MemoryStick, Gpu, RefreshCw, Download } from "lucide-react";
 import Link from "next/link";
 
@@ -489,7 +488,11 @@ export default function JobListPage({ initialData }: { initialData?: JobListInit
       // know about). Surface the count so the admin knows new User rows
       // appeared.
       const adoptedPart = d.adopted > 0 ? `, adopted ${d.adopted} new user(s)` : "";
-      const summary = `imported ${d.imported}, status-updated ${d.statusUpdated ?? 0}${adoptedPart}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} sacct rows)`;
+      // preCreatedSkipped = sacct rows older than this cluster (left-over
+      // from a previous cluster instance on the same backing controller).
+      // Showing this prevents the "where did all my jobs go?" confusion.
+      const preCreatedPart = d.preCreatedSkipped > 0 ? `, ignored ${d.preCreatedSkipped} pre-cluster sacct row(s)` : "";
+      const summary = `imported ${d.imported}, status-updated ${d.statusUpdated ?? 0}${adoptedPart}${preCreatedPart}, skipped ${d.skippedExisting} (already tracked), ${d.skippedNoUser} without a matched user (of ${d.total} sacct rows)`;
       const orphans = (d.orphans ?? []) as Array<{ slurmJobId: number; user: string }>;
       const orphanUsernames = Array.from(new Set(orphans.map((o) => o.user))).filter(Boolean);
       const details = orphans.length > 0

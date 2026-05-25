@@ -64,6 +64,14 @@ MpiDefault=none
 # is opaque). Without this, single-VM bootstraps land in INVALID_REG state.
 SlurmdParameters=config_overrides
 
+# Continue the JobId counter past anything slurmdbd already has, so a fresh
+# slurmctld (state-dir wiped on teardown) on a shared backing controller
+# doesn't collide with historical JobIds still in the accounting DB. Probed
+# at bootstrap time by the web layer (mysql -N "SELECT MAX(id_job) FROM
+# slurm_acct_db.*_job_table" + 1) and passed in as `slurm_first_job_id`.
+# Defaults to 1 when slurmdbd is empty / unreachable.
+FirstJobId={{ slurm_first_job_id | default(1) }}
+
 {# Some slurm_nodes entries (e.g. created by the Edit-node upsert) don't
    carry gpus/cpus/memory_mb yet, so guard the gpus selectattr against
    missing keys before the gt comparison. #}

@@ -12,6 +12,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { buildInventory, type ClusterSsh } from "@/lib/bootstrap-inventory";
 import { seedDefaultPartition } from "@/lib/bootstrap-seed";
+import { probeSlurmFirstJobId } from "@/lib/slurm-first-jobid";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -277,11 +278,35 @@ async function runBastionBootstrap(taskId: string, clusterId: string, cluster: a
 }
 
 // Run Ansible bootstrap in background
-function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, config: Record<string, unknown>) {
+async function runAnsibleBootstrap(taskId: string, clusterId: string, cluster: any, config: Record<string, unknown>) {
   const playbookDir = process.env.ANSIBLE_PLAYBOOKS_DIR ?? "/opt/aura/ansible";
   const playbookFile = process.env.ANSIBLE_PLAYBOOK ?? "bootstrap.yml";
 
   let tmpDir: string | null = null;
+
+  // Probe slurmdbd's mariadb for max(id_job) + 1 BEFORE rendering slurm.conf.
+  // On a fresh slurmctld (state-dir wiped by a prior teardown) but a
+  // persistent slurmdbd (mariadb data dir survives teardowns), this is
+  // what keeps the JobId counter monotone — without it the new slurmctld
+  // restarts at 1 and silently collides with historical accounting rows.
+  // Best-effort: if mariadb isn't running yet on a truly-cold bootstrap
+  // the probe returns 1, same as the slurm.conf default.
+  if (cluster.sshKey) {
+    try {
+      const firstJobId = await probeSlurmFirstJobId({
+        host: cluster.controllerHost,
+        user: cluster.sshUser,
+        port: cluster.sshPort,
+        privateKey: cluster.sshKey.privateKey,
+        bastion: cluster.sshBastion,
+        proxyCommand: cluster.sshProxyCommand,
+        jumpProxyCommand: cluster.sshJumpProxyCommand,
+      });
+      config = { ...config, slurm_first_job_id: firstJobId };
+    } catch {
+      // best-effort; ansible falls back to FirstJobId=1
+    }
+  }
 
   try {
     tmpDir = mkdtempSync(join(tmpdir(), "aura-bootstrap-"));
@@ -442,7 +467,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       await finishTask(task.id, false);
     });
   } else {
-    runAnsibleBootstrap(task.id, id, cluster, config);
+    // Now async (probes slurmdbd for FirstJobId before spawning ansible);
+    // catch surface errors the same way the bastion path does.
+    runAnsibleBootstrap(task.id, id, cluster, config).catch(async (e) => {
+      await appendLog(task.id, `[aura] Bootstrap error: ${e instanceof Error ? e.message : "unknown"}`);
+      await finishTask(task.id, false);
+    });
   }
 
   return NextResponse.json({ taskId: task.id });

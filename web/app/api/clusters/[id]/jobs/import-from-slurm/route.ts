@@ -102,6 +102,21 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
   // Filter out ssh banner / error lines — sacct rows have exactly 7
   // separators (8 fields: jobid, state, user, partition, name, submit,
   // cpus, exitcode).
+  //
+  // ALSO skip sacct rows whose Submit timestamp predates the current
+  // cluster's createdAt. Why: slurmdbd's mariadb data dir persists
+  // across our teardown/bootstrap cycle (teardown wipes
+  // /var/spool/slurm slurmctld state but NOT the mariadb data dir, by
+  // design — we don't want to drop accounting history on a controller
+  // restart). On a shared backing host (managed-GPU containers, etc.)
+  // a brand-new Aura cluster pointing at the same controller inherits
+  // sacct rows from PREVIOUS cluster instances — and slurmctld's JobId
+  // counter restarts at 1, so old "JobId=2" and new "JobId=2" collide
+  // when we try to upsert by (clusterId, slurmJobId). Treating rows
+  // older than cluster.createdAt as "different cluster instance, not
+  // ours" cleanly avoids the cross-incarnation duplicates.
+  const clusterCreatedAt = cluster.createdAt;
+  let preCreatedSkipped = 0;
   const rows = lines
     .filter((l) => (l.match(/\|/g)?.length ?? 0) === 7)
     .map((l) => {
@@ -120,7 +135,20 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
         gpus: 0, // filled in below from scontrol's JOB_GRES line
       };
     })
-    .filter((r) => Number.isFinite(r.slurmJobId) && r.slurmJobId > 0);
+    .filter((r) => Number.isFinite(r.slurmJobId) && r.slurmJobId > 0)
+    .filter((r) => {
+      // Drop rows submitted before this cluster row existed — they came
+      // from a previous cluster instance on the same backing slurm DB.
+      // See the long comment above the `rows` map for the full rationale.
+      if (!r.submit) return true;  // malformed timestamp → let it through
+      const submittedAt = new Date(r.submit);
+      if (Number.isNaN(submittedAt.getTime())) return true;
+      if (submittedAt < clusterCreatedAt) {
+        preCreatedSkipped++;
+        return false;
+      }
+      return true;
+    });
 
   // Fan out one scontrol call per job in a single SSH round-trip and
   // parse JOB_GRES=gpu:N — the only place Slurm 23+ reliably exposes the
@@ -373,7 +401,7 @@ done`;
     action: "jobs.import_from_slurm",
     entity: "Cluster",
     entityId: id,
-    metadata: { imported, adopted, skippedExisting, skippedNoUser, statusUpdated, backfilled, total: rows.length },
+    metadata: { imported, adopted, skippedExisting, skippedNoUser, statusUpdated, backfilled, preCreatedSkipped, total: rows.length },
   });
 
   return NextResponse.json({
@@ -387,6 +415,11 @@ done`;
     skippedNoUser,
     statusUpdated,
     backfilled,
+    // sacct rows whose Submit timestamp is before cluster.createdAt —
+    // typical when a fresh Aura cluster row reuses a backing slurm
+    // controller that's been used by a previous Aura cluster (the
+    // mariadb accounting DB persists across slurmctld restarts).
+    preCreatedSkipped,
     orphans: orphans.slice(0, 20),
   });
 }

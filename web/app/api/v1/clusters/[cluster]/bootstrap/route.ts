@@ -30,6 +30,7 @@ import { prisma } from "@/lib/prisma";
 import { buildInventory } from "@/lib/bootstrap-inventory";
 import { seedDefaultPartition } from "@/lib/bootstrap-seed";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { probeSlurmFirstJobId } from "@/lib/slurm-first-jobid";
 
 interface RouteParams { params: Promise<{ cluster: string }> }
 
@@ -54,6 +55,26 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
   let config = (cluster.config ?? {}) as Record<string, unknown>;
   config = { ...config, aura_cluster_id: id };
+
+  // Probe the controller's slurmdbd for the highest historical JobId and
+  // set FirstJobId = max + 1. This makes the new slurmctld pick up where
+  // slurmdbd left off, even when /var/spool/slurm was wiped on a prior
+  // teardown (which resets the in-memory counter to 1). Default is 1 if
+  // slurmdbd isn't reachable / is fresh — same as before the probe.
+  try {
+    const firstJobId = await probeSlurmFirstJobId({
+      host: cluster.controllerHost,
+      user: cluster.sshUser,
+      port: cluster.sshPort,
+      privateKey: cluster.sshKey.privateKey,
+      bastion: cluster.sshBastion,
+      proxyCommand: cluster.sshProxyCommand,
+      jumpProxyCommand: cluster.sshJumpProxyCommand,
+    });
+    config = { ...config, slurm_first_job_id: firstJobId };
+  } catch {
+    // best-effort; bootstrap continues with the default (FirstJobId=1)
+  }
 
   const tmpDir = mkdtempSync(join(tmpdir(), "aura-bootstrap-v1-"));
   const inventoryPath = join(tmpDir, "inventory.ini");
