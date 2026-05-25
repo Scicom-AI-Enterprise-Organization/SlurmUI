@@ -42,10 +42,16 @@ if ! \$S mysql -e 'SELECT 1' slurm_acct_db >/dev/null 2>&1; then
   exit 0
 fi
 
-# Find every per-cluster job_table (slurmdbd creates one per cluster
-# the controller has ever been registered as) and take the global max.
-TABLES=\$(\$S mysql -N -e "SELECT table_name FROM information_schema.tables \\
-  WHERE table_schema='slurm_acct_db' AND table_name LIKE '%_job_table'" 2>/dev/null)
+# Find every per-cluster job_table (slurmdbd creates <cluster>_job_table,
+# <cluster>_job_env_table, <cluster>_job_script_table — only the first is
+# the one we want). Use SHOW TABLES + grep so we don't have to escape
+# wildcards / underscores in a LIKE clause; cluster names commonly
+# contain hyphens which combined with SQL-LIKE quoting kept tripping
+# earlier versions of this probe (the LIKE pattern silently returned
+# empty for clusters like 'tm-h20').
+TABLES=\$(\$S mysql -N -e "SHOW TABLES FROM slurm_acct_db" 2>/dev/null \\
+  | grep '_job_table\$' \\
+  | grep -v '_job_env_table\\|_job_script_table')
 if [ -z "\$TABLES" ]; then
   echo "FIRST_JOB_ID=1"
   exit 0
@@ -53,7 +59,10 @@ fi
 
 MAX=0
 for T in \$TABLES; do
-  V=\$(\$S mysql -N -e "SELECT IFNULL(MAX(id_job), 0) FROM slurm_acct_db.\$T" 2>/dev/null)
+  # Backtick the table name so cluster names with hyphens (or other
+  # MySQL-reserved chars) parse correctly. SHOW TABLES emits the raw
+  # name without quotes.
+  V=\$(\$S mysql -N -e "SELECT IFNULL(MAX(id_job), 0) FROM slurm_acct_db.\\\`\$T\\\`" 2>/dev/null)
   if [ -n "\$V" ] && [ "\$V" -gt "\$MAX" ] 2>/dev/null; then
     MAX=\$V
   fi
