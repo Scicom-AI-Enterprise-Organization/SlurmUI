@@ -97,7 +97,10 @@ export function buildJumpArgs(target: SshTarget, tmpDir: string, mainKeyPath: st
   }
   const u = target.jumpUser || "root";
   const p = target.jumpPort || 22;
-  const jumpOpts = `-i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR`;
+  // ServerAliveInterval on the jump leg matches the outer ssh — without it,
+  // the jump-to-controller hop dies on a middlebox idle timer while the
+  // outer ssh stays "alive" and the channel mysteriously stops streaming.
+  const jumpOpts = `-i ${jumpKeyPath} -p ${p} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=3`;
 
   // Jump ProxyCommand (optional) is the transport INTO the jumphost —
   // nested as the inner ssh's own ProxyCommand.
@@ -118,6 +121,10 @@ interface SshExecCallbacks {
   // Long-running admin flows (bootstrap, package install, node deploy)
   // should set this well beyond the default 60s; that default is for
   // short commands like squeue / sinfo / file reads.
+  //
+  // Pass 0 or Infinity to disable the watchdog entirely — required for
+  // truly long-lived streaming sessions like the job watcher, which is
+  // a `tail -F` that intentionally runs until the slurm job ends.
   timeoutMs?: number;
 }
 
@@ -184,6 +191,13 @@ export function sshExec(
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=15",
     "-o", "BatchMode=yes",
+    // Keep the TCP session alive across idle stretches. Without this any
+    // middlebox between us and the controller (k8s conntrack, public-cloud
+    // VPC NAT/firewall, etc.) silently drops the connection after its own
+    // idle timer fires — typically 5–15 min — leaving the watcher hung in
+    // read() forever. 30 s pings, 3 strikes → ~90 s before SSH errors out.
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
     ...(mux ? muxArgs(mux) : []),
     ...buildJumpArgs(target, tmpDir, keyPath),
     `${target.user}@${target.host}`,
@@ -308,6 +322,10 @@ ${command}
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "LogLevel=ERROR",
         "-o", "ConnectTimeout=15",
+        // See sshExec above — application-layer keepalives so a middlebox
+        // idle timer cannot silently drop the connection.
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
         "-tt",
         ...buildJumpArgs(target, tmpDir, keyPath),
         `${target.user}@${target.host}`,
@@ -393,6 +411,10 @@ ${command}
       "-o", "LogLevel=ERROR",
       "-o", "ConnectTimeout=15",
       "-o", "BatchMode=yes",
+      // Application-layer keepalives so a middlebox idle timer (k8s conntrack,
+      // VPC NAT, residential ISP NAT) cannot silently drop the connection.
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=3",
       ...(mux ? muxArgs(mux) : []),
       ...buildJumpArgs(target, tmpDir, keyPath),
       `${target.user}@${target.host}`,
@@ -542,6 +564,13 @@ export function sshExecScript(
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=15",
+    // Application-layer keepalives — critical for the job watcher, which
+    // sshExecScript()s a long-lived `tail -F` that can sit silent for many
+    // minutes during things like a vLLM model compile. Without these, any
+    // middlebox idle timer (k8s conntrack, VPC NAT, residential ISP NAT)
+    // silently drops the TCP connection and SSH hangs in read() forever.
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
   ];
 
   if (target.bastion) {
@@ -701,9 +730,14 @@ export function sshExecScript(
   // tasks (bootstrap, package installs) own their own task system and don't
   // await this directly, so 60s is fine as a default for short commands.
   const timeoutMs = callbacks.timeoutMs ?? parseInt(process.env.AURA_SSH_SCRIPT_TIMEOUT_MS ?? "60000", 10);
+  // 0 / Infinity / negative => no watchdog. Required for long-lived
+  // streaming sessions (job watcher's tail -F). Callers like bootstrap
+  // / install can still set a generous finite timeout if they want a
+  // safety ceiling.
+  const disableWatchdog = !Number.isFinite(timeoutMs) || timeoutMs <= 0;
   let timedOut = false;
   let completed = false;
-  const timer = setTimeout(() => {
+  const timer = disableWatchdog ? null : setTimeout(() => {
     if (completed) return;
     timedOut = true;
     callbacks.onStream(`[stderr] ssh timed out after ${Math.round(timeoutMs / 1000)}s — killing process`, seq++);
@@ -713,7 +747,7 @@ export function sshExecScript(
   proc.on("close", (code) => {
     if (completed) return;
     completed = true;
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     // Bastion path priority:
     //   1. If we saw the `[trace] bash exiting (status=N)` line, trust N
     //      absolutely — ssh's own exit code is misleading because the
@@ -732,13 +766,13 @@ export function sshExecScript(
   proc.on("error", (err) => {
     if (completed) return;
     completed = true;
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     callbacks.onComplete(false, { error: err.message });
     if (ownTmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   const cleanup = () => {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     try { proc.kill(); } catch {}
     if (ownTmpDir) {
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}

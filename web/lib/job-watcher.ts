@@ -188,6 +188,13 @@ echo "__AURA_JOB_FINAL__=$FINAL"
   ]);
 
   sshExecScript(target, remoteScript, {
+    // The watcher is a `tail -F` + slurm-state-poll loop that intentionally
+    // runs until the job ends — could be days for an LLM training run.
+    // sshExecScript defaults to a 60s SIGKILL watchdog (fine for one-shot
+    // squeue/sacct/file-read calls, fatal here). Pass 0 to disable the
+    // watchdog entirely. The watcher tears down its own ssh through
+    // proc.on("close") and the terminal-state handler in the bash script.
+    timeoutMs: 0,
     onStream: (line) => {
       if (line.includes("__AURA_TAIL_START__")) { inTail = true; return; }
       if (line.includes("__AURA_TAIL_END__")) { inTail = false; return; }

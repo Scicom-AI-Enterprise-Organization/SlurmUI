@@ -340,7 +340,8 @@ Endpoints today:
 | `POST` | `/api/v1/clusters/:cluster/jobs` | Submit a job. Body `{script, partition?, name?}`. `:cluster` accepts name or UUID. Returns `{id, slurmJobId, status, …}` 201. |
 | `GET`  | `/api/v1/clusters/:cluster/jobs` | Paginated list with `status` / `partition` / `name` / `from` / `to` filters. |
 | `GET`  | `/api/v1/jobs/:id` | Job detail. `?output=1` tacks on the last 1 MB of stdout over SSH. |
-| `POST` | `/api/v1/jobs/:id/resync` | Re-query Slurm (`squeue` + `sacct`) and overwrite the DB row's status / exit code. Use this when the tail-based watcher missed a terminal transition (stuck `RUNNING` after bastion drop, output file on an unmounted path, etc.). |
+| `GET`  | `/api/v1/jobs/:id/logs` | Fetch a slice of the Slurm stdout file over SSH. Query params: `bytes=<N>` (default 1 MiB, max 16 MiB) and `head=1` (return the first `bytes` bytes instead of the last). Returns `{job, output, outputSize, returned, truncated, source}`. Use this when you want the head of the file (SBATCH preamble / early errors) or a different slice size than `?output=1` gives. |
+| `POST` | `/api/v1/jobs/:id/resync` | Re-query Slurm (`squeue` + `sacct`) and overwrite the DB row's status / exit code. Also re-spawns the output watcher if the row is still in flight and no watcher is alive in this process — so it doubles as a "logs frozen" fix. Returns `{updated, previous, next, exitCode, source, watcherRespawned}`. |
 | `POST` | `/api/v1/jobs/:id/cancel` | `scancel --signal=KILL --full` on the controller, flips the DB row to `CANCELLED`. Safe to call on already-terminal jobs. |
 
 Data model is identical to the UI — tokens inherit the owner's role,

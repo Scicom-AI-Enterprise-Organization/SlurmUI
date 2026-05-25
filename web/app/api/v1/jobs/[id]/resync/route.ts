@@ -13,6 +13,7 @@ import { prisma } from "@/lib/prisma";
 import { sshExecSimple } from "@/lib/ssh-exec";
 import { logAudit } from "@/lib/audit";
 import { getApiUser } from "@/lib/api-auth";
+import { startJobWatcher, isWatcherRunning } from "@/lib/job-watcher";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -100,11 +101,30 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     data: { status, exitCode },
   });
 
+  // If the row is still in flight AND no watcher is alive for it in this
+  // process, re-spawn one. This is the common-case recovery for a job that
+  // was orphaned by a prior dev-server / pod restart: the slurm side is
+  // still healthy, the DB row is still RUNNING, but no SSH tail is shipping
+  // new output to Job.output. Hitting /resync now both updates the status
+  // field AND brings the live-output stream back.
+  let watcherRespawned = false;
+  if ((status === "RUNNING" || status === "PENDING") && !isWatcherRunning(id)) {
+    watcherRespawned = startJobWatcher(cluster as any, { ...job, status } as any);
+  }
+
   await logAudit({
     action: "job.resync",
     entity: "Job",
     entityId: id,
-    metadata: { previous: job.status, next: status, source, slurmJobId: sid, via: "api/v1", tokenId: user.tokenId },
+    metadata: {
+      previous: job.status,
+      next: status,
+      source,
+      slurmJobId: sid,
+      via: "api/v1",
+      tokenId: user.tokenId,
+      watcherRespawned,
+    },
   });
 
   return NextResponse.json({
@@ -113,5 +133,6 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     next: status,
     exitCode,
     source,
+    watcherRespawned,
   });
 }

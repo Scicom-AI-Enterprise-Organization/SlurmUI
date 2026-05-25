@@ -676,20 +676,57 @@ export async function runRestore(
         // New user row. keycloakId is unique — if the repo has one use it,
         // otherwise fall back to the email as a placeholder so the row is
         // still creatable (admin can rebind via Keycloak later).
+        //
+        // Pre-check unique columns (unixUid, unixUsername) for collisions
+        // with an EXISTING user. If found, drop the colliding fields from
+        // the create body and warn — otherwise Prisma errors out and we
+        // skip the user entirely (which then cascades into "provisioned
+        // user not in users/_index.yaml" warnings on the cluster pass).
+        // Common case: gitops state references an imported orphan user
+        // (`<name>+imported.<cid>@aura.local`) whose unixUid is also
+        // owned by the real Aura user of the same unix account.
+        const droppedFields: string[] = [];
+        let uidForCreate: number | null = u.unixUid ?? null;
+        let unameForCreate: string | null = u.unixUsername ?? null;
+        if (uidForCreate != null) {
+          const uidOwner = await prisma.user.findUnique({
+            where: { unixUid: uidForCreate },
+            select: { email: true },
+          });
+          if (uidOwner) {
+            droppedFields.push(`unixUid=${uidForCreate} owned by ${uidOwner.email}`);
+            uidForCreate = null;
+          }
+        }
+        if (unameForCreate) {
+          const nameOwner = await prisma.user.findUnique({
+            where: { unixUsername: unameForCreate },
+            select: { email: true },
+          });
+          if (nameOwner) {
+            droppedFields.push(`unixUsername=${unameForCreate} owned by ${nameOwner.email}`);
+            unameForCreate = null;
+          }
+        }
         try {
           await prisma.user.create({
             data: {
               email: u.email,
               name: u.name ?? null,
               role: (u.role as any) ?? "USER",
-              unixUsername: u.unixUsername ?? null,
-              unixUid: u.unixUid ?? null,
+              unixUsername: unameForCreate,
+              unixUid: uidForCreate,
               unixGid: u.unixGid ?? null,
               keycloakId: u.keycloakId ?? `import:${u.email}`,
             },
           });
           summary.usersCreated++;
-          onLog(`[restore] created user ${u.email}`);
+          if (droppedFields.length > 0) {
+            onLog(`[restore] created user ${u.email} (dropped colliding fields: ${droppedFields.join(", ")})`);
+            summary.warnings.push(`user ${u.email}: dropped ${droppedFields.join(", ")} due to collision with existing user`);
+          } else {
+            onLog(`[restore] created user ${u.email}`);
+          }
         } catch (e: any) {
           summary.warnings.push(`could not create user ${u.email}: ${e?.message ?? "unknown"}`);
         }

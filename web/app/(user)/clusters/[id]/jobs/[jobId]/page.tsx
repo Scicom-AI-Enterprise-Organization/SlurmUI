@@ -766,12 +766,15 @@ export default function JobDetailPage() {
         </TabsContent>
       </Tabs>
 
+      {/* Script — only on the Output tab. On Expose / Metrics / Proxy / etc.
+          the script block is just visual clutter when you're trying to look
+          at unrelated panels, so we hide it. The state (editingScript,
+          editedScript) is preserved across tab switches so an in-progress
+          edit isn't lost if the user briefly clicks another tab. */}
+      {tab === "output" && (
+        <>
       <Separator />
 
-      {/* Script — read-only by default; Edit toggles a textarea. Save
-          opens a confirmation dialog that cancels the running job and
-          resubmits a fresh one with the edited script (handleRestart
-          with cancelCurrent=true). */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <h3 className="font-medium">Script</h3>
@@ -830,6 +833,8 @@ export default function JobDetailPage() {
           readOnly={!editingScript}
         />
       </div>
+        </>
+      )}
 
       {/* Confirm cancel dialog */}
       <Dialog open={confirmCancel} onOpenChange={setConfirmCancel}>
