@@ -203,6 +203,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           runName: typeof body.tracker.runName === "string" ? body.tracker.runName : undefined,
         }
       : undefined;
+  // Optional Git credential id from the new-job form. Passed through
+  // verbatim to submitJob, which understands three forms:
+  //   undefined / missing → auto-pick (CLI convenience)
+  //   "none"              → explicit opt-out
+  //   <id>                → that specific credential
+  const gitCredentialId =
+    typeof body.gitCredentialId === "string" && body.gitCredentialId.trim()
+      ? body.gitCredentialId.trim()
+      : undefined;
 
   if (!script || !partition) {
     return NextResponse.json({ error: "Missing required fields: script, partition" }, { status: 400 });
@@ -215,6 +224,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       script,
       partition,
       tracker,
+      gitCredentialId,
     });
     return NextResponse.json(updated, { status: 201 });
   } catch (err) {

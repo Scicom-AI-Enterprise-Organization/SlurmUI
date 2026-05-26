@@ -89,7 +89,16 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 }
 
 // POST — submit a job. Body:
-//   { script: string, partition?: string, name?: string }
+//   {
+//     script: string,
+//     partition?: string,
+//     name?: string,
+//     trackerId?: string,        // explicit experiment tracker to use
+//     experimentName?: string,   // override the tracker's default experiment
+//     useTracker?: boolean,      // default true — auto-pick the cluster's
+//                                // sole enabled tracker if trackerId omitted.
+//                                // Set false to skip tracker injection entirely.
+//   }
 // `name` is cosmetic; if provided we inject a `#SBATCH --job-name=` header
 // when the script doesn't already have one.
 export async function POST(req: NextRequest, { params }: RouteParams) {
@@ -103,7 +112,18 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const cluster = await resolveCluster(clusterIdent);
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
-  let body: { script?: string; partition?: string; name?: string };
+  let body: {
+    script?: string;
+    partition?: string;
+    name?: string;
+    trackerId?: string;
+    experimentName?: string;
+    useTracker?: boolean;
+    /** Git credential entry id from cluster.config.code_credentials.github[].
+     *  Auto-picks the only configured entry when omitted; multiple entries
+     *  with no explicit pick → no token, private clones fail with a 401. */
+    gitCredentialId?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -127,6 +147,37 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     finalScript = lines.join("\n");
   }
 
+  // Resolve experiment tracker. Default is "auto-pick the sole enabled
+  // tracker on the cluster". Set useTracker=false to opt out. Pass an
+  // explicit trackerId to disambiguate when the cluster has multiple.
+  let trackerSpec: { trackerId: string; experimentName?: string } | undefined;
+  if (body.useTracker !== false) {
+    const cfg = (cluster.config ?? {}) as Record<string, unknown>;
+    const trackers = (cfg.experiment_trackers ?? []) as Array<Record<string, unknown>>;
+    const enabled = trackers.filter((t) => t.enabled !== false);
+    if (body.trackerId) {
+      const t = enabled.find((x) => x.id === body.trackerId);
+      if (!t) {
+        return NextResponse.json(
+          { error: `Tracker '${body.trackerId}' not found / disabled on this cluster.` },
+          { status: 400 },
+        );
+      }
+      trackerSpec = { trackerId: String(t.id), experimentName: body.experimentName?.trim() || undefined };
+    } else if (enabled.length === 1) {
+      // Sole-enabled-tracker fast path — implicit default.
+      trackerSpec = { trackerId: String(enabled[0].id), experimentName: body.experimentName?.trim() || undefined };
+    } else if (enabled.length > 1 && body.experimentName) {
+      // Ambiguous — caller wanted to set an experimentName but we don't
+      // know which tracker to apply it to. Force an explicit trackerId.
+      return NextResponse.json(
+        { error: `Cluster has ${enabled.length} enabled trackers — pass trackerId to disambiguate.` },
+        { status: 400 },
+      );
+    }
+    // enabled.length === 0 → no tracker, no injection. Same as opt-out.
+  }
+
   try {
     const job = await submitJob({
       clusterId: cluster.id,
@@ -137,6 +188,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       // to re-extract from the script (and so the validation error
       // message references the value the API caller actually sent).
       name: body.name?.trim() || undefined,
+      tracker: trackerSpec,
+      gitCredentialId: body.gitCredentialId?.trim() || undefined,
       auditExtra: { via: "api/v1", tokenId: user.tokenId },
     });
     return NextResponse.json({

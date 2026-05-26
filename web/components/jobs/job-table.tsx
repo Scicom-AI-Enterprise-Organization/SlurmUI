@@ -16,6 +16,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { JobStatusBadge } from "./job-status-badge";
+import { TrackerLink } from "./tracker-link";
 
 interface Job {
   id: string;
@@ -123,28 +124,27 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
                   {job.id.slice(0, 8)}...
                 </Link>
               </TableCell>
-              <TableCell className="font-mono text-sm">{job.name ?? <span className="text-muted-foreground">-</span>}</TableCell>
+              <TableCell className="font-mono text-sm">
+                <div className="inline-flex items-center gap-2">
+                  {job.name ?? <span className="text-muted-foreground">-</span>}
+                  {job.experimentRunUrl && (
+                    // Same stopPropagation guard as the status-column copy
+                    // — the table row is clickable (navigates to the job
+                    // detail), but clicking the tracker chip should open
+                    // the run on the tracker side, not navigate.
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <TrackerLink url={job.experimentRunUrl} />
+                    </span>
+                  )}
+                </div>
+              </TableCell>
               <TableCell>{job.slurmJobId ?? "-"}</TableCell>
               {showCluster && (
                 <TableCell>{job.cluster?.name ?? job.clusterId.slice(0, 8)}</TableCell>
               )}
               <TableCell>{job.partition}</TableCell>
               <TableCell>
-                <div className="flex items-center gap-2">
-                  <JobStatusBadge status={job.status} />
-                  {job.experimentRunUrl && (
-                    <a
-                      href={job.experimentRunUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      title="Open MLflow run"
-                      onClick={(e) => e.stopPropagation()}
-                      className="rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
-                    >
-                      MLflow
-                    </a>
-                  )}
-                </div>
+                <JobStatusBadge status={job.status} />
               </TableCell>
               <TableCell>
                 {/* Use suppressHydrationWarning — server renders in its own

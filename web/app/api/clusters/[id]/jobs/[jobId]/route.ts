@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { sendCommandAndWait } from "@/lib/nats";
 import { sshExecScript } from "@/lib/ssh-exec";
+import { redactSecretsInScript } from "@/lib/redact-config";
 import { randomUUID } from "crypto";
 
 interface RouteParams {
@@ -79,7 +80,15 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
   }
 
-  return NextResponse.json({ ...job, user });
+  // Mask `export <SECRET>=…` lines (MLFLOW_TRACKING_PASSWORD,
+  // WANDB_API_KEY, …) in the persisted script before sending it to the
+  // UI. Protects historical Job rows submitted before submit-job's
+  // secret-split fix, plus any user script that inlines a token.
+  return NextResponse.json({
+    ...job,
+    script: redactSecretsInScript(job.script ?? ""),
+    user,
+  });
 }
 
 // DELETE /api/clusters/[id]/jobs/[jobId] — cancel job

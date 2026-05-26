@@ -11,10 +11,10 @@ export type TrackerBackend = "mlflow" | "wandb" | "comet";
 
 /**
  * Cluster-level tracker configuration. Stored in
- * cluster.config.experiment_trackers[]. API keys are NOT included here in
- * Phase 1 — MLflow is the only supported backend and tends to be either
- * unauthenticated or use basic-auth embedded in the URL. Phase 2 will
- * introduce per-user API keys in a separate model.
+ * cluster.config.experiment_trackers[]. `password` is treated as a secret —
+ * redacted on GET responses, never echoed into the job script's stdout
+ * (preStartShell exports it via the env vars MLflow's client reads, so
+ * the script body never sees the literal value).
  */
 export interface ExperimentTracker {
   id: string;
@@ -24,6 +24,20 @@ export interface ExperimentTracker {
   trackingUri: string;
   /** Optional default experiment / project name used when the submitter doesn't override. */
   defaultExperimentName?: string;
+  /**
+   * Basic-auth username for the tracking server. For MLflow this becomes
+   * `MLFLOW_TRACKING_USERNAME` in the job env + the `Authorization: Basic`
+   * header Aura uses for server-side calls (create-run, test-connection).
+   * Optional — omit for unauthenticated MLflow.
+   */
+  username?: string;
+  /**
+   * Basic-auth password / access key. Same exports as `username`. Stored
+   * verbatim in cluster.config and redacted on GET responses (see
+   * redactTrackerConfig). Per-user API keys remain a separate future
+   * iteration; this field is a cluster-level shared credential.
+   */
+  password?: string;
   /** Disable without deleting — Phase 1 omits this from the UI but the field exists. */
   enabled?: boolean;
   createdAt?: string;
@@ -73,6 +87,28 @@ export interface TestConnectionResult {
   detail: string;
 }
 
+/**
+ * Returned by preStartShell. Adapters can either:
+ *   - return a plain string (legacy shape: just the inline bash)
+ *   - return { script, secrets } where `secrets` is a key/value map that
+ *     submit-job will pre-stage in a 0600 file on the controller and
+ *     source from the job's environment. KEEPS SECRETS OUT OF THE JOB
+ *     SCRIPT BODY — without this, MLFLOW_TRACKING_PASSWORD / WANDB_API_KEY
+ *     end up in /tmp/.aura-job-<id>.sh, in slurmdbd's stored job script,
+ *     and in any audit dump of the submitted script.
+ */
+export interface PreStartShellResult {
+  /** Inline bash exported into the script. No secrets. */
+  script: string;
+  /**
+   * Env vars that must not appear in the job script's source. submit-job
+   * writes these to `/tmp/.aura-secrets-<jobid>.env` (mode 0600 owned by
+   * the submitting user), the script's prelude sources + deletes that
+   * file before the user's code runs.
+   */
+  secrets?: Record<string, string>;
+}
+
 export interface TrackerAdapter {
   backend: TrackerBackend;
   /** Cheap reachability + permissions probe. */
@@ -83,9 +119,12 @@ export interface TrackerAdapter {
    * Bash snippet inserted INSIDE the per-user sudo shell, before the
    * user's job script runs. Must export the env vars the user's code
    * needs to log into the same run (MLFLOW_RUN_ID for MLflow, etc.).
-   * Never include secrets that shouldn't appear in job stdout.
+   *
+   * Return shape: string (no secrets) or { script, secrets } where
+   * `secrets` is moved out of the script body into a 0600 file. See
+   * PreStartShellResult above.
    */
-  preStartShell(tracker: ExperimentTracker, run: CreatedRun, ctx: RunContext): string;
+  preStartShell(tracker: ExperimentTracker, run: CreatedRun, ctx: RunContext): string | PreStartShellResult;
   /** Static deep-link from a saved (trackerId, runId) pair. */
   deepLink(tracker: ExperimentTracker, runId: string, extra?: Record<string, unknown>): string;
 }

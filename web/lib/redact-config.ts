@@ -58,6 +58,52 @@ export function redactConfig<T>(value: T): T {
   return value;
 }
 
+/**
+ * Mask secret-bearing `export VAR=...` lines in a shell script before
+ * returning it to a client. Needed for two cases:
+ *   1. Historical Job.script rows that pre-date the secret-split fix in
+ *      submit-job.ts — those still have `export MLFLOW_TRACKING_PASSWORD=...`
+ *      and `export WANDB_API_KEY=...` literals inside the persisted script.
+ *   2. User-written job scripts that happen to inline a secret-looking var.
+ *
+ * Matches three common shell export forms:
+ *   export FOO=bar
+ *   export FOO='bar'
+ *   export FOO="bar"
+ *
+ * Plus the bare `FOO=bar` form (which Aura's preStartShell never emits but
+ * cheap to handle for user scripts). VAR name match is case-insensitive
+ * and uses the same SENSITIVE_KEY_HINTS list as redactConfig — so any
+ * env var with "password" / "api_key" / "token" / "secret" / "_pass" in
+ * its name gets masked.
+ *
+ * Idempotent: re-running on an already-masked script is a no-op.
+ */
+const SECRET_EXPORT_RE = new RegExp(
+  String.raw`^(\s*(?:export\s+)?)([A-Z_][A-Z0-9_]*)(=)((?:'[^']*'|"[^"]*"|\S+))\s*$`,
+  "i",
+);
+
+export function redactSecretsInScript(script: string): string {
+  if (!script || typeof script !== "string") return script;
+  return script
+    .split("\n")
+    .map((line) => {
+      const m = line.match(SECRET_EXPORT_RE);
+      if (!m) return line;
+      const [, prefix, name, eq, value] = m;
+      if (!isSensitiveKey(name)) return line;
+      // Don't mask placeholders like "''" or empty values — nothing to leak.
+      if (value === "''" || value === '""' || value === "") return line;
+      // Preserve the original quoting style so the line still looks like
+      // valid bash. The MASK is wrapped in the same quote character (or
+      // single-quoted if the original was unquoted).
+      const quote = value.startsWith('"') ? '"' : "'";
+      return `${prefix}${name}${eq}${quote}${REDACTION_MASK}${quote}`;
+    })
+    .join("\n");
+}
+
 // Given an incoming config from the client, fill in any REDACTION_MASK values
 // with the original secrets from `stored`. Preserves all other edits.
 export function unredactConfig(incoming: unknown, stored: unknown): unknown {

@@ -32,9 +32,21 @@ export async function POST(req: NextRequest, { params }: P) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await req.json().catch(() => ({})) as { script?: string; cancelCurrent?: boolean };
+  const body = await req.json().catch(() => ({})) as {
+    script?: string;
+    cancelCurrent?: boolean;
+    // Override the source job's tracker linkage on the resubmit.
+    //   "inherit" / undefined → copy from original job (default)
+    //   "none"                → opt out of any tracker on the new run
+    //   <id>                  → use that specific tracker
+    trackerId?: string;
+    // Same shape for the Git credential pick.
+    gitCredentialId?: string;
+  };
   const overrideScript = typeof body.script === "string" && body.script.trim().length > 0 ? body.script : null;
   const cancelCurrent = body.cancelCurrent === true;
+  const trackerOverride = typeof body.trackerId === "string" ? body.trackerId : undefined;
+  const gitCredOverride = typeof body.gitCredentialId === "string" ? body.gitCredentialId : undefined;
 
   const job = await prisma.job.findFirst({
     where: {
@@ -104,12 +116,43 @@ exit $?
         }
       }
 
+      // Resolve the tracker pick.
+      //   trackerOverride absent / "inherit" → copy from the source job
+      //   trackerOverride === "none"         → drop the tracker on the new run
+      //   any other string                   → that specific tracker id
+      let resubmitTracker: { trackerId: string } | undefined;
+      if (!trackerOverride || trackerOverride === "inherit") {
+        resubmitTracker = job.experimentTrackerId
+          ? { trackerId: job.experimentTrackerId }
+          : undefined;
+      } else if (trackerOverride === "none") {
+        resubmitTracker = undefined;
+      } else {
+        resubmitTracker = { trackerId: trackerOverride };
+      }
+      // Git credential override for the resubmit. We don't persist which
+      // credential was used on the original job (the token's effect is
+      // baked into the prelude, not the row), so "inherit" here just
+      // means "let submitJob decide" — which on this cluster pick will
+      // default to "none" because that's the form's default. Concrete
+      // ids and "none" are passed verbatim to submitJob.
+      const resubmitGitCredId =
+        !gitCredOverride || gitCredOverride === "inherit" ? undefined : gitCredOverride;
+
       const created = await submitJob({
         clusterId: id,
         userId: job.userId,
         script: overrideScript ?? job.script,
         partition: job.partition,
-        auditExtra: { resubmitOf: job.id, edited: !!overrideScript, cancelCurrent },
+        tracker: resubmitTracker,
+        gitCredentialId: resubmitGitCredId,
+        auditExtra: {
+          resubmitOf: job.id,
+          edited: !!overrideScript,
+          cancelCurrent,
+          trackerOverride: trackerOverride ?? null,
+          gitCredOverride: gitCredOverride ?? null,
+        },
         onLogLine: (line) => {
           const trimmed = line.replace(/\r/g, "").trim();
           if (trimmed) appendTaskLog(task.id, trimmed);

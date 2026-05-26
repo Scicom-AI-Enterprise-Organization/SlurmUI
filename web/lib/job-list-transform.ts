@@ -34,6 +34,12 @@ export interface JobListInputRow {
   /** Used to extract the SBATCH job-name when `name` is null. Dropped
    * from the output. */
   script: string;
+  /** Deep-link to the experiment-tracker run (MLflow / W&B) associated
+   * with this job, if any. Stamped on submit + later self-corrected by
+   * the watcher when the tracker prints its real URL into stdout.
+   * Passed through so the listing table can render the branded chip
+   * next to the job name. */
+  experimentRunUrl?: string | null;
   /** Sentinel: if the upstream ever leaks `output` here, the test will
    * catch it because the listing item type below has no such field. */
   [extra: string]: unknown;
@@ -52,6 +58,9 @@ export interface JobListItem {
   sourceName: string | null;
   /** Extracted server-side from the `--job-name=` SBATCH directive. */
   name: string | null;
+  /** Tracker run deep-link. Drives the MLflow / W&B badge next to the
+   * name. Null when the job isn't linked to a tracker. */
+  experimentRunUrl: string | null;
 }
 
 /** Extract `--job-name=foo` (or `-J foo`) from an SBATCH script body.
@@ -89,6 +98,7 @@ export function toJobListItem(row: JobListInputRow): JobListItem {
     // running jobs); fall back to the script regex for legacy rows
     // backfilled before the column existed.
     name: (rest.name as string | null | undefined) ?? extractJobName(_script),
+    experimentRunUrl: (rest.experimentRunUrl as string | null | undefined) ?? null,
   };
 }
 

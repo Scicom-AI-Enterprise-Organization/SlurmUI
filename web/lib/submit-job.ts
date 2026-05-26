@@ -138,20 +138,114 @@ export interface SubmitJobInput {
     experimentName?: string;
     runName?: string;
   };
+  /**
+   * Pick a Git credential from cluster.config.code_credentials.github[].
+   * When omitted: auto-pick the only configured entry if there's exactly
+   * one (mirrors the tracker auto-pick rule). Multiple credentials with
+   * no explicit pick → no token injected, private clones fail. The UI's
+   * new-job form requires a selection when multiple exist.
+   */
+  gitCredentialId?: string;
 }
 
 /**
- * Insert the adapter's prelude into a shell script just after the shebang
- * (or at the very top if there's no shebang). Keeps `#!/bin/bash` on line
- * one — sbatch reads it for the interpreter; injecting before it breaks
- * that contract.
+ * Insert the adapter's prelude into a shell script AFTER the shebang
+ * and any contiguous block of `#SBATCH` / comment lines. sbatch only
+ * parses `#SBATCH` directives from the head of the file — it stops at
+ * the first non-comment, non-blank, non-`#SBATCH` line. Inserting our
+ * `export …` block before the directives makes sbatch ignore every
+ * `--mem=…`, `--gres=…`, `--cpus-per-task=…` etc. and fall back to
+ * partition defaults, which silently breaks the job spec.
+ *
+ * Algorithm: walk from line 1 (past the shebang on line 0). As long as
+ * the line is blank, a `#` comment, or `#SBATCH`, keep walking. Insert
+ * the prelude immediately before the first line that breaks that
+ * pattern.
  */
+/**
+ * Sentinel used in the script's secrets-source line. submit-job replaces
+ * this with the actual per-job path (`/tmp/.aura-secrets-<jobId8>.env`)
+ * right before base64-encoding the script for the sbatch wrapper. The
+ * indirection exists because the script body is built before
+ * `prisma.job.create`, so the real job.id isn't available yet.
+ */
+const SECRETS_PATH_SENTINEL = "__AURA_SECRETS_PATH__";
+
+/**
+ * Shell single-quote escape, same trick as ssh-mux/mlflow: wrap in '…' and
+ * escape any embedded ' as '\''. Used to build the per-job secrets file.
+ */
+function shQuote(s: string): string {
+  return `'${(s ?? "").replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Strip any prior Aura tracker prelude + secrets-source block from a
+ * script before re-injecting a fresh one. Needed on edit-and-resubmit
+ * because the script the user edited still contains the OLD prelude
+ * (possibly with a redacted '********' password from the GET response)
+ * — replaying that verbatim would either stack two preludes or, worse,
+ * propagate the literal "********" into the user's process env.
+ *
+ * Removes:
+ *   "# --- aura: experiment tracker (...) prelude ---"
+ *   …everything in between…
+ *   "# --- end aura prelude ---"
+ *
+ * And the secrets-source block:
+ *   "# Pull cluster-level credentials staged in a 0600 file."
+ *   …up to and including `unset __AURA_SECRETS_FILE`…
+ *
+ * Idempotent: a script with no Aura blocks is returned unchanged.
+ */
+function stripAuraPrelude(script: string): string {
+  if (!script.includes("# --- aura:") && !script.includes("__AURA_SECRETS_FILE")) {
+    return script;
+  }
+  const lines = script.split("\n");
+  const out: string[] = [];
+  let inPrelude = false;
+  let inSecrets = false;
+  for (const line of lines) {
+    if (!inPrelude && !inSecrets) {
+      if (/^# --- aura:/.test(line)) { inPrelude = true; continue; }
+      if (/Pull cluster-level credentials staged in a 0600 file/.test(line)) { inSecrets = true; continue; }
+      out.push(line);
+      continue;
+    }
+    if (inPrelude) {
+      if (/^# --- end aura prelude ---/.test(line)) inPrelude = false;
+      continue;
+    }
+    if (inSecrets) {
+      if (/^unset __AURA_SECRETS_FILE/.test(line)) inSecrets = false;
+      continue;
+    }
+  }
+  // Drop a trailing blank line left behind when the block was at the top.
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.join("\n") + (script.endsWith("\n") ? "\n" : "");
+}
+
 function injectPrelude(script: string, prelude: string): string {
   const lines = script.split("\n");
+  let insertAt = 0;
   if (lines.length > 0 && lines[0].startsWith("#!")) {
-    return [lines[0], prelude, ...lines.slice(1)].join("\n");
+    insertAt = 1;
   }
-  return prelude + "\n" + script;
+  while (insertAt < lines.length) {
+    const t = lines[insertAt].trim();
+    if (t === "" || t.startsWith("#")) {
+      insertAt++;
+      continue;
+    }
+    break;
+  }
+  return [
+    ...lines.slice(0, insertAt),
+    prelude,
+    ...lines.slice(insertAt),
+  ].join("\n");
 }
 
 export async function submitJob(input: SubmitJobInput): Promise<Job> {
@@ -257,9 +351,122 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
   // detail page renders the exact script we submitted, and users want to
   // see what was injected (helps debugging "why isn't my run showing
   // metrics?"). It also means resubmit picks the prelude up automatically.
+  //
+  // Secrets the adapter returns are NOT embedded — they're moved to a
+  // per-job env file written separately on the controller (see the
+  // `secretsToStage` block in the sbatch wrapper below). That keeps
+  // tokens out of the script that ends up in slurmdbd's job table.
+  let secretsToStage: Record<string, string> = {};
+  // Strip any previous Aura prelude before re-injecting. Idempotent — a
+  // fresh user script with no prior prelude is untouched. Critical for
+  // edit-and-resubmit: the script the UI sends back contains a redacted
+  // ('********') copy of the original prelude, which we MUST NOT
+  // propagate verbatim.
+  script = stripAuraPrelude(script);
+  // Build a list of prelude fragments from every configured integration.
+  // Today: experiment tracker (mlflow/wandb) + GitHub code credentials.
+  // Each fragment is `{ script, secrets }`; we merge all of them into a
+  // single injected block + a single secrets file.
+  const preludeFragments: string[] = [];
   if (resolvedTracker && createdRun && runContext) {
     const adapter = adapterFor(resolvedTracker)!;
-    const prelude = adapter.preStartShell(resolvedTracker, createdRun, runContext);
+    const raw = adapter.preStartShell(resolvedTracker, createdRun, runContext);
+    const norm = typeof raw === "string" ? { script: raw, secrets: {} } : raw;
+    preludeFragments.push(norm.script);
+    if (norm.secrets) Object.assign(secretsToStage, norm.secrets);
+  }
+  // Git credentials live in cluster.config.code_credentials.github[]. The
+  // caller can pick one via input.gitCredentialId; otherwise we default
+  // to the only configured credential when there's exactly one (matches
+  // the tracker auto-pick rule on this cluster). Tokens are secret-staged
+  // (same per-job 0600 file pattern as MLflow/W&B passwords).
+  const codeCreds = ((cluster.config ?? {}) as Record<string, unknown>).code_credentials as
+    | { github?: unknown }
+    | undefined;
+  type GhEntry = { id?: string; name?: string; username?: string; token?: string };
+  const ghList: GhEntry[] = Array.isArray(codeCreds?.github)
+    ? (codeCreds!.github as GhEntry[])
+    : (codeCreds?.github && typeof codeCreds.github === "object"
+        // Legacy single-object shape — wrap so the same code below works.
+        ? [codeCreds.github as GhEntry]
+        : []);
+  // Three input states for gitCredentialId:
+  //   undefined  → auto-pick (server picks the single configured cred when
+  //                exactly one exists; CLI/API caller convenience)
+  //   "none"     → explicit opt-out, no token injected even if 1+ creds exist
+  //   <id>       → use that specific cred; throw if it doesn't exist
+  // The UI's new-job form defaults to "none" so the user has to opt IN.
+  let chosenGh: GhEntry | null = null;
+  if (input.gitCredentialId === "none") {
+    chosenGh = null;
+  } else if (input.gitCredentialId) {
+    chosenGh = ghList.find((e) => e.id === input.gitCredentialId) ?? null;
+    if (!chosenGh) {
+      throw new Error(`Git credential '${input.gitCredentialId}' not found on this cluster.`);
+    }
+  } else if (ghList.length === 1) {
+    chosenGh = ghList[0];
+  }
+  // ghList.length > 1 with no input.gitCredentialId → leave chosenGh
+  // null. The job runs without a token; private clones will fail under
+  // BatchMode. The new-job form forces a selection when multiple exist.
+  const ghToken = chosenGh?.token?.trim();
+  if (ghToken) {
+    const ghUser = chosenGh!.username?.trim() || "x-access-token";
+    // Process-scoped git config via GIT_CONFIG_COUNT/_KEY/_VALUE env vars
+    // (git ≥ 2.31). Reasons we DON'T use `git config --global`:
+    //   1. `--global` writes to ~/.gitconfig — pollutes future jobs on the
+    //      same node. Multiple "url".insteadOf entries with the SAME url
+    //      key overwrite each other; even `--add` leaves residue across
+    //      job boundaries.
+    //   2. A failed job that ran the config command with an unset token
+    //      (e.g. an earlier ordering bug) leaves a permanent ~/.gitconfig
+    //      entry with empty creds that breaks later runs.
+    //   3. The env-var form is naturally scoped to the slurm job's
+    //      process tree — when the job ends, the config is gone with it.
+    //
+    // Two entries: one rewrites HTTPS clone URLs, one rewrites the SSH
+    // shorthand (`git@github.com:org/repo.git`). Both rewrite TO the
+    // same authenticated HTTPS URL — git ends up using HTTPS+token even
+    // when the user typed an SSH URL.
+    preludeFragments.push([
+      "# --- aura: Git credentials ---",
+      // Token sourced from the secrets file ABOVE this fragment — literal
+      // value never appears in this script.
+      `export GIT_CONFIG_COUNT=2`,
+      `export GIT_CONFIG_KEY_0="url.https://${ghUser}:\${GITHUB_TOKEN}@github.com/.insteadOf"`,
+      `export GIT_CONFIG_VALUE_0="https://github.com/"`,
+      `export GIT_CONFIG_KEY_1="url.https://${ghUser}:\${GITHUB_TOKEN}@github.com/.insteadOf"`,
+      `export GIT_CONFIG_VALUE_1="git@github.com:"`,
+      "# --- end aura prelude ---",
+      "",
+    ].join("\n"));
+    secretsToStage.GITHUB_TOKEN = ghToken;
+  }
+  if (preludeFragments.length > 0) {
+    // ORDER MATTERS: the secrets-source block has to run BEFORE the
+    // per-integration fragments. Otherwise commands like the Git config
+    // rewrite (`url.…:${GITHUB_TOKEN}@github.com/`) expand $GITHUB_TOKEN
+    // to empty at the moment they execute, since the token is only
+    // sourced AFTER. Putting the source block first means every
+    // fragment downstream sees the env vars it expects.
+    const secretsSourceBlock = Object.keys(secretsToStage).length > 0
+      ? [
+          `# Pull cluster-level credentials staged in a 0600 file. Not embedded`,
+          `# in this script body so the secret never lands in slurmdbd's job`,
+          `# table or in any audit dump. ${SECRETS_PATH_SENTINEL} gets replaced`,
+          `# with the per-job file path right before the script is base64'd in`,
+          `# the sbatch wrapper.`,
+          `__AURA_SECRETS_FILE=${SECRETS_PATH_SENTINEL}`,
+          `if [ -r "$__AURA_SECRETS_FILE" ]; then`,
+          `  set -a; . "$__AURA_SECRETS_FILE"; set +a`,
+          `  rm -f "$__AURA_SECRETS_FILE"`,
+          `fi`,
+          `unset __AURA_SECRETS_FILE`,
+          ``,
+        ].join("\n")
+      : "";
+    const prelude = secretsSourceBlock + preludeFragments.join("\n");
     script = injectPrelude(script, prelude);
   }
 
@@ -306,7 +513,24 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
       const submitDir = workDir || "/tmp";
       const scriptName = `.aura-job-${job.id.slice(0, 8)}.sh`;
       const scriptPath = `${submitDir}/${scriptName}`;
-      const scriptB64 = Buffer.from(script).toString("base64");
+      // Per-job secrets file. The script body has a sentinel that we
+      // substitute with this path before base64-encoding, and the wrapper
+      // below stages the actual contents on the controller before sbatch
+      // runs. Empty when no tracker secrets to pass through.
+      const secretsName = `.aura-secrets-${job.id.slice(0, 8)}.env`;
+      const secretsPath = `${submitDir}/${secretsName}`;
+      // split+join, not .replace(), because the sentinel appears in both the
+      // comment ("${SECRETS_PATH_SENTINEL} gets replaced …") and the actual
+      // `__AURA_SECRETS_FILE=…` assignment. .replace would only touch the
+      // first occurrence and the assignment line would still hold the
+      // literal sentinel — making the source line a no-op and the secret
+      // never reach the job's env.
+      const finalScript = script.split(SECRETS_PATH_SENTINEL).join(secretsPath);
+      const scriptB64 = Buffer.from(finalScript).toString("base64");
+      const secretsBody = Object.entries(secretsToStage)
+        .map(([k, v]) => `export ${k}=${shQuote(v)}`)
+        .join("\n");
+      const secretsB64 = secretsBody ? Buffer.from(secretsBody).toString("base64") : "";
 
       // `-n` on sudo throws "a password is required" instantly instead of
       // hanging on a TTY prompt. Without it, an unresolvable target user
@@ -333,8 +557,20 @@ $S chown ${username}:${username} ${submitDir} 2>/dev/null || true
 
 echo "${scriptB64}" | base64 -d | $S tee ${scriptPath} > /dev/null
 $S chown ${username}:${username} ${scriptPath}
-$S chmod 755 ${scriptPath}
-
+# 0600 (not 0755) so other unix users on the controller cannot cat the
+# script. The owning user + root + slurmd (running as the user via
+# sbatch's setuid) can still read+execute it.
+$S chmod 600 ${scriptPath}
+${secretsB64 ? `
+# Stage per-job secrets file BEFORE sbatch reads the script. The script's
+# prelude sources + deletes this file at job-runtime — so secrets land in
+# the env of the user's Python/etc but never appear in (a) the script
+# body submitted to sbatch, (b) slurmdbd's stored copy of the script, or
+# (c) any audit dump of /tmp/.aura-job-*.sh.
+echo "${secretsB64}" | base64 -d | $S tee ${secretsPath} > /dev/null
+$S chown ${username}:${username} ${secretsPath}
+$S chmod 600 ${secretsPath}
+` : ""}
 OUT=$(sudo -n -u ${username} -H bash -c "cd ${submitDir} && sbatch --parsable ${scriptPath}" 2>&1)
 RC=$?
 echo "__AURA_SBATCH_EXIT__=$RC"

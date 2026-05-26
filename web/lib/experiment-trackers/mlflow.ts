@@ -33,13 +33,25 @@ async function mlflowFetch(
   // 10s timeout — the UI shows a spinner; we'd rather fail fast than hang.
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 10_000);
+  // Send basic auth when the tracker has credentials. Treat empty strings
+  // as "unset" so a partially-filled form (user typed only the username)
+  // doesn't generate a malformed Authorization header that the server
+  // rejects with 401 — make the caller fix both fields explicitly.
+  const u = (tracker.username ?? "").trim();
+  const p = tracker.password ?? "";
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (u.length > 0 && p.length > 0) {
+    headers.Authorization = `Basic ${Buffer.from(`${u}:${p}`).toString("base64")}`;
+  }
+  // Caller-supplied headers override defaults. Cast `init.headers` to a
+  // simple record since the union type with HeadersInit doesn't spread.
+  Object.assign(headers, (init.headers ?? {}) as Record<string, string>);
   try {
     return await fetch(url, {
       ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(init.headers ?? {}),
-      },
+      headers,
       signal: ctrl.signal,
     });
   } finally {
@@ -171,12 +183,26 @@ export const mlflowAdapter: TrackerAdapter = {
     // also stamp the slurm_job_id tag from inside the job (only $SLURM_JOB_ID
     // is known by then); failure is swallowed so a flaky tracker can't crash
     // the job.
+    // The MLflow Python client reads MLFLOW_TRACKING_USERNAME +
+    // MLFLOW_TRACKING_PASSWORD env vars and sends them as Basic auth on
+    // every request. Username is non-secret and stays inline; password
+    // is moved to the per-job secrets file (see PreStartShellResult).
+    const u = (tracker.username ?? "").trim();
+    const p = tracker.password ?? "";
+    const hasCreds = u.length > 0 && p.length > 0;
     const lines: string[] = [
       "# --- aura: experiment tracker (MLflow) prelude ---",
       `export MLFLOW_TRACKING_URI=${shellQuote(tracker.trackingUri)}`,
       `export MLFLOW_EXPERIMENT_NAME=${shellQuote(ctx.experimentName || tracker.defaultExperimentName || "aura-jobs")}`,
       `export MLFLOW_RUN_ID=${shellQuote(run.runId)}`,
       `export AURA_EXPERIMENT_TRACKER_URL=${shellQuote(run.runUrl)}`,
+      ...(hasCreds ? [
+        `export MLFLOW_TRACKING_USERNAME=${shellQuote(u)}`,
+        // PASSWORD intentionally NOT inlined here — submit-job sources it
+        // from /tmp/.aura-secrets-<jobid>.env (mode 0600 owned by user).
+        // Keeps the secret out of the job script body and out of
+        // slurmdbd's stored copy of the script.
+      ] : []),
       // Stamp slurm_job_id as soon as Slurm assigns one. mlflow CLI is the
       // simplest path; if the user's env doesn't have it, the tag just
       // doesn't get set — non-fatal.
@@ -186,7 +212,9 @@ export const mlflowAdapter: TrackerAdapter = {
       "# --- end aura prelude ---",
       "",
     ];
-    return lines.join("\n");
+    const secrets: Record<string, string> = {};
+    if (hasCreds) secrets.MLFLOW_TRACKING_PASSWORD = p;
+    return { script: lines.join("\n"), secrets };
   },
 
   deepLink(tracker, runId, extra) {

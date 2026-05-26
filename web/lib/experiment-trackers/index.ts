@@ -4,12 +4,13 @@
  * new file in this folder.
  */
 import { mlflowAdapter } from "./mlflow";
+import { wandbAdapter } from "./wandb";
 import type { ExperimentTracker, TrackerAdapter } from "./types";
 
 const ADAPTERS: Record<string, TrackerAdapter> = {
   mlflow: mlflowAdapter,
-  // wandb: wandbAdapter,    // Phase 2
-  // comet: cometAdapter,    // Phase 2
+  wandb: wandbAdapter,
+  // comet: cometAdapter,    // future
 };
 
 export function adapterFor(tracker: ExperimentTracker): TrackerAdapter | null {

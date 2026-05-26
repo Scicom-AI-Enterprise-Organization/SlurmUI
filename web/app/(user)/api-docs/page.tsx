@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Check, Copy, KeyRound, Search } from "lucide-react";
@@ -964,13 +964,75 @@ const ERROR_TABLE: Array<{ code: string; meaning: string }> = [
   { code: "502 Bad Gateway", meaning: "Submit reached the cluster but `sbatch` errored, or a name collision against a RUNNING job. Body carries the upstream message." },
 ];
 
+// Bounds for the sidebar drag: under 200 px the nav labels truncate
+// unreadably; over 640 px the right column gets squeezed on a 1280 wide
+// laptop. localStorage key namespaced so other resizable panels (which
+// may exist later) don't collide.
+const SIDEBAR_MIN_PX = 200;
+const SIDEBAR_MAX_PX = 640;
+const SIDEBAR_DEFAULT_PX = 256;
+const SIDEBAR_LS_KEY = "aura.apidocs.sidebarWidth";
+
 export default function ApiDocsPage() {
   const [host, setHost] = useState<string>("");
   const [query, setQuery] = useState("");
+  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_PX);
+  // dragRef holds the in-flight drag offset. We use a ref instead of
+  // state so mousemove handlers don't re-create on every pixel and so
+  // setSidebarWidth's functional form sees the latest value without a
+  // stale-closure dance.
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") setHost(window.location.origin);
   }, []);
+
+  // Hydrate the saved width on mount only — SSR can't read localStorage,
+  // and starting from the default avoids hydration mismatches.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem(SIDEBAR_LS_KEY);
+    if (!saved) return;
+    const n = parseInt(saved, 10);
+    if (Number.isFinite(n) && n >= SIDEBAR_MIN_PX && n <= SIDEBAR_MAX_PX) {
+      setSidebarWidth(n);
+    }
+  }, []);
+
+  // Persist on change. Debounced via the natural rAF cadence of mousemove,
+  // but localStorage writes are sync — fine for a single integer.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SIDEBAR_LS_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  // Drag handlers — attached to the handle's onMouseDown. We register
+  // mousemove/mouseup on `window` so the drag continues when the cursor
+  // leaves the 1 px-wide handle.
+  const onDragStart = (e: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const move = (mv: MouseEvent) => {
+      if (!dragRef.current) return;
+      const delta = mv.clientX - dragRef.current.startX;
+      const next = Math.max(
+        SIDEBAR_MIN_PX,
+        Math.min(SIDEBAR_MAX_PX, dragRef.current.startWidth + delta),
+      );
+      setSidebarWidth(next);
+    };
+    const up = () => {
+      dragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    e.preventDefault();
+  };
 
   const base = host || "https://slurmui.example.com";
   const sub = (s: string) => s.split("$AURA_BASE").join(base);
@@ -1001,10 +1063,17 @@ export default function ApiDocsPage() {
     // so this page can manage its own gutters. Without it, the layout's
     // 24 px frame combines with column padding and the sidebar/title
     // alignment becomes finicky.
-    <div className="-m-6 grid min-h-[calc(100vh-3.5rem)] grid-cols-1 lg:grid-cols-[16rem_minmax(0,1fr)]">
+    // The lg breakpoint switches from a single column to a 2-column grid.
+    // Sidebar width is a state var (drag handle below) so users can widen
+    // it to read long endpoint paths without truncation. Saved per-browser
+    // in localStorage.
+    <div
+      className="-m-6 grid min-h-[calc(100vh-3.5rem)] grid-cols-1 lg:grid-cols-[var(--aura-sidebar-w)_1px_minmax(0,1fr)]"
+      style={{ "--aura-sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+    >
       {/* Endpoint nav — plain <div>, same wrapper shape as the main
           column on the right. Both grid cells start at row 1, same Y. */}
-      <div className="hidden border-r lg:block">
+      <div className="hidden lg:block">
         {/* `top-0` (not `top-14`) — the layout's scrolling container
             (`<main className="overflow-auto p-6">` in the user layout)
             is what sticky measures against, and its top edge is already
@@ -1066,6 +1135,23 @@ export default function ApiDocsPage() {
             </a>
           </nav>
         </div>
+      </div>
+
+      {/* Drag handle — only on the lg breakpoint where the 2-column grid
+          is active. 1 px visible (matches the original border-r), 5 px
+          hit-target via negative margins so it's easier to grab without
+          enlarging the visible separator. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize endpoint list"
+        onMouseDown={onDragStart}
+        onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_PX)}
+        className="hidden lg:block relative cursor-col-resize select-none bg-border hover:bg-primary/40 transition-colors"
+        title="Drag to resize · Double-click to reset"
+      >
+        {/* expanded hit region centered on the visible 1px bar */}
+        <div className="absolute inset-y-0 -left-1 -right-1" />
       </div>
 
       {/* Main content — same shape as the left column: plain <div>, with

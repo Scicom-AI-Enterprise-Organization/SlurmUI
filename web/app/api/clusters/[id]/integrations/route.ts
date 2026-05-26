@@ -9,7 +9,7 @@
  * via the existing PATCH/GET endpoints).
  */
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { listTrackersFromConfig } from "@/lib/experiment-trackers";
@@ -18,17 +18,17 @@ import { randomBytes } from "crypto";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
-const SUPPORTED_BACKENDS: TrackerBackend[] = ["mlflow"]; // Phase 1
+const SUPPORTED_BACKENDS: TrackerBackend[] = ["mlflow", "wandb"];
 
 function genId(): string {
   return `exp-${randomBytes(8).toString("hex")}`;
 }
 
 // GET /api/clusters/[id]/integrations
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const cluster = await prisma.cluster.findUnique({
     where: { id },
@@ -36,16 +36,24 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   });
   if (!cluster) return NextResponse.json({ error: "Cluster not found" }, { status: 404 });
 
-  const trackers = listTrackersFromConfig(cluster.config as Record<string, unknown> | null);
+  // Redact passwords on read — the form treats blank as "no change" on
+  // PATCH (TODO when we add update). Surface a hasPassword bool so the UI
+  // can show "configured" vs "(none)" without ever shipping the secret.
+  const trackers = listTrackersFromConfig(cluster.config as Record<string, unknown> | null)
+    .map((t) => {
+      const { password, ...rest } = t;
+      return { ...rest, hasPassword: !!(password && password.length > 0) };
+    });
   return NextResponse.json({ trackers });
 }
 
 // POST /api/clusters/[id]/integrations
-// body: { name, backend, trackingUri, defaultExperimentName? }
+// body: { name, backend, trackingUri, defaultExperimentName?, username?, password? }
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -56,6 +64,17 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const defaultExperimentName =
     typeof body.defaultExperimentName === "string" && body.defaultExperimentName.trim()
       ? body.defaultExperimentName.trim()
+      : undefined;
+  // Optional basic-auth credentials. Trim username (whitespace is never
+  // meaningful); preserve password byte-for-byte since access keys can
+  // legitimately contain trailing characters that look like whitespace.
+  const username =
+    typeof body.username === "string" && body.username.trim()
+      ? body.username.trim()
+      : undefined;
+  const password =
+    typeof body.password === "string" && body.password.length > 0
+      ? body.password
       : undefined;
 
   if (!name) return NextResponse.json({ error: "name is required" }, { status: 400 });
@@ -90,6 +109,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     backend,
     trackingUri,
     defaultExperimentName,
+    username,
+    password,
     enabled: true,
     createdAt: new Date().toISOString(),
   };
@@ -105,8 +126,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     action: "integrations.tracker.create",
     entity: "Cluster",
     entityId: id,
-    metadata: { name, backend, trackingUri },
+    // Never write the password into audit metadata — the audit log is
+    // joinable into the UI's activity feed, and Basic-auth creds shouldn't
+    // surface there. hasPassword/hasUsername give an admin enough breadcrumb
+    // to know the tracker was configured with auth without leaking it.
+    metadata: {
+      name, backend, trackingUri,
+      hasUsername: !!username,
+      hasPassword: !!password,
+    },
   });
 
-  return NextResponse.json({ tracker }, { status: 201 });
+  // Strip password from the response too so the form doesn't echo it back.
+  const { password: _pw, ...trackerSafe } = tracker;
+  return NextResponse.json({
+    tracker: { ...trackerSafe, hasPassword: !!password },
+  }, { status: 201 });
 }

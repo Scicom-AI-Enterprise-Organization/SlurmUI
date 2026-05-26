@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sshExecScript } from "@/lib/ssh-exec";
 import { getApiUser } from "@/lib/api-auth";
+import { redactSecretsInScript } from "@/lib/redact-config";
 
 interface RouteParams { params: Promise<{ id: string }> }
 
@@ -45,8 +46,15 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Mask `export <SECRET>=…` lines in the persisted script. Required to
+  // protect historical rows submitted before the secret-split fix in
+  // submit-job.ts (those Job.script columns still contain literal
+  // MLFLOW_TRACKING_PASSWORD / WANDB_API_KEY values); also defends against
+  // user-written scripts that happen to inline a token.
+  const safeJob = { ...job, script: redactSecretsInScript(job.script ?? "") };
+
   const wantsOutput = new URL(req.url).searchParams.get("output") === "1";
-  if (!wantsOutput) return NextResponse.json({ job });
+  if (!wantsOutput) return NextResponse.json({ job: safeJob });
 
   // Fetch the last 1 MB of stdout on-demand over SSH. Keep the payload
   // bounded so the API doesn't become a log firehose.
@@ -55,7 +63,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     include: { sshKey: true },
   });
   if (!cluster || cluster.connectionMode !== "SSH" || !cluster.sshKey || !job.slurmJobId) {
-    return NextResponse.json({ job, output: null, outputSize: 0 });
+    return NextResponse.json({ job: safeJob, output: null, outputSize: 0 });
   }
 
   const target = {
@@ -108,5 +116,5 @@ echo "${M}_TAIL_END"
   const outputSize = parseInt(extract("SIZE").trim(), 10) || 0;
   const output = extract("TAIL");
 
-  return NextResponse.json({ job, output, outputSize });
+  return NextResponse.json({ job: safeJob, output, outputSize });
 }

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { JobStatusBadge } from "@/components/jobs/job-status-badge";
 import { LiveOutput } from "@/components/jobs/live-output";
+import { TrackerLink } from "@/components/jobs/tracker-link";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -21,6 +22,8 @@ import {
 import { toast } from "sonner";
 import { XCircle, RefreshCw, RotateCw, Repeat2, Pencil, X } from "lucide-react";
 import { CodeEditor } from "@/components/ui/code-editor";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { JobUsagePanel } from "@/components/jobs/job-usage-panel";
 import { ErrorExplainer } from "@/components/jobs/error-explainer";
 import { JobDepsGraph } from "@/components/jobs/job-deps-graph";
@@ -126,7 +129,61 @@ export default function JobDetailPage() {
   const [editedScript, setEditedScript] = useState("");
   const [confirmEditResubmit, setConfirmEditResubmit] = useState(false);
 
-  const handleRestart = async (opts?: { script?: string; cancelCurrent?: boolean }) => {
+  // Override pickers used by the edit + resubmit flow. Hydrated from the
+  // cluster.config on mount. When the user clicks Save & resubmit, these
+  // values (along with the edited script) get sent to /resubmit so they
+  // can swap the tracker or pick a different Git credential at the same
+  // moment they're editing the body. Default = keep whatever the
+  // original job had (= undefined here, server falls back to inherit).
+  const [trackerList, setTrackerList] = useState<Array<{
+    id: string;
+    name: string;
+    backend: string;
+    defaultExperimentName?: string;
+  }>>([]);
+  const [gitCredList, setGitCredList] = useState<Array<{
+    id: string;
+    name: string;
+    username?: string;
+  }>>([]);
+  // Special sentinel "inherit" = use the original job's pick (default).
+  // "none" = explicitly opt out. Any other value = a tracker / cred id.
+  const [resubmitTrackerId, setResubmitTrackerId] = useState<string>("inherit");
+  const [resubmitGitCredId, setResubmitGitCredId] = useState<string>("inherit");
+
+  useEffect(() => {
+    if (!clusterId) return;
+    fetch(`/api/clusters/${clusterId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c) => {
+        if (!c) return;
+        const cfg = (c.config ?? {}) as Record<string, unknown>;
+        const trackers = (cfg.experiment_trackers ?? []) as Array<{
+          id: string;
+          name: string;
+          backend: string;
+          defaultExperimentName?: string;
+        }>;
+        setTrackerList(trackers);
+        const cc = (cfg.code_credentials ?? {}) as Record<string, unknown>;
+        const ghRaw = cc.github;
+        const ghList: Array<{ id: string; name: string; username?: string }> =
+          Array.isArray(ghRaw)
+            ? (ghRaw as Array<{ id?: string; name?: string; username?: string }>)
+                .filter((e) => e && typeof e.id === "string" && typeof e.name === "string")
+                .map((e) => ({ id: e.id as string, name: e.name as string, username: e.username }))
+            : [];
+        setGitCredList(ghList);
+      })
+      .catch(() => {});
+  }, [clusterId]);
+
+  const handleRestart = async (opts?: {
+    script?: string;
+    cancelCurrent?: boolean;
+    trackerId?: string;
+    gitCredentialId?: string;
+  }) => {
     if (!job) return;
     setConfirmRestart(false);
     setConfirmEditResubmit(false);
@@ -424,22 +481,7 @@ export default function JobDetailPage() {
               })()}
             </h1>
             <JobStatusBadge status={job.status} />
-            {job.experimentRunUrl && (
-              <a
-                href={job.experimentRunUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
-                title="Open this job's run in the experiment tracker"
-              >
-                MLflow run
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
-              </a>
-            )}
+            {job.experimentRunUrl && <TrackerLink url={job.experimentRunUrl} />}
           </div>
           <p className="text-sm text-muted-foreground">
             Cluster: {job.cluster?.name ?? clusterId} | Partition: {job.partition}
@@ -804,26 +846,104 @@ export default function JobDetailPage() {
                 <X className="mr-2 h-3 w-3" />
                 Discard
               </Button>
-              <Button
-                size="sm"
-                onClick={() => setConfirmEditResubmit(true)}
-                disabled={
-                  restarting ||
-                  editedScript.trim() === "" ||
-                  editedScript === job.script
-                }
-                title={
-                  editedScript === job.script
-                    ? "No changes"
-                    : "Cancel this job and resubmit with the edited script"
-                }
-              >
-                <Repeat2 className="mr-2 h-3 w-3" />
-                Save & resubmit
-              </Button>
+              {(() => {
+                // "Save & resubmit" should fire whenever there's SOMETHING
+                // to change on the new run — either the script body OR
+                // one of the picker dropdowns. Previously we only checked
+                // the script, so flipping the tracker / credential to a
+                // new value left the button disabled with "No changes".
+                const scriptChanged =
+                  editedScript.trim() !== "" && editedScript !== job.script;
+                const trackerChanged = resubmitTrackerId !== "inherit";
+                const gitCredChanged = resubmitGitCredId !== "inherit";
+                const hasChanges = scriptChanged || trackerChanged || gitCredChanged;
+                const titleText = !hasChanges
+                  ? "No changes — edit the script or pick a different tracker/credential"
+                  : "Cancel this job and resubmit with the new settings";
+                return (
+                  <Button
+                    size="sm"
+                    onClick={() => setConfirmEditResubmit(true)}
+                    disabled={restarting || !hasChanges || editedScript.trim() === ""}
+                    title={titleText}
+                  >
+                    <Repeat2 className="mr-2 h-3 w-3" />
+                    Save & resubmit
+                  </Button>
+                );
+              })()}
             </div>
           )}
         </div>
+        {/* Tracker + Git credential cards. Always rendered (gated only
+            on existence of integrations) so the user sees the current
+            pick in view mode, but the Selects are DISABLED in view mode
+            — only Edit-mode resubmits should be able to swap the
+            linkage. Default is "inherit" so view-mode resubmits keep
+            whatever the original job used. */}
+        {(trackerList.length > 0 || gitCredList.length > 0) && (
+          <div className="grid gap-3 md:grid-cols-2">
+            {trackerList.length > 0 && (
+              <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">Experiment Tracker</span>
+                  <span className="text-xs text-muted-foreground">
+                    {editingScript ? "pick at resubmit" : "view-only — click Edit to change"}
+                  </span>
+                </div>
+                <Select
+                  value={resubmitTrackerId}
+                  onValueChange={setResubmitTrackerId}
+                  disabled={!editingScript}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">— inherit from this job —</SelectItem>
+                    <SelectItem value="none">— skip (no tracker) —</SelectItem>
+                    {trackerList.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name} ({t.backend})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {gitCredList.length > 0 && (
+              <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">Git Credential</span>
+                  <span className="text-xs text-muted-foreground">
+                    {editingScript ? "pick at resubmit" : "view-only — click Edit to change"}
+                  </span>
+                </div>
+                <Select
+                  value={resubmitGitCredId}
+                  onValueChange={setResubmitGitCredId}
+                  disabled={!editingScript}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">— inherit from this job —</SelectItem>
+                    <SelectItem value="none">— skip (no token) —</SelectItem>
+                    {gitCredList.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name}
+                        {c.username ? (
+                          <span className="ml-2 text-xs text-muted-foreground">({c.username})</span>
+                        ) : null}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+        )}
         <CodeEditor
           className="h-64 overflow-hidden rounded-md border"
           value={editingScript ? editedScript : (job.script ?? "")}
@@ -887,7 +1007,19 @@ export default function JobDetailPage() {
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmRestart(false)}>Cancel</Button>
-            <Button onClick={() => handleRestart()} disabled={restarting}>
+            <Button
+              onClick={() =>
+                handleRestart({
+                  // Same dropdown state as the edit-resubmit path — if the
+                  // user changed the tracker / git credential picks but
+                  // didn't touch the script, hitting Restart should still
+                  // honour those picks on the new run.
+                  trackerId: resubmitTrackerId,
+                  gitCredentialId: resubmitGitCredId,
+                })
+              }
+              disabled={restarting}
+            >
               <Repeat2 className="mr-2 h-4 w-4" />
               Restart
             </Button>
@@ -925,7 +1057,12 @@ export default function JobDetailPage() {
             <Button
               onClick={() => {
                 setEditingScript(false);
-                handleRestart({ script: editedScript, cancelCurrent: true });
+                handleRestart({
+                  script: editedScript,
+                  cancelCurrent: true,
+                  trackerId: resubmitTrackerId,
+                  gitCredentialId: resubmitGitCredId,
+                });
               }}
               disabled={restarting}
             >

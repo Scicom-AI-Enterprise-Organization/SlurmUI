@@ -420,6 +420,132 @@ ls -la "$HOME/.local/bin/code-server" || true
 # can reach it. --auth none because the proxy itself is auth-gated.
 exec code-server --bind-addr 0.0.0.0:8080 --auth none`,
   },
+  mlflowTrain: {
+    jobName: "mlflow-sms-classification",
+    nodes: 1,
+    ntasks: 1,
+    ntasksPerNode: 1,
+    cpusPerTask: 4,
+    gpus: 1,
+    memoryGb: 16,
+    time: "00:30:00",
+    // HF Trainer fine-tune that logs both training metrics + host/GPU system
+    // metrics to the cluster's MLflow tracker (Admin → Integrations).
+    // MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING=true tells mlflow ≥2.13 to spawn
+    // a sidecar that samples psutil + pynvml every 10s and logs CPU%, RAM,
+    // disk, network, GPU util/mem/power into the same run.
+    command: `# Tell mlflow to also sample host + GPU system metrics for the run.
+# Built-in since mlflow 2.13 — uses psutil + pynvml, samples every 10s.
+export MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING=true
+export MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL=10
+
+source /opt/aura-venv/bin/activate
+# Required: transformers, datasets, evaluate, mlflow, accelerate, psutil, pynvml
+# (install once cluster-wide via Settings -> Python).
+
+python3 - <<EOF
+import os
+print("[mlflow] uri =", os.environ.get("MLFLOW_TRACKING_URI"))
+print("[mlflow] exp =", os.environ.get("MLFLOW_EXPERIMENT_NAME"))
+print("[mlflow] run =", os.environ.get("MLFLOW_RUN_ID"))
+print("[mlflow] sys-metrics =", os.environ.get("MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"))
+
+import numpy as np, evaluate
+from datasets import load_dataset
+from transformers import (
+    AutoModelForSequenceClassification, AutoTokenizer,
+    Trainer, TrainingArguments,
+)
+
+sms = load_dataset("sms_spam")
+split = sms["train"].train_test_split(test_size=0.2)
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+def tokenize(ex): return tok(ex["sms"], padding="max_length", truncation=True, max_length=128)
+train_tok = split["train"].map(tokenize).remove_columns(["sms"]).shuffle(seed=22)
+test_tok  = split["test"].map(tokenize).remove_columns(["sms"]).shuffle(seed=22)
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased", num_labels=2,
+    label2id={"ham":0,"spam":1}, id2label={0:"ham",1:"spam"},
+)
+
+metric = evaluate.load("accuracy")
+def compute(p): return metric.compute(predictions=np.argmax(p.predictions, axis=-1), references=p.label_ids)
+
+args = TrainingArguments(
+    output_dir="/tmp/sms_trainer",
+    eval_strategy="epoch",
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    logging_steps=8,
+    num_train_epochs=1,
+    report_to="mlflow",
+)
+
+Trainer(model=model, args=args, train_dataset=train_tok, eval_dataset=test_tok, compute_metrics=compute).train()
+EOF`,
+  },
+  wandbTrain: {
+    jobName: "wandb-sms-classification",
+    nodes: 1,
+    ntasks: 1,
+    ntasksPerNode: 1,
+    cpusPerTask: 4,
+    gpus: 1,
+    memoryGb: 16,
+    time: "00:30:00",
+    // Same HF Trainer fine-tune as mlflowTrain but report_to="wandb". The
+    // cluster's W&B tracker (Admin → Integrations) provides WANDB_API_KEY
+    // / _PROJECT / _ENTITY / _RUN_ID via the per-job prelude — picked up
+    // automatically by wandb.init() inside the Trainer's callback. W&B's
+    // system-metrics sidecar (CPU/RAM/GPU samples) is on by default.
+    command: `source /opt/aura-venv/bin/activate
+# Required: transformers, datasets, evaluate, wandb, accelerate
+# (install once cluster-wide via Settings -> Python).
+
+python3 - <<EOF
+import os
+print("[wandb] project =", os.environ.get("WANDB_PROJECT"))
+print("[wandb] run     =", os.environ.get("WANDB_RUN_ID"))
+print("[wandb] entity  =", os.environ.get("WANDB_ENTITY"))
+print("[wandb] api-key =", "set" if os.environ.get("WANDB_API_KEY") else "missing")
+
+import numpy as np, evaluate
+from datasets import load_dataset
+from transformers import (
+    AutoModelForSequenceClassification, AutoTokenizer,
+    Trainer, TrainingArguments,
+)
+
+sms = load_dataset("sms_spam")
+split = sms["train"].train_test_split(test_size=0.2)
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+def tokenize(ex): return tok(ex["sms"], padding="max_length", truncation=True, max_length=128)
+train_tok = split["train"].map(tokenize).remove_columns(["sms"]).shuffle(seed=22)
+test_tok  = split["test"].map(tokenize).remove_columns(["sms"]).shuffle(seed=22)
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased", num_labels=2,
+    label2id={"ham":0,"spam":1}, id2label={0:"ham",1:"spam"},
+)
+
+metric = evaluate.load("accuracy")
+def compute(p): return metric.compute(predictions=np.argmax(p.predictions, axis=-1), references=p.label_ids)
+
+args = TrainingArguments(
+    output_dir="/tmp/sms_trainer",
+    eval_strategy="epoch",
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    logging_steps=8,
+    num_train_epochs=1,
+    report_to="wandb",
+    run_name=os.environ.get("WANDB_NAME") or "wandb-sms-classification",
+)
+
+Trainer(model=model, args=args, train_dataset=train_tok, eval_dataset=test_tok, compute_metrics=compute).train()
+EOF`,
+  },
 } as const;
 
 const RAW_EXAMPLES = {
@@ -541,6 +667,196 @@ torchrun \\
   --model_name your-model \\
   --batch_size 8 \\
   --epochs 3
+`,
+  mlflowTrain: (partition: string) => `#!/bin/bash
+#SBATCH --job-name=mlflow-sms-classification
+#SBATCH --partition=${partition || "gpu"}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:1
+#SBATCH --mem=16G
+#SBATCH --time=00:30:00
+
+# MLFLOW_TRACKING_URI / _USERNAME / _PASSWORD / _EXPERIMENT_NAME / _RUN_ID
+# are exported automatically by Aura's MLflow integration when the cluster
+# has a tracker configured (Admin -> Integrations). The Trainer's mlflow
+# callback picks them up via report_to="mlflow" — no manual setup needed.
+
+# Also enable mlflow's built-in system-metrics sidecar (psutil + pynvml).
+# Logs CPU%, RAM, disk, network, GPU util/mem/power into the same run on
+# a 10s cadence. Requires mlflow >= 2.13 and psutil + pynvml in the venv.
+export MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING=true
+export MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL=10
+
+source /opt/aura-venv/bin/activate
+# Install deps cluster-wide first via Admin -> Python:
+#   transformers, datasets, evaluate, mlflow, accelerate, psutil, pynvml
+
+python3 - <<'PY'
+import os
+# Colab fallback: if running outside Aura, pull the access key from
+# Colab Secrets. On Aura the env var is already set by the integration,
+# so the assignment is idempotent.
+try:
+    from google.colab import userdata
+    wandb_access_key = userdata.get('WANDB_ACCESS_KEY')
+except Exception:
+    wandb_access_key = os.environ.get('MLFLOW_TRACKING_PASSWORD', '')
+
+os.environ.setdefault('MLFLOW_TRACKING_URI', 'https://mlflow.aies.scicom.dev')
+os.environ.setdefault('MLFLOW_EXPERIMENT_NAME', 'test-classification')
+os.environ.setdefault('MLFLOW_TRACKING_USERNAME', 'husein.zolkepli@scicom.com.my')
+if wandb_access_key:
+    os.environ.setdefault('MLFLOW_TRACKING_PASSWORD', wandb_access_key)
+
+import numpy as np
+import evaluate
+from datasets import load_dataset
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+)
+import mlflow  # noqa: F401
+
+sms = load_dataset("sms_spam")
+split = sms["train"].train_test_split(test_size=0.2)
+train_dataset = split["train"]
+test_dataset  = split["test"]
+
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+def tokenize(examples):
+    return tok(examples["sms"], padding="max_length", truncation=True, max_length=128)
+
+seed = 22
+train_tok = train_dataset.map(tokenize).remove_columns(["sms"]).shuffle(seed=seed)
+test_tok  = test_dataset.map(tokenize).remove_columns(["sms"]).shuffle(seed=seed)
+
+id2label = {0: "ham", 1: "spam"}
+label2id = {"ham": 0, "spam": 1}
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased", num_labels=2, label2id=label2id, id2label=id2label,
+)
+
+metric = evaluate.load("accuracy")
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    return metric.compute(predictions=np.argmax(logits, axis=-1), references=labels)
+
+args = TrainingArguments(
+    output_dir="/tmp/sms_trainer",
+    eval_strategy="epoch",
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    logging_steps=8,
+    num_train_epochs=1,
+    report_to="mlflow",
+)
+
+Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_tok,
+    eval_dataset=test_tok,
+    compute_metrics=compute_metrics,
+).train()
+PY
+`,
+  wandbTrain: (partition: string) => `#!/bin/bash
+#SBATCH --job-name=wandb-sms-classification
+#SBATCH --partition=${partition || "gpu"}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:1
+#SBATCH --mem=16G
+#SBATCH --time=00:30:00
+
+# WANDB_API_KEY / WANDB_PROJECT / WANDB_ENTITY / WANDB_RUN_ID are exported
+# automatically by Aura's W&B integration when the cluster has a tracker
+# configured (Admin -> Integrations). The Trainer's wandb callback picks
+# them up via report_to="wandb" — no manual login needed.
+#
+# W&B's system-metrics sidecar (CPU/RAM/disk/network/GPU samples) is on
+# by default, so no extra env var is required.
+
+source /opt/aura-venv/bin/activate
+# Install deps cluster-wide first via Admin -> Python:
+#   transformers, datasets, evaluate, wandb, accelerate
+
+python3 - <<'PY'
+import os
+# Colab fallback: pull the API key from Colab Secrets when running outside
+# Aura. On Aura the integration already sets the env var, so setdefault
+# is a no-op there.
+try:
+    from google.colab import userdata
+    wandb_access_key = userdata.get('WANDB_ACCESS_KEY')
+except Exception:
+    wandb_access_key = os.environ.get('WANDB_API_KEY', '')
+
+if wandb_access_key:
+    os.environ.setdefault('WANDB_API_KEY', wandb_access_key)
+os.environ.setdefault('WANDB_PROJECT', 'aura-jobs')
+
+import numpy as np
+import evaluate
+from datasets import load_dataset
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+)
+import wandb  # noqa: F401  — validates the key in the venv
+
+sms = load_dataset("sms_spam")
+split = sms["train"].train_test_split(test_size=0.2)
+train_dataset = split["train"]
+test_dataset  = split["test"]
+
+tok = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+def tokenize(examples):
+    return tok(examples["sms"], padding="max_length", truncation=True, max_length=128)
+
+seed = 22
+train_tok = train_dataset.map(tokenize).remove_columns(["sms"]).shuffle(seed=seed)
+test_tok  = test_dataset.map(tokenize).remove_columns(["sms"]).shuffle(seed=seed)
+
+id2label = {0: "ham", 1: "spam"}
+label2id = {"ham": 0, "spam": 1}
+
+model = AutoModelForSequenceClassification.from_pretrained(
+    "distilbert-base-uncased", num_labels=2, label2id=label2id, id2label=id2label,
+)
+
+metric = evaluate.load("accuracy")
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    return metric.compute(predictions=np.argmax(logits, axis=-1), references=labels)
+
+args = TrainingArguments(
+    output_dir="/tmp/sms_trainer",
+    eval_strategy="epoch",
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    logging_steps=8,
+    num_train_epochs=1,
+    report_to="wandb",
+    run_name=os.environ.get("WANDB_NAME") or "wandb-sms-classification",
+)
+
+Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_tok,
+    eval_dataset=test_tok,
+    compute_metrics=compute_metrics,
+).train()
+PY
 `,
   vllm: (partition: string) => `#!/bin/bash
 #SBATCH --job-name=vllm-serve
@@ -766,6 +1082,22 @@ export default function NewJobPage() {
   const [trackerExperimentName, setTrackerExperimentName] = useState<string>("");
   const [trackerRunName, setTrackerRunName] = useState<string>("");
 
+  // Git credentials (cluster.config.code_credentials.github[]). When the
+  // cluster has exactly one entry submit-job auto-picks it server-side,
+  // so the dropdown leaves "auto" as the default — explicit picks here
+  // win and disambiguate when multiple are configured. Endpoint returns
+  // `hasToken: true` only; the raw token never crosses to the client.
+  const [gitCreds, setGitCreds] = useState<Array<{
+    id: string;
+    name: string;
+    username?: string;
+  }>>([]);
+  // Default = "none" (no token injected). Explicit opt-in is safer than
+  // implicit auto-pick — jobs that don't clone private repos shouldn't
+  // accidentally get a GITHUB_TOKEN in their env. User picks one of the
+  // configured credentials from the dropdown when they actually need it.
+  const [gitCredentialId, setGitCredentialId] = useState<string>("none");
+
   useEffect(() => {
     fetch(`/api/clusters/${clusterId}/gitops-only`)
       .then((r) => (r.ok ? r.json() : { enabled: false }))
@@ -801,6 +1133,21 @@ export default function NewJobPage() {
           defaultExperimentName?: string;
         }>;
         setTrackers(trackerList);
+
+        // Git credentials: same shape as the redacted GET endpoint
+        // returns. We pull from the cluster's already-fetched config
+        // (which is what the server returned in the same response) so we
+        // don't need a second round-trip. Token is omitted server-side —
+        // we only see name/username/id here.
+        const cc = (config.code_credentials ?? {}) as Record<string, unknown>;
+        const ghRaw = cc.github;
+        const ghList: Array<{ id: string; name: string; username?: string }> =
+          Array.isArray(ghRaw)
+            ? (ghRaw as Array<{ id?: string; name?: string; username?: string }>)
+                .filter((e) => e && typeof e.id === "string" && typeof e.name === "string")
+                .map((e) => ({ id: e.id as string, name: e.name as string, username: e.username }))
+            : [];
+        setGitCreds(ghList);
         // /opt is root-only on most distros — slurmd can't cd into it as the
         // submitting user and the job dies before it starts. /tmp is world-
         // writable and exists on every node, so it's a safe default when no
@@ -940,7 +1287,16 @@ export default function NewJobPage() {
       const res = await fetch(`/api/clusters/${clusterId}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, partition, tracker: trackerPayload }),
+        body: JSON.stringify({
+          script,
+          partition,
+          tracker: trackerPayload,
+          // Pass through whatever the dropdown holds:
+          //   "none" = explicit opt-out (server-side: no auto-pick fires)
+          //   <id>   = that credential
+          // submitJob understands both forms.
+          gitCredentialId,
+        }),
       });
 
       if (res.ok || res.status === 201) {
@@ -977,6 +1333,136 @@ export default function NewJobPage() {
       setSubmitting(false);
     }
   };
+
+  // Git-credentials selector. Lives in its own card (separate from the
+  // experiment-tracker card) because the two are orthogonal concepts —
+  // a job may use either, both, or neither. Same render-once + insert-
+  // in-both-tabs pattern as the tracker block.
+  const gitCredBlock = gitCreds.length === 0 ? null : (
+    <div className="space-y-3 rounded-md border bg-muted/30 p-4">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">Git Credential</span>
+        <span className="text-xs text-muted-foreground">
+          optional — clones from <code className="font-mono">github.com</code> auto-authenticate
+        </span>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Use credential</Label>
+        <Select
+          value={gitCredentialId}
+          onValueChange={setGitCredentialId}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">— skip (no token) —</SelectItem>
+            {gitCreds.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.name}
+                {c.username ? (
+                  <span className="ml-2 text-xs text-muted-foreground">({c.username})</span>
+                ) : null}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Default is no token. Pick a configured credential to inject{" "}
+          <code className="font-mono">GITHUB_TOKEN</code> + the git URL
+          rewrites that auto-authenticate clones of private repos.
+        </p>
+      </div>
+    </div>
+  );
+
+  // Experiment-tracker selector. Declared once + rendered inline in both
+  // the Form and Raw tabs (after the Python-venv card, before the script
+  // editor) so the layout is consistent across modes without duplicating
+  // ~80 lines of JSX. Returns null when the cluster has no trackers.
+  const trackerBlock = trackers.length === 0 ? null : (
+    <div className="space-y-3 rounded-md border bg-muted/30 p-4">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">Experiment Tracker</span>
+        <span className="text-xs text-muted-foreground">
+          optional — auto-links this job to a tracker run
+        </span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="space-y-1">
+          <Label className="text-xs">Tracker</Label>
+          <Select
+            value={trackerId}
+            onValueChange={(v) => {
+              setTrackerId(v);
+              // Hydrate experiment-name with the tracker's default so the
+              // user sees the project / experiment they'll log into.
+              const t = trackers.find((x) => x.id === v);
+              if (t?.defaultExperimentName) {
+                setTrackerExperimentName(t.defaultExperimentName);
+              }
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">— no tracker —</SelectItem>
+              {trackers.map((t) => (
+                <SelectItem key={t.id} value={t.id}>
+                  {t.name} ({t.backend})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Experiment Name</Label>
+          <Input
+            value={trackerExperimentName}
+            onChange={(e) => setTrackerExperimentName(e.target.value)}
+            placeholder="aura-jobs"
+            disabled={trackerId === "none"}
+            className="font-mono"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Run Name</Label>
+          <Input
+            value={trackerRunName}
+            onChange={(e) => setTrackerRunName(e.target.value)}
+            placeholder={jobName || "(uses job name)"}
+            disabled={trackerId === "none"}
+            className="font-mono"
+          />
+        </div>
+      </div>
+      {trackerId !== "none" && (() => {
+        const sel = trackers.find((t) => t.id === trackerId);
+        const isWandb = sel?.backend === "wandb";
+        return (
+          <p className="text-xs text-muted-foreground">
+            Aura will create the run on submit and inject{" "}
+            {isWandb ? (
+              <>
+                <code className="font-mono">WANDB_API_KEY</code> +{" "}
+                <code className="font-mono">WANDB_PROJECT</code> +{" "}
+                <code className="font-mono">WANDB_RUN_ID</code>
+              </>
+            ) : (
+              <>
+                <code className="font-mono">MLFLOW_TRACKING_URI</code> +{" "}
+                <code className="font-mono">MLFLOW_RUN_ID</code>
+              </>
+            )}{" "}
+            into the job environment. Your code can call{" "}
+            <code className="font-mono">{isWandb ? "wandb.init()" : "mlflow.log_metric(...)"}</code>{" "}
+            without any extra setup.
+          </p>
+        );
+      })()}
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -1137,6 +1623,12 @@ export default function NewJobPage() {
                 <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("torchrun")}>
                   Train with torchrun
                 </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("mlflowTrain")}>
+                  Fine-tune + MLflow
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("wandbTrain")}>
+                  Fine-tune + W&amp;B
+                </Button>
                 <Button type="button" variant="outline" size="sm" onClick={() => loadFormExample("vllm")}>
                   Serve with vLLM
                 </Button>
@@ -1265,8 +1757,13 @@ export default function NewJobPage() {
                 </div>
               </div>
 
-              <div className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">
-                <div className="font-medium text-foreground">Python venv</div>
+              <div className="space-y-3 rounded-md border bg-muted/30 p-4 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">Python venv</span>
+                  <span className="text-xs text-muted-foreground">
+                    optional — activate before your command runs
+                  </span>
+                </div>
                 {pythonVenvPath ? (
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <code className="font-mono text-muted-foreground break-all">
@@ -1290,6 +1787,9 @@ export default function NewJobPage() {
                   </p>
                 )}
               </div>
+
+              {trackerBlock}
+              {gitCredBlock}
 
               <div className="space-y-2">
                 <Label htmlFor="command">Command</Label>
@@ -1338,6 +1838,12 @@ export default function NewJobPage() {
                 <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("torchrun")}>
                   Train with torchrun
                 </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("mlflowTrain")}>
+                  Fine-tune + MLflow
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("wandbTrain")}>
+                  Fine-tune + W&amp;B
+                </Button>
                 <Button type="button" variant="outline" size="sm" onClick={() => loadRawExample("vllm")}>
                   Serve with vLLM
                 </Button>
@@ -1363,83 +1869,74 @@ export default function NewJobPage() {
                   </Select>
                 </div>
               )}
+
+              {/* Python venv quick-insert — same helper as form mode. Splices a
+                  `source <path>/bin/activate` line into rawScript right after
+                  the contiguous `#!`/`#SBATCH`/blank-line header, so the
+                  user doesn't have to scroll past their SBATCH directives
+                  to find the right insertion point. */}
+              <div className="space-y-3 rounded-md border bg-muted/30 p-4 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">Python venv</span>
+                  <span className="text-xs text-muted-foreground">
+                    optional — activate before your command runs
+                  </span>
+                </div>
+                {pythonVenvPath ? (
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <code className="font-mono text-muted-foreground break-all">
+                      source {pythonVenvPath}/bin/activate
+                    </code>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const sourceLine = `source ${pythonVenvPath}/bin/activate`;
+                        // Walk past the contiguous shebang/#SBATCH/comment/
+                        // blank-line header — same algorithm as
+                        // injectPrelude in lib/submit-job.ts. Inserts AFTER
+                        // the SBATCH block, BEFORE the body.
+                        if (!rawScript.trim()) {
+                          setRawScript(sourceLine);
+                          return;
+                        }
+                        const lines = rawScript.split("\n");
+                        let i = 0;
+                        if (lines[0]?.startsWith("#!")) i = 1;
+                        while (i < lines.length) {
+                          const t = lines[i].trim();
+                          if (t === "" || t.startsWith("#")) { i++; continue; }
+                          break;
+                        }
+                        // If the source line is already there in the same
+                        // region, no-op so re-clicks don't stack duplicates.
+                        if (rawScript.includes(sourceLine)) return;
+                        const next = [
+                          ...lines.slice(0, i),
+                          "",
+                          sourceLine,
+                          ...lines.slice(i),
+                        ].join("\n");
+                        setRawScript(next);
+                      }}
+                    >
+                      Insert into script
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">
+                    Not configured. Set up a shared venv under Settings → Python to get a ready-to-activate path here.
+                  </p>
+                )}
+              </div>
+
+              {trackerBlock}
+              {gitCredBlock}
+
               <ScriptEditor value={rawScript} onChange={setRawScript} />
             </TabsContent>
           </Tabs>
-
-          {/*
-            Experiment tracker selector — orthogonal to form/raw mode, so it
-            sits outside the Tabs. Only renders when the cluster has at
-            least one tracker configured under Integrations.
-          */}
-          {trackers.length > 0 && (
-            <div className="space-y-3 rounded-md border bg-muted/30 p-4">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">Experiment Tracker</span>
-                <span className="text-xs text-muted-foreground">
-                  optional — auto-links this job to a tracker run
-                </span>
-              </div>
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">Tracker</Label>
-                  <Select
-                    value={trackerId}
-                    onValueChange={(v) => {
-                      setTrackerId(v);
-                      // Hydrate the experiment-name field with the tracker's
-                      // default so the user sees what it will be set to.
-                      const t = trackers.find((x) => x.id === v);
-                      if (t?.defaultExperimentName) {
-                        setTrackerExperimentName(t.defaultExperimentName);
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">— no tracker —</SelectItem>
-                      {trackers.map((t) => (
-                        <SelectItem key={t.id} value={t.id}>
-                          {t.name} ({t.backend})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Experiment Name</Label>
-                  <Input
-                    value={trackerExperimentName}
-                    onChange={(e) => setTrackerExperimentName(e.target.value)}
-                    placeholder="aura-jobs"
-                    disabled={trackerId === "none"}
-                    className="font-mono"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Run Name</Label>
-                  <Input
-                    value={trackerRunName}
-                    onChange={(e) => setTrackerRunName(e.target.value)}
-                    placeholder={jobName || "(uses job name)"}
-                    disabled={trackerId === "none"}
-                    className="font-mono"
-                  />
-                </div>
-              </div>
-              {trackerId !== "none" && (
-                <p className="text-xs text-muted-foreground">
-                  Aura will create the run on submit and inject{" "}
-                  <code className="font-mono">MLFLOW_TRACKING_URI</code> +{" "}
-                  <code className="font-mono">MLFLOW_RUN_ID</code> into the job environment.
-                  Your code can call <code className="font-mono">mlflow.log_metric(...)</code>{" "}
-                  without any extra setup.
-                </p>
-              )}
-            </div>
-          )}
 
           {(() => {
             // Resource availability check (form mode only — raw-mode users

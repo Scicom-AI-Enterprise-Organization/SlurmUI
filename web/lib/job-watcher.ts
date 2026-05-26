@@ -181,6 +181,10 @@ echo "__AURA_JOB_FINAL__=$FINAL"
   // mode can delay the close by up to 30s (idle fallback), which leaves
   // the UI showing "Running" long after the job has actually finished.
   let statusFlipped = false;
+  // True once we've already self-corrected Job.experimentRunUrl from a
+  // "View run at <url>" line — the message can repeat in W&B's final
+  // sync output, and we only want one DB write per run.
+  let runUrlBackfilled = false;
   const stateLineRe = /^\[aura\] Job state:\s*([A-Z_+]+)/;
   const terminalSet = new Set([
     "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
@@ -220,6 +224,23 @@ echo "__AURA_JOB_FINAL__=$FINAL"
       }
       if (!inTail) return;
       if (line.startsWith("[stderr]")) return;
+      // Trackers that print their public run URL into stdout (W&B does:
+      // `wandb: 🚀 View run at https://wandb.ai/<entity>/<project>/runs/<id>`)
+      // let us self-correct the deep-link even when the adapter couldn't
+      // build a perfect URL at submit time (e.g. wandb tracker missing
+      // entity → URL fell back to /home). Match any https URL on a line
+      // tagged "View run at" or "🚀 View run at" — restrictive enough
+      // that user code printing unrelated URLs won't get picked up.
+      if (!runUrlBackfilled) {
+        const m = line.match(/View run at[: ]+\s*(https:\/\/\S+)/);
+        if (m) {
+          runUrlBackfilled = true;
+          prisma.job.update({
+            where: { id: job.id },
+            data: { experimentRunUrl: m[1] },
+          }).catch(() => {});
+        }
+      }
       pushCaptured(line);
     },
     onComplete: async () => {
