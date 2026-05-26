@@ -373,19 +373,21 @@ export function IntegrationsTab({ clusterId, initialTrackers, initialGithub }: P
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end gap-2">
-        <Button onClick={() => setAddOpen(true)}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Tracker
-        </Button>
-      </div>
-
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <FlaskConical className="h-4 w-4" />
-            Experiment Trackers ({trackers.length})
-          </CardTitle>
+          {/* Header laid out like the Git Credentials card below — title +
+              count on the left, primary action on the right — so both
+              cards share the same visual shape. */}
+          <div className="flex items-center justify-between">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FlaskConical className="h-4 w-4" />
+              Experiment Trackers ({trackers.length})
+            </CardTitle>
+            <Button size="sm" onClick={() => setAddOpen(true)}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add Tracker
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           {trackers.length === 0 ? (

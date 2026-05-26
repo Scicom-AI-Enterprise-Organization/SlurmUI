@@ -109,6 +109,7 @@ interface Group {
 const GROUPS: Group[] = [
   { id: "clusters", title: "Clusters", blurb: <>Discover the clusters this token can submit to.</> },
   { id: "jobs", title: "Jobs", blurb: <>Submit, list, inspect, resync and cancel jobs.</> },
+  { id: "integrations", title: "Integrations", blurb: <>Discover experiment trackers (MLflow / W&B) and Git credentials configured on a cluster. Use the returned ids in <code>trackerId</code> / <code>gitCredentialId</code> when submitting a job.</> },
   { id: "provisioning", title: "Provisioning", blurb: <>Synchronous endpoints for bootstrap, accounting, node management, log fetching, and ad-hoc exec. Useful for CLI / CI loops. Admin only.</> },
   { id: "admin", title: "Admin & Maintenance", blurb: <>Operator-only endpoints. Tokens minted by an <code>ADMIN</code>-role user.</> },
 ];
@@ -174,16 +175,49 @@ const ENDPOINTS: Endpoint[] = [
       { name: "script", in: "body", type: "string", required: true, doc: "Full SBATCH script. Must include a shebang and the SBATCH directives Slurm needs." },
       { name: "partition", in: "body", type: "string", doc: "Defaults to the cluster's default partition." },
       { name: "name", in: "body", type: "string", doc: "Cosmetic job name. Injected as `#SBATCH --job-name=` when not present in the script." },
+      {
+        name: "trackerId",
+        in: "body",
+        type: "string",
+        doc: "Experiment tracker id from `GET /api/clusters/:id/integrations`. Auto-links the job to a run (MLflow or W&B). When omitted, Aura auto-picks the only configured tracker on the cluster (skip if 0 or 2+).",
+      },
+      {
+        name: "experimentName",
+        in: "body",
+        type: "string",
+        doc: "Per-job override of the tracker's default experiment / project name. Created on the tracker side if missing.",
+      },
+      {
+        name: "useTracker",
+        in: "body",
+        type: "boolean",
+        doc: "Default `true`. Set to `false` to explicitly skip tracker injection even when one is configured.",
+      },
+      {
+        name: "gitCredentialId",
+        in: "body",
+        type: "string",
+        doc: "Git credential id from `GET /api/clusters/:id/code-credentials/github`. Injects `GITHUB_TOKEN` + URL-rewrite env vars so `git clone https://github.com/org/private-repo` auto-authenticates. Three forms: omit/undefined = auto-pick when exactly 1 is configured (CLI convenience); `\"none\"` = explicit skip; `<id>` = use that one.",
+      },
     ],
     request: {
-      sample: `curl -s -X POST "$AURA_BASE/api/v1/clusters/my-cluster/jobs" \\
+      sample: `# Discover ids you can reference below
+TRACKER=$(curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/clusters/my-cluster/integrations" | jq -r '.trackers[0].id')
+GIT_CRED=$(curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/clusters/my-cluster/code-credentials/github" | jq -r '.credentials[0].id')
+
+curl -s -X POST "$AURA_BASE/api/v1/clusters/my-cluster/jobs" \\
   -H "Authorization: Bearer $AURA_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d @- <<'EOF'
+  -d @- <<EOF
 {
-  "name": "hello",
+  "name": "train-from-private-repo",
   "partition": "main",
-  "script": "#!/bin/bash\\n#SBATCH --time=00:01:00\\nhostname\\ndate\\nsleep 5\\necho done"
+  "trackerId":        "$TRACKER",
+  "experimentName":   "my-experiment",
+  "gitCredentialId":  "$GIT_CRED",
+  "script": "#!/bin/bash\\n#SBATCH --time=00:30:00\\n#SBATCH --mem=8G\\ngit clone https://github.com/your-org/private-repo /tmp/w\\ncd /tmp/w && python train.py"
 }
 EOF`,
     },
@@ -345,6 +379,107 @@ EOF`,
   "squeue": "",
   "sacct": "",
   "error": "Slurm returned no state — accounting unavailable or job expired from records"
+}`,
+      },
+    ],
+  },
+  // ───── Integrations ─────────────────────────────────────────────────
+  // Both endpoints are read-only here — full CRUD lives under the admin
+  // UI (/admin/clusters/:id/integrations). Tokens are redacted on every
+  // response; you only ever see `hasToken: true` plus the surface
+  // metadata (name, backend, etc.).
+  {
+    id: "list-trackers",
+    group: "integrations",
+    method: "GET",
+    path: "/api/clusters/:id/integrations",
+    navLabel: "List experiment trackers",
+    title: "List experiment trackers",
+    description: (
+      <>
+        Lists the MLflow / W&amp;B trackers configured on the cluster. Use the
+        returned <code>id</code> in <code>trackerId</code> when submitting
+        a job to auto-link it to a new run. Passwords are stripped — each
+        row only carries <code>hasPassword: true</code>.
+      </>
+    ),
+    parameters: [
+      { name: "id", in: "path", type: "uuid", required: true, doc: "Cluster UUID." },
+    ],
+    request: {
+      sample: `curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/clusters/$CLUSTER_ID/integrations" | jq`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "trackers": [
+    {
+      "id": "exp-28e2a9e71b1c9e29",
+      "name": "wandb-aies",
+      "backend": "wandb",
+      "trackingUri": "https://api.wandb.ai",
+      "defaultExperimentName": "aura-jobs",
+      "username": "aies-scicom-scicom-ai",
+      "hasPassword": true,
+      "enabled": true,
+      "createdAt": "2026-05-26T00:11:20.255Z"
+    },
+    {
+      "id": "exp-mlflow-aies",
+      "name": "mlflow-aies",
+      "backend": "mlflow",
+      "trackingUri": "https://mlflow.aies.scicom.dev",
+      "defaultExperimentName": "test-classification",
+      "username": "husein.zolkepli@scicom.com.my",
+      "hasPassword": true,
+      "enabled": true
+    }
+  ]
+}`,
+      },
+    ],
+  },
+  {
+    id: "list-git-credentials",
+    group: "integrations",
+    method: "GET",
+    path: "/api/clusters/:id/code-credentials/github",
+    navLabel: "List Git credentials",
+    title: "List Git credentials",
+    description: (
+      <>
+        Lists the GitHub PATs configured on the cluster. Use the returned
+        <code className="mx-1">id</code> in <code>gitCredentialId</code> when
+        submitting a job to inject <code>GITHUB_TOKEN</code> + URL-rewrite
+        env vars so <code>git clone https://github.com/org/private-repo</code>{" "}
+        auto-authenticates. Tokens are stripped — each row only carries{" "}
+        <code>hasToken: true</code>.
+      </>
+    ),
+    parameters: [
+      { name: "id", in: "path", type: "uuid", required: true, doc: "Cluster UUID." },
+    ],
+    request: {
+      sample: `curl -s -H "Authorization: Bearer $AURA_TOKEN" \\
+  "$AURA_BASE/api/clusters/$CLUSTER_ID/code-credentials/github" | jq`,
+    },
+    responses: [
+      {
+        code: 200,
+        codeLabel: "OK",
+        sample: `{
+  "credentials": [
+    {
+      "id": "gh-c83a56136bd8c7b2",
+      "name": "huseinzolkepliscicom",
+      "username": "huseinzolkepliscicom",
+      "hasToken": true,
+      "createdAt": "2026-05-26T04:48:57.605Z"
+    }
+  ]
 }`,
       },
     ],
