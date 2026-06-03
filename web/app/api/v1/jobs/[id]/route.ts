@@ -114,7 +114,19 @@ echo "${M}_TAIL_END"
       : "";
   };
   const outputSize = parseInt(extract("SIZE").trim(), 10) || 0;
-  const output = extract("TAIL");
+  let output = extract("TAIL");
+
+  // Right after a job finishes, the StdOut-path lookup above can race the
+  // accounting flush (scontrol has purged the job, sacct hasn't landed
+  // yet) and come back empty. Fall back to the monitor-synced copy in the
+  // DB — same content, just sourced from the heartbeat stream.
+  if (!output) {
+    const row = await prisma.job.findUnique({ where: { id }, select: { output: true } });
+    if (row?.output) {
+      output = row.output.slice(-1048576);
+      return NextResponse.json({ job: safeJob, output, outputSize: row.output.length });
+    }
+  }
 
   return NextResponse.json({ job: safeJob, output, outputSize });
 }

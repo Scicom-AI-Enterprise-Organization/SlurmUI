@@ -186,6 +186,17 @@
     mode: '0644'
     remote_src: true
 
+# Glob the real GPU device nodes instead of assuming /dev/nvidia[0-(N-1)]:
+# containers (RunPod pods etc.) get the GPU with its *host* minor number
+# (e.g. /dev/nvidia8 and no /dev/nvidia0), and a gres.conf File= pointing
+# at a missing device makes slurmd crash-loop ("can't stat gres.conf
+# file"). The template uses the discovered list, falling back to a
+# Count-only line when no device nodes exist at all.
+- name: Probe NVIDIA device nodes (gres File= support)
+  ansible.builtin.shell: ls /dev/nvidia[0-9]* 2>/dev/null | sort -V || true
+  register: _aura_nvidia_devs
+  changed_when: false
+
 - name: Write gres.conf (GPU nodes only)
   ansible.builtin.template:
     src: gres.conf.j2

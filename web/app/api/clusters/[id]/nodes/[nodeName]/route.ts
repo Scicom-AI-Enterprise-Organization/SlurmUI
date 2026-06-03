@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
 import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -165,8 +164,8 @@ fi
 // reached at the new address.
 export async function PATCH(req: NextRequest, { params }: RouteParams) {
   const { id, nodeName } = await params;
-  const session = await auth();
-  if (!session?.user || (session.user as { role?: string }).role !== "ADMIN") {
+  const apiUser = await getApiUser(req);
+  if (!apiUser || apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -299,7 +298,15 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     output.push(`[2/2] Rewriting slurm.conf NodeName=${nodeName} line on controller…`);
     // Build the canonical NodeName= line from the merged node entry so every
     // field (old + newly-edited) lands in slurm.conf.
-    const effIp = String(nodeEntry.ip ?? "") || ip;
+    // When this node IS the controller (single-node clusters), NodeAddr
+    // must stay loopback — slurmctld pings slurmd at NodeAddr, and the
+    // node's public endpoint relies on hairpin NAT that many datacenters
+    // (RunPod pods included) block. Writing the public IP here works for
+    // ~SlurmdTimeout (300s) and then flips the node to "Not responding",
+    // requeueing whatever was running. Bootstrap writes localhost for the
+    // controller; preserve that on edits.
+    let effIp = String(nodeEntry.ip ?? "") || ip;
+    if (effIp === cluster.controllerHost) effIp = "localhost";
     const effCpus = Number(nodeEntry.cpus ?? 1);
     const effGpus = Number(nodeEntry.gpus ?? 0);
     const effMem = Number(nodeEntry.memory_mb ?? 1024);
@@ -334,6 +341,35 @@ $S sed -i "/^NodeName=${nodeName} /d" /etc/slurm/slurm.conf
 echo "${nodeLine}" | $S tee -a /etc/slurm/slurm.conf > /dev/null
 echo "  rewrote NodeName line:"
 echo "    ${nodeLine}"
+
+# Slurm only honours Gres= on the node line when GresTypes lists gpu AND
+# gres.conf maps the devices — otherwise scontrol reports Gres=(null) and
+# the UI shows 0 GPUs no matter what we write above. Bootstrap may have
+# rendered slurm.conf before any GPU node existed in config (single-node
+# clusters seed slurm_nodes only *after* bootstrap), so manage both here
+# idempotently.
+${effGpus > 0 ? `if grep -q "^GresTypes=" /etc/slurm/slurm.conf; then
+  grep -q "^GresTypes=.*gpu" /etc/slurm/slurm.conf || $S sed -i "s/^GresTypes=/GresTypes=gpu,/" /etc/slurm/slurm.conf
+else
+  echo "GresTypes=gpu" | $S tee -a /etc/slurm/slurm.conf > /dev/null
+fi
+$S touch /etc/slurm/gres.conf
+$S sed -i "/^NodeName=${nodeName} /d" /etc/slurm/gres.conf
+# Glob the real device nodes instead of assuming /dev/nvidia[0-(N-1)]:
+# containers (RunPod pods etc.) get the GPU with its *host* minor number
+# (e.g. /dev/nvidia8 and no /dev/nvidia0), and a File= pointing at a
+# missing device makes slurmd crash-loop with "can't stat gres.conf
+# file". With no device nodes at all, fall back to a Count-only line
+# (Slurm ≥23.x ignores file-less gpu gres, but it beats a crash-loop).
+GPU_DEVS=$(ls /dev/nvidia[0-9]* 2>/dev/null | sort -V | head -n ${effGpus} | paste -sd, -)
+if [ -n "$GPU_DEVS" ]; then
+  GPU_DEV_COUNT=$(echo "$GPU_DEVS" | tr ',' '\\n' | wc -l)
+  echo "NodeName=${nodeName} Name=gpu File=$GPU_DEVS Count=$GPU_DEV_COUNT" | $S tee -a /etc/slurm/gres.conf > /dev/null
+else
+  echo "NodeName=${nodeName} Name=gpu Count=${effGpus}" | $S tee -a /etc/slurm/gres.conf > /dev/null
+fi
+echo "  ensured GresTypes=gpu + gres.conf entry: $(grep "^NodeName=${nodeName} " /etc/slurm/gres.conf)"` : `# gpus=0 — drop this node's gres.conf mapping if present
+[ -f /etc/slurm/gres.conf ] && $S sed -i "/^NodeName=${nodeName} /d" /etc/slurm/gres.conf || true`}
 
 # Bounce slurmctld + slurmd so the new config is picked up. slurmd on this
 # box may be the controller's (all-in-one single-VM); restart is cheap.

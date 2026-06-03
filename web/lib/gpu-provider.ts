@@ -147,6 +147,11 @@ export async function createRunPodPod(apiKey: string, opts: CreateRunPodPodOpts)
       containerDiskInGb: opts.containerDiskInGb,
       volumeInGb: opts.volumeInGb,
       ...(opts.volumeInGb > 0 ? { volumeMountPath: opts.volumeMountPath } : {}),
+      // Aura manages the cluster over inbound SSH, so the pod MUST land on
+      // a host that can map a public TCP port. Without this flag community
+      // pods can land on hosts with no public IP — the pod runs fine but
+      // "22/tcp" never gets an endpoint and provisioning times out.
+      supportPublicIp: true,
       ports: ["22/tcp"],
       env: { PUBLIC_KEY: opts.publicKey },
     }),

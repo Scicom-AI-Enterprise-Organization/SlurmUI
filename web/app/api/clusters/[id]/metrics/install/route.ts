@@ -503,21 +503,31 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const workerBlock = targets.map((h) => {
     const u = h.user || "root";
     const p = h.port || 22;
+    // The controller IS one of the nodes (always, on single-node
+    // clusters). Run its install locally instead of SSH-ing to its own
+    // *public* endpoint — that hairpin connection is blocked in many
+    // datacenters (RunPod pods included) and just times out.
+    const isController = h.ip === cluster.controllerHost;
+    const runner = isController
+      ? "bash -s"
+      : `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p ${p} ${u}@${h.ip} bash -s`;
     return `
 echo "============================================"
-echo "  [${h.hostname}] Installing exporters..."
+echo "  [${h.hostname}] Installing exporters...${isController ? " (controller — running locally)" : ""}"
 echo "============================================"
-ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -p ${p} ${u}@${h.ip} bash -s <<'NODE_EOF'
+${runner} <<'NODE_EOF'
 ${inner}
 NODE_EOF
 RC=$?
 echo "[${h.hostname}] exit=$RC"
+if [ "$RC" -ne 0 ]; then ANY_FAILED=1; fi
 echo ""`;
   }).join("\n");
 
   const script = `#!/bin/bash
 set +e
 trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
+ANY_FAILED=0
 
 echo "============================================"
 echo "  Metrics install"
@@ -527,6 +537,10 @@ echo "============================================"
 echo ""
 ${workerBlock}
 echo ""
+if [ "$ANY_FAILED" -ne 0 ]; then
+  echo "[aura] One or more hosts failed — see the per-host sections above."
+  exit 1
+fi
 echo "[aura] All hosts processed."
 exit 0
 `;

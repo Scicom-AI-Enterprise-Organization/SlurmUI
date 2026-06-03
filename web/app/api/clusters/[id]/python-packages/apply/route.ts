@@ -185,19 +185,30 @@ echo "[aura] Done. Activate with: source ${venvPath}/bin/activate"
     const workerBlock = targets.map((h) => {
       const u = h.user || "root";
       const p = h.port || 22;
+      // The controller IS one of the nodes (always, on single-node
+      // clusters). Run its install locally instead of SSH-ing to its own
+      // *public* endpoint — that hairpin connection is blocked in many
+      // datacenters (RunPod pods included) and just times out.
+      const isController = h.ip === cluster.controllerHost;
+      const runner = isController
+        ? "bash -s"
+        : `ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${p} ${u}@${h.ip} bash -s`;
       return `
 echo "============================================"
-echo "  [${h.hostname}] Installing..."
+echo "  [${h.hostname}] Installing...${isController ? " (controller — running locally)" : ""}"
 echo "============================================"
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${p} ${u}@${h.ip} bash -s <<'NODE_EOF'
+${runner} <<'NODE_EOF'
 set +e
 ${installBlock}
 NODE_EOF
+RC=$?
+if [ "$RC" -ne 0 ]; then echo "[aura] [${h.hostname}] install FAILED (exit=$RC)"; ANY_FAILED=1; fi
 echo ""`;
     }).join("\n");
 
     script = `#!/bin/bash
 set +e
+ANY_FAILED=0
 
 echo "============================================"
 echo "  Mode: per-node"
@@ -209,6 +220,10 @@ echo "============================================"
 echo ""
 ${workerBlock}
 echo ""
+if [ "$ANY_FAILED" -ne 0 ]; then
+  echo "[aura] One or more nodes failed — see the per-node sections above."
+  exit 1
+fi
 echo "[aura] Done. Activate in jobs with: source ${venvPath}/bin/activate"
 `;
   }

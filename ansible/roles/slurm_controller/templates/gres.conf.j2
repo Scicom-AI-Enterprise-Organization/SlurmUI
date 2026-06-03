@@ -1,6 +1,12 @@
 # Managed by Aura — do not edit manually
+{% set _devs = (_aura_nvidia_devs.stdout_lines | default([])) if _aura_nvidia_devs is defined else [] %}
 {% for node in slurm_nodes %}
 {% if node.gpus is defined and node.gpus > 0 %}
-NodeName={{ node.expression }} Name=gpu File=/dev/nvidia[0-{{ node.gpus - 1 }}] Count={{ node.gpus }}
+{% if _devs | length > 0 %}
+NodeName={{ node.expression }} Name=gpu File={{ _devs[:node.gpus] | join(',') }} Count={{ [node.gpus, _devs | length] | min }}
+{% else %}
+{# No /dev/nvidia* device nodes — Count-only gres (better than a slurmd crash-loop). #}
+NodeName={{ node.expression }} Name=gpu Count={{ node.gpus }}
+{% endif %}
 {% endif %}
 {% endfor %}
