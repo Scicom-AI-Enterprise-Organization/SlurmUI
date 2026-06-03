@@ -291,6 +291,23 @@ enum ClusterUserStatus {
   REMOVED
 }
 
+// GPU cloud provider account (RunPod first; `kind` leaves room for more —
+// see lib/gpu-provider.ts). The API key is stored like other credentials
+// (SshKey.privateKey): plaintext column, encrypted at the deployment layer.
+// Only `apiKeyLast4` is ever serialized to the browser.
+model GpuProvider {
+  id           String    @id @default(uuid())
+  name         String    @unique
+  kind         String    @default("runpod") // "runpod" (more kinds later)
+  apiKey       String    @db.Text
+  apiKeyLast4  String
+  accountId    String?   // provider-side account id, captured on test
+  accountEmail String?   // provider-side account email, captured on test
+  validatedAt  DateTime? // last successful connection test
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
 // Global key-value settings store (admin-managed).
 model Setting {
   key       String   @id

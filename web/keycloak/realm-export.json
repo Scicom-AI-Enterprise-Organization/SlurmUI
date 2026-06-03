@@ -27,10 +27,12 @@
       "clientAuthenticatorType": "client-secret",
       "secret": "aura-web-secret",
       "redirectUris": [
-        "http://localhost:3000/*"
+        "http://localhost:3000/*",
+        "http://localhost:3005/*"
       ],
       "webOrigins": [
-        "http://localhost:3000"
+        "http://localhost:3000",
+        "http://localhost:3005"
       ],
       "protocol": "openid-connect",
       "publicClient": false,

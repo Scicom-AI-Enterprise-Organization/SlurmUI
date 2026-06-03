@@ -6,6 +6,7 @@ import {
   BookOpen,
   Briefcase,
   Code2,
+  Cpu,
   KeyRound,
   LayoutDashboard,
   Plus,
@@ -33,7 +34,6 @@ const RESOURCES: Item[] = [
     label: "Clusters",
     href: "/admin/clusters",
     icon: Server,
-    quickAction: { href: "/admin/clusters/new", label: "New cluster" },
     adminOnly: true,
   },
   { label: "Learn Slurm", href: "/explain", icon: BookOpen },
@@ -47,6 +47,7 @@ const ACCOUNT: Item[] = [
 
 const ADMIN: Item[] = [
   { label: "Organization", href: "/admin/organization", icon: Users },
+  { label: "GPU Providers", href: "/admin/gpu-providers", icon: Cpu },
   { label: "Audit log", href: "/admin/audit-log", icon: ScrollText },
   { label: "Settings", href: "/admin/settings", icon: Settings },
 ];

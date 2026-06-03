@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 interface RouteParams {
@@ -7,11 +7,11 @@ interface RouteParams {
 }
 
 // GET /api/tasks/[taskId] — get task status and logs
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { taskId } = await params;
-  const session = await auth();
+  const apiUser = await getApiUser(req);
 
-  if (!session?.user || (session.user as any).role !== "ADMIN") {
+  if (!apiUser || apiUser.role !== "ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

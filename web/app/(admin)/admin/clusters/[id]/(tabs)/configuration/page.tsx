@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ConfigEditor } from "@/components/clusters/config-editor";
 import { AccountingCard } from "@/components/cluster/accounting-card";
 import { GitopsOnlyCard } from "@/components/cluster/gitops-only-card";
+import { RunpodProvisionCard } from "@/components/cluster/runpod-provision-card";
 import { redactConfig } from "@/lib/redact-config";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
@@ -30,8 +31,25 @@ export default async function ConfigurationPage({ params }: PageProps) {
   const eff = effectiveClusterStatus(cluster);
   const controllerReachable = eff === "ACTIVE" || eff === "DEGRADED";
 
+  // RunPod-backed cluster: surface the pod + provisioning log so the user
+  // can see what happened (or is still happening) before bootstrapping.
+  const runpod = (cluster.config as any)?.runpod ?? null;
+  const provisionTask = runpod
+    ? await prisma.backgroundTask.findFirst({
+        where: { clusterId: id, type: "runpod_provision" },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, status: true, logs: true },
+      })
+    : null;
+
   return (
     <div className="space-y-6">
+      {runpod && (
+        <RunpodProvisionCard
+          runpod={runpod}
+          initialTask={provisionTask ? JSON.parse(JSON.stringify(provisionTask)) : null}
+        />
+      )}
       {controllerReachable && <AccountingCard clusterId={id} />}
       <GitopsOnlyCard clusterId={id} />
       <ConfigEditor clusterId={id} initialConfig={config} />

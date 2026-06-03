@@ -9,6 +9,10 @@ export default async function NewClusterPage() {
     select: { id: true, name: true },
     orderBy: { createdAt: "desc" },
   });
+  const gpuProviders = await prisma.gpuProvider.findMany({
+    select: { id: true, name: true },
+    orderBy: { createdAt: "desc" },
+  });
 
   if (sshKeys.length === 0) {
     return (
@@ -34,7 +38,7 @@ export default async function NewClusterPage() {
   return (
     <div>
       <h1 className="mb-8 text-3xl font-bold">New Cluster</h1>
-      <NewClusterWizard sshKeys={sshKeys} />
+      <NewClusterWizard sshKeys={sshKeys} gpuProviders={gpuProviders} />
     </div>
   );
 }

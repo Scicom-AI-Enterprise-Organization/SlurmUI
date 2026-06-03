@@ -93,6 +93,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   const promDataDir = `${dataPath}/prometheus`;
   const grafDataDir = `${dataPath}/grafana`;
 
+  // Prometheus runs on the stack host — when a scrape node IS the stack
+  // host, target loopback instead of its public IP. On cloud pods (RunPod)
+  // only the SSH port is mapped externally, so the pod's public IP doesn't
+  // route back to :9100/:9400 from inside; loopback always does.
+  const scrapeIp = (s: { ip: string }) => (s.ip === stackHost.ip ? "127.0.0.1" : s.ip);
+
   const promYml = [
     "global:",
     "  scrape_interval: 15s",
@@ -101,12 +107,12 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     "  - job_name: node",
     "    static_configs:",
     ...scrape.map((s) =>
-      `      - targets: ['${s.ip}:9100']\n        labels: { instance: '${s.hostname}' }`,
+      `      - targets: ['${scrapeIp(s)}:9100']\n        labels: { instance: '${s.hostname}' }`,
     ),
     "  - job_name: gpu",
     "    static_configs:",
     ...scrape.map((s) =>
-      `      - targets: ['${s.ip}:9400']\n        labels: { instance: '${s.hostname}' }`,
+      `      - targets: ['${scrapeIp(s)}:9400']\n        labels: { instance: '${s.hostname}' }`,
     ),
     // Dynamic scrape targets for "expose metrics" jobs (e.g. vLLM serving
     // on :8000). Aura rewrites /etc/prometheus/sd/jobs.json after every

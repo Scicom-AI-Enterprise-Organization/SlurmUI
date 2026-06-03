@@ -3,8 +3,8 @@
 #   docker compose -f docker-compose.dev.yml up -d --build
 #
 # Services:
-#   Web UI       -> http://localhost:3000
-#   Keycloak     -> http://localhost:8080  (admin/admin)
+#   Web UI       -> http://localhost:3005
+#   Keycloak     -> http://localhost:8081  (admin/admin)
 #   Postgres     -> localhost:5432
 #
 # Test accounts (created by Keycloak realm import):
@@ -37,19 +37,19 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      KC_HTTP_PORT: 8080
-      # Advertise localhost:8080 so the OIDC issuer matches from both
+      KC_HTTP_PORT: 8081
+      # Advertise localhost:8081 so the OIDC issuer matches from both
       # the browser and the web container (which reaches host via extra_hosts).
       KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: 8080
+      KC_HOSTNAME_PORT: 8081
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
     ports:
-      - "8080:8080"
+      - "8081:8081"
     volumes:
       - ./web/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8081"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -96,7 +96,10 @@ services:
       # specified here — see web/.env.example. Setting them on the URL
       # explicitly keeps everything consistent across compose / k8s / etc.
       DATABASE_URL: postgresql://aura:aura@localhost:5432/aura?schema=public&connection_limit=15&pool_timeout=30
-      NEXTAUTH_URL: http://localhost:3000
+      # server.ts reads PORT (defaults to 3000); host networking means no
+      # compose port mapping, so this is the actual listen port.
+      PORT: 3005
+      NEXTAUTH_URL: http://localhost:3005
       # Same value as docker-compose.prod.yml so a session cookie set by
       # one compose file is still decryptable by the other — browser
       # cookies aren't port-scoped, so a `localhost` token from :3001 is
@@ -106,7 +109,7 @@ services:
       AUTH_SECRET: aura-localhost-shared-secret-change-for-prod
       KEYCLOAK_ID: aura-web
       KEYCLOAK_SECRET: aura-web-secret
-      KEYCLOAK_ISSUER: http://localhost:8080/realms/scicom
+      KEYCLOAK_ISSUER: http://localhost:8081/realms/scicom
       FREEIPA_URL: ""
       FREEIPA_USER: ""
       FREEIPA_PASSWORD: ""

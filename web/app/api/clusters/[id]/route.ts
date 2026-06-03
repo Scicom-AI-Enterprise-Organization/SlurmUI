@@ -132,7 +132,27 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const cluster = await prisma.cluster.findUnique({ where: { id }, select: { name: true } });
+  const cluster = await prisma.cluster.findUnique({ where: { id }, select: { name: true, config: true } });
+
+  // RunPod-backed cluster: terminate the rented pod so it stops billing.
+  // Best-effort — a dead provider key shouldn't block the delete; the
+  // outcome lands in the audit metadata either way.
+  let runpodTerminated: boolean | undefined;
+  const rp = (cluster?.config as any)?.runpod;
+  if (rp?.podId && rp?.providerId) {
+    try {
+      const provider = await prisma.gpuProvider.findUnique({ where: { id: rp.providerId } });
+      if (provider) {
+        const { terminateRunPodPod } = await import("@/lib/gpu-provider");
+        await terminateRunPodPod(provider.apiKey, rp.podId);
+        runpodTerminated = true;
+      } else {
+        runpodTerminated = false;
+      }
+    } catch {
+      runpodTerminated = false;
+    }
+  }
 
   // Delete all dependent records before removing the cluster (FK constraints).
   await prisma.appSession.deleteMany({ where: { clusterId: id } });
@@ -144,7 +164,10 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     action: "cluster.delete",
     entity: "Cluster",
     entityId: id,
-    metadata: { name: cluster?.name },
+    metadata: {
+      name: cluster?.name,
+      ...(rp?.podId ? { runpodPodId: rp.podId, runpodTerminated } : {}),
+    },
   });
 
   return NextResponse.json({ success: true });
