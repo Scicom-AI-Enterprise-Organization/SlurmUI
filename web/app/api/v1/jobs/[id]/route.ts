@@ -76,13 +76,26 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     jumpProxyCommand: cluster.sshJumpProxyCommand,
   };
 
+  // Prefer the script's own --output directive (submit-job pins one when
+  // the user doesn't): scontrol forgets the job after MinJobAge and sacct
+  // can lag right after completion, so the scontrol/sacct dance below is
+  // only a fallback for legacy rows. Sanitised to a safe charset — the
+  // script body is user-controlled and this lands in a shell line.
+  const hintMatch = (job.script ?? "").match(/^#SBATCH\s+(?:--output|-o)[=\s]+(\S+)/m);
+  const outputHint = hintMatch
+    ? hintMatch[1].replace(/%j/g, String(job.slurmJobId)).replace(/[^A-Za-z0-9._/%-]/g, "")
+    : "";
+
   const M = `__V1_OUT_${Date.now()}__`;
   const script = `#!/bin/bash
 set +e
 trap 'ec=$?; echo "[trace] bash exiting (status=$ec) at line $LINENO"' EXIT
 
 JOBID=${job.slurmJobId}
-OUT=$(scontrol show job $JOBID 2>/dev/null | grep -oP 'StdOut=\\K[^ ]+' | head -1)
+OUT="${outputHint}"
+if [ -z "$OUT" ] || [ ! -f "$OUT" ]; then
+  OUT=$(scontrol show job $JOBID 2>/dev/null | grep -oP 'StdOut=\\K[^ ]+' | head -1)
+fi
 if [ -z "$OUT" ] || [ "$OUT" = "(null)" ]; then
   WD=$(sacct -j $JOBID -n -o WorkDir%-500 2>/dev/null | head -1 | xargs)
   [ -n "$WD" ] && OUT="$WD/slurm-$JOBID.out"

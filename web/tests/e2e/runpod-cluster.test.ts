@@ -380,9 +380,11 @@ describe("runpod cluster regression (rented GPU pod)", () => {
     }
     // Output is resolved over SSH from scontrol/sacct — right at
     // completion that lookup can race the accounting flush and come back
-    // empty even though the job finished fine. Retry briefly.
+    // empty (or as the watcher's "[aura] Could not resolve output file"
+    // placeholder) even though the job finished fine. Retry briefly.
+    const outUseless = (s: string) => !s || /Could not resolve output file/.test(s);
     const outDeadline = Date.now() + 90 * 1000;
-    while (last.status === "COMPLETED" && !output && Date.now() < outDeadline) {
+    while (last.status === "COMPLETED" && outUseless(output) && Date.now() < outDeadline) {
       await new Promise((res) => setTimeout(res, 10_000));
       const r = await api<{ output: string | null }>("GET", `/api/v1/jobs/${jobId}?output=1`);
       output = r.data?.output ?? "";

@@ -470,6 +470,25 @@ export async function submitJob(input: SubmitJobInput): Promise<Job> {
     script = injectPrelude(script, prelude);
   }
 
+  // Pin the stdout path when the script doesn't pick one. Without
+  // --output, resolving the file later depends on scontrol still
+  // remembering the job (purged after MinJobAge) or sacct having flushed —
+  // both race right after completion, making the job watcher / output
+  // endpoints intermittently report "could not resolve output file".
+  // Injected BEFORE the Job row is created so the stored script carries
+  // the directive — parseOutputHint and the v1 output route read it back.
+  {
+    const uname = dbUser.unixUsername ?? "";
+    const dataNfs = ((cluster.config as Record<string, unknown>).data_nfs_path as string | undefined) ?? "";
+    const submitDirEarly = (uname && dataNfs ? `${dataNfs}/${uname}` : "") || "/tmp";
+    if (!/^#SBATCH\s+(?:--output|-o)[=\s]/m.test(script)) {
+      const lines = script.split("\n");
+      const shebangIdx = lines[0]?.startsWith("#!") ? 0 : -1;
+      lines.splice(shebangIdx + 1, 0, `#SBATCH --output=${submitDirEarly}/slurm-%j.out`);
+      script = lines.join("\n");
+    }
+  }
+
   const job = await prisma.job.create({
     data: {
       clusterId,
