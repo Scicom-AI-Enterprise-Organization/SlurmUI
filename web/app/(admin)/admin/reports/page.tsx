@@ -84,12 +84,26 @@ type JobStatus = (typeof ALL_STATUSES)[number];
 
 const GPU_COLORS = ["#4f9cf9", "#f97316", "#22c55e", "#a855f7", "#ec4899", "#06b6d4", "#eab308", "#ef4444"];
 
-const DCGM = {
-  memUsed:     "DCGM_FI_DEV_FB_USED",
-  utilization: "DCGM_FI_DEV_GPU_UTIL",
-  temperature: "DCGM_FI_DEV_GPU_TEMP",
-  powerUsage:  "DCGM_FI_DEV_POWER_USAGE",
-} as const;
+// Metric definitions per exporter family.
+// nvidia_smi = utkuozdemir/nvidia_gpu_exporter binary (systemd)
+// dcgm       = nvcr.io/nvidia/k8s/dcgm-exporter container
+type MetricDef = { query: string; divisor: number; unit: string };
+type MetricFamily = { memUsed: MetricDef; utilization: MetricDef; temperature: MetricDef; powerUsage: MetricDef };
+
+const METRIC_FAMILIES: Record<"dcgm" | "nvidia_smi", MetricFamily> = {
+  dcgm: {
+    memUsed:     { query: "DCGM_FI_DEV_FB_USED",     divisor: 1024,        unit: " GiB" },
+    utilization: { query: "DCGM_FI_DEV_GPU_UTIL",    divisor: 1,           unit: "%"    },
+    temperature: { query: "DCGM_FI_DEV_GPU_TEMP",    divisor: 1,           unit: "°C"   },
+    powerUsage:  { query: "DCGM_FI_DEV_POWER_USAGE", divisor: 1,           unit: " W"   },
+  },
+  nvidia_smi: {
+    memUsed:     { query: "nvidia_smi_memory_used_bytes",     divisor: 1_073_741_824, unit: " GiB" },
+    utilization: { query: "nvidia_smi_utilization_gpu_ratio", divisor: 0.01,          unit: "%"    },
+    temperature: { query: "nvidia_smi_temperature_gpu",       divisor: 1,             unit: "°C"   },
+    powerUsage:  { query: "nvidia_smi_power_draw_watts",      divisor: 1,             unit: " W"   },
+  },
+};
 
 // ── Date helpers ──────────────────────────────────────────────────────────
 
@@ -732,10 +746,10 @@ async function exportDocx(
 
     // GPU charts — render to PNG via Canvas and embed as images
     const chartConfigs = [
-      { label: "GPU Memory Used",         series: promData?.memUsed,     divisor: 1024, unit: " GiB" },
-      { label: "GPU Utilization",         series: promData?.utilization, divisor: 1,    unit: "%" },
-      { label: "GPU Average Temperature", series: promData?.temperature, divisor: 1,    unit: "°C" },
-      { label: "GPU Power Usage",         series: promData?.powerUsage,  divisor: 1,    unit: " W" },
+      { label: "GPU Memory Used",         series: promData?.memUsed,     divisor: promMeta.memUsed.divisor,     unit: promMeta.memUsed.unit     },
+      { label: "GPU Utilization",         series: promData?.utilization, divisor: promMeta.utilization.divisor, unit: promMeta.utilization.unit },
+      { label: "GPU Average Temperature", series: promData?.temperature, divisor: promMeta.temperature.divisor, unit: promMeta.temperature.unit },
+      { label: "GPU Power Usage",         series: promData?.powerUsage,  divisor: promMeta.powerUsage.divisor,  unit: promMeta.powerUsage.unit  },
     ];
 
     for (const { label, series, divisor, unit } of chartConfigs) {
@@ -830,6 +844,7 @@ export default function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [promData, setPromData] = useState<PromData>(null);
+  const [promMeta, setPromMeta] = useState<MetricFamily>(METRIC_FAMILIES.dcgm);
   const [promLoading, setPromLoading] = useState(false);
 
   const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
@@ -863,7 +878,8 @@ export default function ReportsPage() {
 
   useEffect(() => { fetchReport(); }, [fetchReport]);
 
-  // Fetch Prometheus data when cluster is selected
+  // Fetch Prometheus data when cluster or date range changes.
+  // Step 1: discover metric family via label names, Step 2: query all 4 metrics.
   useEffect(() => {
     if (clusterId === "__all__") { setPromData(null); return; }
     let cancelled = false;
@@ -871,23 +887,40 @@ export default function ReportsPage() {
     const start = Math.floor(new Date(fromDate).getTime() / 1000);
     const end   = Math.floor(new Date(toDate).getTime() / 1000) + 86399;
     const step  = promStep(fromDate, toDate);
+    const base  = `/api/clusters/${clusterId}/prometheus`;
 
     const runQuery = async (query: string): Promise<PromSeries[]> => {
-      const params = new URLSearchParams({
-        query, start: String(start), end: String(end), step: String(step),
-      });
-      const res = await fetch(`/api/clusters/${clusterId}/prometheus/api/v1/query_range?${params}`);
+      const params = new URLSearchParams({ query, start: String(start), end: String(end), step: String(step) });
+      const res = await fetch(`${base}/api/v1/query_range?${params}`);
       if (!res.ok) throw new Error(`Prometheus ${res.status}`);
-      const json = await res.json();
-      return json.data?.result ?? [];
+      return ((await res.json()).data?.result ?? []) as PromSeries[];
     };
 
-    Promise.all([
-      runQuery(DCGM.memUsed),
-      runQuery(DCGM.utilization),
-      runQuery(DCGM.temperature),
-      runQuery(DCGM.powerUsage),
-    ]).then(([memUsed, utilization, temperature, powerUsage]) => {
+    const detectAndFetch = async () => {
+      // Discover which exporter family is installed
+      let family: MetricFamily = METRIC_FAMILIES.dcgm;
+      try {
+        const labelsRes = await fetch(`${base}/api/v1/label/__name__/values`);
+        if (labelsRes.ok) {
+          const names: string[] = (await labelsRes.json()).data ?? [];
+          if (names.some((n) => n.startsWith("nvidia_smi_") || n.startsWith("nvidia_gpu_"))) {
+            family = METRIC_FAMILIES.nvidia_smi;
+          }
+          // dcgm stays as default if DCGM_FI_ prefixes found (or unknown)
+        }
+      } catch { /* fall back to dcgm defaults */ }
+
+      if (!cancelled) setPromMeta(family);
+
+      return Promise.all([
+        runQuery(family.memUsed.query),
+        runQuery(family.utilization.query),
+        runQuery(family.temperature.query),
+        runQuery(family.powerUsage.query),
+      ]);
+    };
+
+    detectAndFetch().then(([memUsed, utilization, temperature, powerUsage]) => {
       if (!cancelled) setPromData({ memUsed, utilization, temperature, powerUsage });
     }).catch(() => {
       if (!cancelled) setPromData(null);
@@ -970,10 +1003,10 @@ export default function ReportsPage() {
                 await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName, promData).catch(() => {});
                 setDocxExporting(false);
               }}
-              disabled={loading || !data || docxExporting}
+              disabled={loading || !data || docxExporting || promLoading}
             >
               <FileText className="h-4 w-4 mr-2" />
-              {docxExporting ? "Generating…" : "Export DOCX"}
+              {docxExporting ? "Generating…" : promLoading ? "Loading GPU data…" : "Export DOCX"}
             </Button>
             <Button variant="outline" size="sm" onClick={() => window.print()} disabled={loading || !data}>
               <Printer className="h-4 w-4 mr-2" />
@@ -1178,10 +1211,10 @@ export default function ReportsPage() {
 
               {data.dailyJobHistory.map((day, i) => {
                 const expanded = expandedDays.has(day.date);
-                const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, 1024) : null; // MiB→GiB
-                const utilCd = promData ? buildDayChartData(promData.utilization, day.date) : null;
-                const tempCd = promData ? buildDayChartData(promData.temperature, day.date) : null;
-                const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date) : null;
+                const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, promMeta.memUsed.divisor)     : null;
+                const utilCd = promData ? buildDayChartData(promData.utilization, day.date, promMeta.utilization.divisor) : null;
+                const tempCd = promData ? buildDayChartData(promData.temperature, day.date, promMeta.temperature.divisor) : null;
+                const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date, promMeta.powerUsage.divisor)  : null;
                 const memIds  = promData ? gpuIds(promData.memUsed) : [];
                 const utilIds = promData ? gpuIds(promData.utilization) : [];
                 const tempIds = promData ? gpuIds(promData.temperature) : [];
@@ -1215,10 +1248,10 @@ export default function ReportsPage() {
                         {(promData !== null || clusterId !== "__all__") && (
                           <div className="grid gap-4 md:grid-cols-2">
                             {[
-                              { label: "GPU Memory Used",        cd: memCd,  ids: memIds,  unit: " GiB" },
-                              { label: "GPU Utilization",        cd: utilCd, ids: utilIds, unit: "%" },
-                              { label: "GPU Average Temperature",cd: tempCd, ids: tempIds, unit: "°C" },
-                              { label: "GPU Power Usage",        cd: powCd,  ids: powIds,  unit: " W" },
+                              { label: "GPU Memory Used",        cd: memCd,  ids: memIds,  unit: promMeta.memUsed.unit     },
+                              { label: "GPU Utilization",        cd: utilCd, ids: utilIds, unit: promMeta.utilization.unit },
+                              { label: "GPU Average Temperature",cd: tempCd, ids: tempIds, unit: promMeta.temperature.unit },
+                              { label: "GPU Power Usage",        cd: powCd,  ids: powIds,  unit: promMeta.powerUsage.unit  },
                             ].map(({ label, cd, ids, unit }) => (
                               <div key={label}>
                                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">{label}</p>
@@ -1330,10 +1363,10 @@ export default function ReportsPage() {
           </h2>
 
           {data.dailyJobHistory.map((day, i) => {
-            const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, 1024) : null;
-            const utilCd = promData ? buildDayChartData(promData.utilization, day.date) : null;
-            const tempCd = promData ? buildDayChartData(promData.temperature, day.date) : null;
-            const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date) : null;
+            const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, promMeta.memUsed.divisor)     : null;
+            const utilCd = promData ? buildDayChartData(promData.utilization, day.date, promMeta.utilization.divisor) : null;
+            const tempCd = promData ? buildDayChartData(promData.temperature, day.date, promMeta.temperature.divisor) : null;
+            const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date, promMeta.powerUsage.divisor)  : null;
             const memIds  = promData ? gpuIds(promData.memUsed) : [];
             const utilIds = promData ? gpuIds(promData.utilization) : [];
             const tempIds = promData ? gpuIds(promData.temperature) : [];
@@ -1355,10 +1388,10 @@ export default function ReportsPage() {
                   </tr>
                 </tbody></table>
 
-                <PGPUChart label="GPU Memory Used"          chartData={memCd}  ids={memIds}  unit=" GiB" />
-                <PGPUChart label="GPU Utilization"          chartData={utilCd} ids={utilIds} unit="%" />
-                <PGPUChart label="GPU Avg Temperature"      chartData={tempCd} ids={tempIds} unit="°C" />
-                <PGPUChart label="GPU Power Usage"          chartData={powCd}  ids={powIds}  unit=" W" />
+                <PGPUChart label="GPU Memory Used"          chartData={memCd}  ids={memIds}  unit={promMeta.memUsed.unit}     />
+                <PGPUChart label="GPU Utilization"          chartData={utilCd} ids={utilIds} unit={promMeta.utilization.unit} />
+                <PGPUChart label="GPU Avg Temperature"      chartData={tempCd} ids={tempIds} unit={promMeta.temperature.unit} />
+                <PGPUChart label="GPU Power Usage"          chartData={powCd}  ids={powIds}  unit={promMeta.powerUsage.unit}  />
 
                 <h4 style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "6px" }}>b. Slurm Job History</h4>
                 {day.jobs.length === 0 ? (
