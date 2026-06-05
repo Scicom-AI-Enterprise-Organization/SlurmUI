@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
-  AreaChart, Area, LineChart, Line,
-  XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer,
+  AreaChart, Area,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -19,15 +19,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatCard } from "@/components/dashboard/stat-card";
-import { ChevronDown, Printer, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Printer, FileText, X } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
-
-type FilterOptions = {
-  partitions: string[];
-  partitionNodes: Record<string, string[]>;
-  users: { id: string; name: string | null; unixUsername: string | null }[];
-};
 
 type TopUser = { unixUsername: string | null; name: string | null; jobCount: number };
 type RunningJob = {
@@ -69,127 +63,227 @@ type ReportData = {
   perCluster: ClusterEntry[];
 };
 
+type PromSeries = { metric: Record<string, string>; values: [number, string][] };
+type PromData = {
+  memUsed: PromSeries[];
+  utilization: PromSeries[];
+  temperature: PromSeries[];
+  powerUsage: PromSeries[];
+} | null;
+
+type FilterOptions = {
+  partitions: string[];
+  partitionNodes: Record<string, string[]>;
+  users: { id: string; name: string | null; unixUsername: string | null }[];
+};
+
 const ALL_STATUSES = ["COMPLETED", "FAILED", "CANCELLED", "RUNNING", "PENDING"] as const;
 type JobStatus = (typeof ALL_STATUSES)[number];
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────
 
-function today() {
-  return new Date().toISOString().slice(0, 10);
-}
+const GPU_COLORS = ["#4f9cf9", "#f97316", "#22c55e", "#a855f7", "#ec4899", "#06b6d4", "#eab308", "#ef4444"];
+
+const DCGM = {
+  memUsed:     "DCGM_FI_DEV_FB_USED",
+  utilization: "DCGM_FI_DEV_GPU_UTIL",
+  temperature: "DCGM_FI_DEV_GPU_TEMP",
+  powerUsage:  "DCGM_FI_DEV_POWER_USAGE",
+} as const;
+
+// ── Date helpers ──────────────────────────────────────────────────────────
+
+function today() { return new Date().toISOString().slice(0, 10); }
 function daysAgo(n: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
 }
 function weekStart(offset = 0) {
   const d = new Date();
   const day = d.getDay();
-  const diff = (day === 0 ? -6 : 1 - day) + offset * 7;
-  d.setDate(d.getDate() + diff);
+  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day) + offset * 7);
   return d.toISOString().slice(0, 10);
 }
 function monthStart(offset = 0) {
-  const d = new Date();
-  d.setDate(1);
-  d.setMonth(d.getMonth() + offset);
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset);
   return d.toISOString().slice(0, 10);
 }
 function monthEnd(offset = 0) {
-  const d = new Date();
-  d.setDate(1);
-  d.setMonth(d.getMonth() + offset + 1);
-  d.setDate(0);
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset + 1); d.setDate(0);
   return d.toISOString().slice(0, 10);
 }
+function capToday(s: string) { return s > today() ? today() : s; }
+
+const DATE_PRESETS = [
+  { label: "Today",      from: () => today(),       to: () => today() },
+  { label: "Yesterday",  from: () => daysAgo(1),    to: () => daysAgo(1) },
+  { label: "7d",         from: () => daysAgo(7),    to: () => today() },
+  { label: "30d",        from: () => daysAgo(30),   to: () => today() },
+  { label: "90d",        from: () => daysAgo(90),   to: () => today() },
+  { label: "This week",  from: () => weekStart(0),  to: () => today() },
+  { label: "Last week",  from: () => weekStart(-1), to: () => capToday(weekStart(0)) },
+  { label: "This month", from: () => monthStart(0), to: () => today() },
+  { label: "Last month", from: () => monthStart(-1),to: () => monthEnd(-1) },
+];
+
+// ── Misc helpers ──────────────────────────────────────────────────────────
+
 function fmtDuration(sec: number): string {
   if (sec < 60) return `${sec}s`;
   if (sec < 3600) return `${Math.round(sec / 60)}m`;
   if (sec < 86400) return `${(sec / 3600).toFixed(1)}h`;
   return `${(sec / 86400).toFixed(1)}d`;
 }
-function fmtDate(iso: string): string {
+function fmtDate(iso: string) {
   const d = new Date(iso + "T00:00:00");
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
-function fmtWeekLabel(fromIso: string, toIso: string): string {
+function fmtWeekLabel(fromIso: string, toIso: string) {
   const from = new Date(fromIso);
-  const to = new Date(toIso);
+  const to   = new Date(toIso);
   const toLabel = to.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
   return `${from.getDate()} to ${toLabel}`;
 }
-function buildSummaryText(data: ReportData): string {
+
+function summaryBullets(data: ReportData): string[] {
   const { summary, topUsers } = data;
-  if (!summary.totalJobs) return "No jobs submitted in this period.";
-  const parts = [`${summary.totalJobs} jobs submitted.`];
-  const bd = [];
+  const bullets: string[] = [];
+  if (!summary.totalJobs) { bullets.push("No jobs submitted in this period."); return bullets; }
+
+  const running = summary.totalJobs - summary.completed - summary.failed - summary.cancelled;
+  bullets.push(`${summary.totalJobs} job${summary.totalJobs !== 1 ? "s" : ""} submitted`);
+
+  const bd: string[] = [];
   if (summary.completed) bd.push(`${summary.completed} completed`);
   if (summary.failed) bd.push(`${summary.failed} failed`);
   if (summary.cancelled) bd.push(`${summary.cancelled} cancelled`);
-  if (bd.length) parts.push(bd.join(", ") + ".");
-  if (summary.successRate !== null) parts.push(`Success rate: ${summary.successRate}%.`);
+  if (running > 0) bd.push(`${running} running/pending`);
+  if (bd.length) bullets.push(bd.join(", "));
+
+  if (summary.successRate !== null)
+    bullets.push(`Success rate: ${summary.successRate}% (${summary.completed} of ${summary.completed + summary.failed + summary.cancelled} finished)`);
+
   if (topUsers.length) {
-    const names = topUsers.slice(0, 3).map((u) => u.unixUsername ?? u.name ?? "?").join(", ");
-    parts.push(`Active users: ${names}${topUsers.length > 3 ? " and others" : ""}.`);
+    const names = topUsers.slice(0, 5).map((u) => u.unixUsername ?? u.name ?? "?").join(", ");
+    bullets.push(`Active users: ${names}${topUsers.length > 5 ? ` and ${topUsers.length - 5} more` : ""}`);
   }
-  if (summary.gpuHours > 0) parts.push(`GPU-hours: ${summary.gpuHours.toFixed(1)}.`);
-  return parts.join(" ");
-}
-function buildDaySummaryText(day: DayEntry, activeIds: number[]): string {
-  if (!day.jobs.length) {
-    const still = activeIds.length ? ` Still active: ${activeIds.join(", ")}.` : "";
-    return `No new jobs submitted this day.${still}`;
-  }
-  const names = [...new Set(day.jobs.map((j) => j.jobName))].slice(0, 4).join(", ");
-  const bd = [];
-  if (day.completed) bd.push(`${day.completed} completed`);
-  if (day.failed) bd.push(`${day.failed} failed`);
-  if (day.cancelled) bd.push(`${day.cancelled} cancelled`);
-  return [names ? names + "." : "", bd.join(", ") + (bd.length ? "." : "")].filter(Boolean).join(" ");
+  if (summary.gpuHours > 0) bullets.push(`GPU-hours consumed: ${summary.gpuHours.toFixed(1)}`);
+  if (summary.cpuHours > 0) bullets.push(`CPU-hours consumed: ${summary.cpuHours.toFixed(0)}`);
+  return bullets;
 }
 
-const TICK_INTERVAL: Record<number, number> = { 7: 0, 30: 4, 90: 13 };
+// ── Prometheus helpers ────────────────────────────────────────────────────
 
-// ── MultiSelect component ────────────────────────────────────────────────────
+function promStep(fromDate: string, toDate: string): number {
+  const days = Math.ceil(
+    (new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86400000,
+  );
+  if (days <= 1) return 60;   // 1-min for single day
+  if (days <= 7) return 300;  // 5-min for weekly
+  if (days <= 30) return 1800; // 30-min for monthly
+  return 7200;                 // 2-h for 90d+
+}
 
-function MultiSelect({
-  label, options, selected, onChange, emptyLabel = "All",
+function buildDayChartData(series: PromSeries[], dateStr: string, divisor = 1) {
+  const dayStart = Math.floor(new Date(dateStr + "T00:00:00").getTime() / 1000);
+  const dayEnd   = dayStart + 86400;
+
+  const gpus = series
+    .map((s) => ({
+      id: `GPU ${s.metric.gpu ?? s.metric.uuid ?? "?"}`,
+      points: s.values
+        .filter(([t]) => t >= dayStart && t < dayEnd)
+        .map(([t, v]) => ({ ts: t, value: +(parseFloat(v) / divisor).toFixed(2) })),
+    }))
+    .filter((g) => g.points.length > 0);
+
+  if (!gpus.length) return null;
+
+  const allTs = [...new Set(gpus.flatMap((g) => g.points.map((p) => p.ts)))].sort((a, b) => a - b);
+  return allTs.map((ts) => {
+    const row: Record<string, string | number> = {
+      time: new Date(ts * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+    };
+    for (const g of gpus) {
+      const pt = g.points.find((p) => p.ts === ts);
+      if (pt) row[g.id] = pt.value;
+    }
+    return row;
+  });
+}
+
+function gpuIds(series: PromSeries[]) {
+  return series.map((s) => `GPU ${s.metric.gpu ?? s.metric.uuid ?? "?"}`);
+}
+
+// ── GPUChart (shared screen + print) ─────────────────────────────────────
+
+function GPUChart({
+  chartData,
+  ids,
+  unit,
+  height = 140,
 }: {
+  chartData: ReturnType<typeof buildDayChartData>;
+  ids: string[];
+  unit: string;
+  height?: number;
+}) {
+  if (!chartData) {
+    return (
+      <p className="py-4 text-center text-xs text-muted-foreground italic">
+        No Prometheus data for this day.
+      </p>
+    );
+  }
+  return (
+    <div style={{ height, width: "100%" }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+          <XAxis dataKey="time" tick={{ fontSize: 9 }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 9 }} axisLine={false} tickLine={false} width={34} unit={unit} />
+          <Tooltip
+            contentStyle={{ fontSize: 10, padding: "4px 8px" }}
+            formatter={(v: number) => [`${v}${unit}`, undefined]}
+          />
+          <Legend wrapperStyle={{ fontSize: 10 }} />
+          {ids.map((id, i) => (
+            <Line key={id} dataKey={id} stroke={GPU_COLORS[i % GPU_COLORS.length]}
+              dot={false} strokeWidth={1.5} isAnimationActive={false} />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ── MultiSelect ───────────────────────────────────────────────────────────
+
+function MultiSelect({ label, options, selected, onChange }: {
   label: string;
   options: { value: string; label: string }[];
   selected: string[];
   onChange: (v: string[]) => void;
-  emptyLabel?: string;
 }) {
-  const displayLabel =
-    selected.length === 0 ? emptyLabel :
+  const display =
+    selected.length === 0 ? "All" :
     selected.length === 1 ? selected[0] :
     `${selected.length} selected`;
-
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 gap-1 font-normal max-w-52"
-        >
+        <Button variant="outline" size="sm" className="h-8 gap-1 font-normal max-w-52">
           <span className="text-muted-foreground text-xs mr-0.5">{label}:</span>
-          <span className="truncate">{displayLabel}</span>
+          <span className="truncate">{display}</span>
           <ChevronDown className="ml-auto h-3 w-3 opacity-50 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto min-w-44">
+      <DropdownMenuContent align="start" className="max-h-64 overflow-y-auto min-w-44">
         {options.map((opt) => (
           <DropdownMenuCheckboxItem
             key={opt.value}
             checked={selected.includes(opt.value)}
-            onCheckedChange={(checked) =>
-              onChange(
-                checked
-                  ? [...selected, opt.value]
-                  : selected.filter((v) => v !== opt.value),
-              )
+            onCheckedChange={(c) =>
+              onChange(c ? [...selected, opt.value] : selected.filter((v) => v !== opt.value))
             }
           >
             {opt.label}
@@ -219,38 +313,40 @@ const TD: React.CSSProperties = {
 };
 const TABLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", marginBottom: "16px" };
 
-function PMetaTable({ cluster, week, filters }: {
+function PMetaTable({ cluster, week, partitions, statuses, userName }: {
   cluster: string; week: string;
-  filters: { partitions: string[]; statuses: string[]; userName?: string };
+  partitions: string[]; statuses: string[]; userName?: string;
 }) {
   return (
-    <table style={{ ...TABLE, marginBottom: "28px", width: "auto", minWidth: "320px" }}>
+    <table style={{ ...TABLE, marginBottom: "28px", width: "auto", minWidth: "340px" }}>
       <tbody>
         <tr><td style={{ ...TH, width: "120px" }}>Cluster</td><td style={TD}>{cluster}</td></tr>
         <tr><td style={TH}>Period</td><td style={TD}>{week}</td></tr>
-        {filters.partitions.length > 0 && (
-          <tr><td style={TH}>Partition(s)</td><td style={TD}>{filters.partitions.join(", ")}</td></tr>
-        )}
-        {filters.statuses.length > 0 && (
-          <tr><td style={TH}>Status filter</td><td style={TD}>{filters.statuses.join(", ")}</td></tr>
-        )}
-        {filters.userName && (
-          <tr><td style={TH}>User</td><td style={TD}>{filters.userName}</td></tr>
-        )}
+        {partitions.length > 0 && <tr><td style={TH}>Partition(s)</td><td style={TD}>{partitions.join(", ")}</td></tr>}
+        {statuses.length > 0 && <tr><td style={TH}>Status filter</td><td style={TD}>{statuses.join(", ")}</td></tr>}
+        {userName && <tr><td style={TH}>User</td><td style={TD}>{userName}</td></tr>}
       </tbody>
     </table>
   );
 }
-function PSummaryBox({ text }: { text: string }) {
+
+function PSummaryBullets({ bullets }: { bullets: string[] }) {
   return (
-    <table style={TABLE}><tbody>
-      <tr>
-        <td style={{ ...TH, width: "110px", verticalAlign: "top" }}>Summary</td>
-        <td style={TD}>{text}</td>
-      </tr>
-    </tbody></table>
+    <table style={TABLE}>
+      <tbody>
+        <tr>
+          <td style={{ ...TH, width: "110px", verticalAlign: "top" }}>Summary</td>
+          <td style={TD}>
+            <ul style={{ margin: 0, paddingLeft: "16px" }}>
+              {bullets.map((b, i) => <li key={i} style={{ marginBottom: "2px" }}>{b}</li>)}
+            </ul>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   );
 }
+
 function PUsersTable({ users }: { users: TopUser[] }) {
   if (!users.length) return <p style={{ color: "#666", fontSize: "13px", marginBottom: "16px" }}>No jobs submitted.</p>;
   return (
@@ -266,6 +362,7 @@ function PUsersTable({ users }: { users: TopUser[] }) {
     </table>
   );
 }
+
 function PRunningTable({ jobs }: { jobs: RunningJob[] }) {
   if (!jobs.length) return <p style={{ color: "#666", fontSize: "13px", marginBottom: "16px" }}>No jobs currently running.</p>;
   return (
@@ -286,6 +383,7 @@ function PRunningTable({ jobs }: { jobs: RunningJob[] }) {
     </table>
   );
 }
+
 function PVllmTable({ jobs }: { jobs: VllmJob[] }) {
   return (
     <table style={TABLE}>
@@ -305,6 +403,7 @@ function PVllmTable({ jobs }: { jobs: VllmJob[] }) {
     </table>
   );
 }
+
 function PJobHistoryTable({ jobs }: { jobs: DayJob[] }) {
   return (
     <table style={{ ...TABLE, fontSize: "12px" }}>
@@ -332,19 +431,286 @@ function PJobHistoryTable({ jobs }: { jobs: DayJob[] }) {
   );
 }
 
-// ── Main page ────────────────────────────────────────────────────────────────
+// Print-only GPU chart wrapper (no Tailwind classes — uses inline styles)
+function PGPUChart({ label, chartData, ids, unit }: {
+  label: string; chartData: ReturnType<typeof buildDayChartData>; ids: string[]; unit: string;
+}) {
+  return (
+    <table style={{ ...TABLE, marginBottom: "8px" }}>
+      <tbody>
+        <tr>
+          <td style={{ ...TH, width: "130px", verticalAlign: "top" }}>{label}</td>
+          <td style={{ ...TD, padding: "4px" }}>
+            {chartData ? (
+              <div style={{ height: 130, width: "100%" }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="time" tick={{ fontSize: 8 }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 8 }} axisLine={false} tickLine={false} width={30} unit={unit} />
+                    <Legend wrapperStyle={{ fontSize: 9 }} />
+                    {ids.map((id, i) => (
+                      <Line key={id} dataKey={id} stroke={GPU_COLORS[i % GPU_COLORS.length]}
+                        dot={false} strokeWidth={1} isAnimationActive={false} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <span style={{ fontSize: "11px", color: "#888", fontStyle: "italic" }}>
+                No Prometheus data available for this day.
+              </span>
+            )}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  );
+}
 
-const DATE_PRESETS = [
-  { label: "Today",      from: () => today(),          to: () => today() },
-  { label: "Yesterday",  from: () => daysAgo(1),        to: () => daysAgo(1) },
-  { label: "7d",         from: () => daysAgo(7),        to: () => today() },
-  { label: "30d",        from: () => daysAgo(30),       to: () => today() },
-  { label: "90d",        from: () => daysAgo(90),       to: () => today() },
-  { label: "This week",  from: () => weekStart(0),      to: () => today() },
-  { label: "Last week",  from: () => weekStart(-1),     to: () => weekStart(0) },
-  { label: "This month", from: () => monthStart(0),     to: () => today() },
-  { label: "Last month", from: () => monthStart(-1),    to: () => monthEnd(-1) },
-];
+// ── DOCX export ───────────────────────────────────────────────────────────
+
+async function exportDocx(
+  data: ReportData,
+  weekLabel: string,
+  bullets: string[],
+  selectedPartitions: string[],
+  selectedStatuses: string[],
+  selectedUserName: string | undefined,
+) {
+  // Dynamic import so docx isn't bundled unless needed
+  const {
+    Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+    HeadingLevel, WidthType, AlignmentType, BorderStyle,
+  } = await import("docx");
+
+  function cell(text: string, bold = false, shade = false) {
+    return new TableCell({
+      shading: shade ? { fill: "F0F0F0" } : undefined,
+      children: [new Paragraph({
+        children: [new TextRun({ text, bold, size: 20 })],
+      })],
+      margins: { top: 80, bottom: 80, left: 120, right: 120 },
+    });
+  }
+
+  function metaRow(label: string, value: string) {
+    return new TableRow({ children: [cell(label, true, true), cell(value)] });
+  }
+
+  function sectionHeading(text: string, level: (typeof HeadingLevel)[keyof typeof HeadingLevel]) {
+    return new Paragraph({ heading: level, children: [new TextRun({ text, bold: true })] });
+  }
+
+  const fullBorder = {
+    top: { style: BorderStyle.SINGLE, size: 1, color: "BBBBBB" },
+    bottom: { style: BorderStyle.SINGLE, size: 1, color: "BBBBBB" },
+    left: { style: BorderStyle.SINGLE, size: 1, color: "BBBBBB" },
+    right: { style: BorderStyle.SINGLE, size: 1, color: "BBBBBB" },
+  };
+
+  function dataTable(headers: string[], rows: string[][]) {
+    return new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      borders: fullBorder,
+      rows: [
+        new TableRow({
+          tableHeader: true,
+          children: headers.map((h) => cell(h, true, true)),
+        }),
+        ...rows.map((r) => new TableRow({ children: r.map((c) => cell(c)) })),
+      ],
+    });
+  }
+
+  const children: (typeof Paragraph.prototype | typeof Table.prototype)[] = [];
+
+  // Title
+  children.push(
+    new Paragraph({
+      heading: HeadingLevel.HEADING_1,
+      children: [new TextRun({ text: `${data.clusterName} Weekly Report (${weekLabel})`, bold: true })],
+    }),
+    new Paragraph({ children: [] }),
+  );
+
+  // Metadata table
+  const metaRows = [
+    metaRow("Cluster", data.clusterName),
+    metaRow("Period", weekLabel),
+    ...(selectedPartitions.length ? [metaRow("Partition(s)", selectedPartitions.join(", "))] : []),
+    ...(selectedStatuses.length ? [metaRow("Status filter", selectedStatuses.join(", "))] : []),
+    ...(selectedUserName ? [metaRow("User", selectedUserName)] : []),
+  ];
+  children.push(
+    new Table({
+      width: { size: 60, type: WidthType.PERCENTAGE },
+      borders: fullBorder,
+      rows: metaRows,
+    }),
+    new Paragraph({ children: [] }),
+  );
+
+  // Weekly Summary
+  children.push(sectionHeading("Weekly summary", HeadingLevel.HEADING_2), new Paragraph({ children: [] }));
+  children.push(
+    new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      borders: fullBorder,
+      rows: [new TableRow({
+        children: [
+          cell("Summary", true, true),
+          new TableCell({
+            children: bullets.map((b) =>
+              new Paragraph({ bullet: { level: 0 }, children: [new TextRun({ text: b, size: 20 })] }),
+            ),
+            margins: { top: 80, bottom: 80, left: 120, right: 120 },
+          }),
+        ],
+      })],
+    }),
+    new Paragraph({ children: [] }),
+  );
+
+  // Users this week
+  children.push(sectionHeading("1. Users this week", HeadingLevel.HEADING_3));
+  children.push(dataTable(
+    ["Slurm user", "Name", "Jobs"],
+    data.topUsers.map((u) => [u.unixUsername ?? "—", u.name ?? "—", String(u.jobCount)]),
+  ), new Paragraph({ children: [] }));
+
+  // Currently running
+  children.push(sectionHeading("2. Currently running", HeadingLevel.HEADING_3));
+  if (data.currentlyRunning.length) {
+    children.push(dataTable(
+      ["Job", "User", "State", "Started", "Elapsed"],
+      data.currentlyRunning.map((j) => [
+        `${j.jobName}${j.slurmJobId !== null ? ` (ID ${j.slurmJobId})` : ""}`,
+        j.unixUsername ?? "—", j.state, j.startedAt, j.elapsedLabel,
+      ]),
+    ), new Paragraph({ children: [] }));
+  } else {
+    children.push(new Paragraph({ children: [new TextRun({ text: "No jobs currently running.", italics: true, size: 20 })] }), new Paragraph({ children: [] }));
+  }
+
+  // vLLM
+  if (data.vllmJobs.length) {
+    children.push(sectionHeading("3. Model serving (vLLM)", HeadingLevel.HEADING_3));
+    children.push(dataTable(
+      ["ID", "Model", "User", "State", "Elapsed"],
+      data.vllmJobs.map((j) => [String(j.slurmJobId ?? "—"), j.jobName, j.unixUsername ?? "—", j.state, j.elapsedLabel]),
+    ), new Paragraph({ children: [] }));
+  }
+
+  // By cluster
+  if (data.perCluster.length > 1) {
+    children.push(sectionHeading("By cluster", HeadingLevel.HEADING_3));
+    children.push(dataTable(
+      ["Cluster", "Completed", "Failed", "Cancelled", "GPU-hours", "CPU-hours"],
+      data.perCluster.map((c) => [
+        c.clusterName, String(c.completed), String(c.failed), String(c.cancelled),
+        c.gpuHours.toFixed(1), c.cpuHours.toFixed(0),
+      ]),
+    ), new Paragraph({ children: [] }));
+  }
+
+  // Daily Summary
+  children.push(sectionHeading("Daily Summary", HeadingLevel.HEADING_2));
+
+  for (let i = 0; i < data.dailyJobHistory.length; i++) {
+    const day = data.dailyJobHistory[i];
+    children.push(
+      new Paragraph({ children: [] }),
+      sectionHeading(`${i + 1}. ${day.dayLabel}`, HeadingLevel.HEADING_3),
+    );
+
+    // Summary placeholder
+    children.push(
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: fullBorder,
+        rows: [new TableRow({
+          children: [
+            cell("Summary", true, true),
+            new TableCell({
+              children: [new Paragraph({ children: [new TextRun({ text: `<PLEASE INSERT SUMMARY FOR ${day.dayLabel}>`, color: "888888", italics: true, size: 20 })] })],
+              margins: { top: 80, bottom: 80, left: 120, right: 120 },
+            }),
+          ],
+        })],
+      }),
+      new Paragraph({ children: [] }),
+    );
+
+    // GPU chart placeholder note
+    for (const label of ["GPU Memory Used", "GPU Utilization", "GPU Average Temperature", "GPU Power Usage"]) {
+      children.push(
+        new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          borders: fullBorder,
+          rows: [new TableRow({
+            children: [
+              cell(label, true, true),
+              new TableCell({
+                children: [new Paragraph({ children: [new TextRun({ text: "[See web interface for chart]", color: "888888", italics: true, size: 20 })] })],
+                margins: { top: 80, bottom: 80, left: 120, right: 120 },
+              }),
+            ],
+          })],
+        }),
+        new Paragraph({ children: [] }),
+      );
+    }
+
+    // Job history
+    children.push(sectionHeading("Slurm Job History", HeadingLevel.HEADING_4));
+    if (day.jobs.length) {
+      children.push(dataTable(
+        ["ID", "JobName", "User", "State", "Start", "End", "Elapsed"],
+        day.jobs.map((j) => [
+          String(j.slurmJobId ?? "—"), j.jobName, j.unixUsername ?? "—",
+          j.state, j.startTime, j.endTime || "—", j.elapsedLabel,
+        ]),
+      ));
+    } else {
+      children.push(new Paragraph({ children: [new TextRun({ text: "No completed/cancelled/running jobs started this day.", italics: true, size: 20 })] }));
+    }
+    children.push(new Paragraph({ children: [] }));
+  }
+
+  // Footer
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.RIGHT,
+      children: [new TextRun({
+        text: `Generated by SlurmUI · ${new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`,
+        color: "888888",
+        size: 18,
+      })],
+    }),
+  );
+
+  const doc = new Document({
+    styles: {
+      paragraphStyles: [{
+        id: "Normal",
+        name: "Normal",
+        basedOn: "Normal",
+        run: { font: "Arial", size: 22 },
+      }],
+    },
+    sections: [{ children }],
+  });
+
+  const blob = await Packer.toBlob(doc);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `slurmui-report-${data.period.from.slice(0, 10)}-to-${data.period.to.slice(0, 10)}.docx`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
 
 export default function ReportsPage() {
   const [fromDate, setFromDate] = useState(daysAgo(30));
@@ -359,19 +725,24 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch available filter options whenever cluster changes
+  const [promData, setPromData] = useState<PromData>(null);
+  const [promLoading, setPromLoading] = useState(false);
+
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set());
+  const [docxExporting, setDocxExporting] = useState(false);
+
+  // Fetch filter options when cluster changes
   useEffect(() => {
     const params = new URLSearchParams();
     if (clusterId !== "__all__") params.set("clusterId", clusterId);
-    fetch(`/api/reports/filters?${params}`)
-      .then((r) => r.json())
-      .then(setFilterOptions)
-      .catch(() => {});
+    fetch(`/api/reports/filters?${params}`).then((r) => r.json()).then(setFilterOptions).catch(() => {});
+    setSelectedPartitions([]);
+    setPromData(null);
   }, [clusterId]);
 
+  // Fetch report data
   const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     const params = new URLSearchParams({ from: fromDate, to: toDate });
     if (clusterId !== "__all__") params.set("clusterId", clusterId);
     if (selectedPartitions.length) params.set("partitions", selectedPartitions.join(","));
@@ -383,51 +754,87 @@ export default function ReportsPage() {
       setData(await res.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load report");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   }, [fromDate, toDate, clusterId, selectedPartitions, selectedStatuses, filterUserId]);
 
   useEffect(() => { fetchReport(); }, [fetchReport]);
 
-  // Active filter count (for display)
-  const activeFilters = [
-    clusterId !== "__all__" && "cluster",
-    selectedPartitions.length > 0 && "partition",
-    selectedStatuses.length > 0 && "status",
-    filterUserId !== "__all__" && "user",
-  ].filter(Boolean).length;
+  // Fetch Prometheus data when cluster is selected
+  useEffect(() => {
+    if (clusterId === "__all__") { setPromData(null); return; }
+    let cancelled = false;
+    setPromLoading(true);
+    const start = Math.floor(new Date(fromDate).getTime() / 1000);
+    const end   = Math.floor(new Date(toDate).getTime() / 1000) + 86399;
+    const step  = promStep(fromDate, toDate);
 
-  function clearAll() {
-    setClusterId("__all__");
-    setSelectedPartitions([]);
-    setSelectedStatuses([]);
-    setFilterUserId("__all__");
-    setFromDate(daysAgo(30));
-    setToDate(today());
+    const runQuery = async (query: string): Promise<PromSeries[]> => {
+      const params = new URLSearchParams({
+        query, start: String(start), end: String(end), step: String(step),
+      });
+      const res = await fetch(`/api/clusters/${clusterId}/prometheus/api/v1/query_range?${params}`);
+      if (!res.ok) throw new Error(`Prometheus ${res.status}`);
+      const json = await res.json();
+      return json.data?.result ?? [];
+    };
+
+    Promise.all([
+      runQuery(DCGM.memUsed),
+      runQuery(DCGM.utilization),
+      runQuery(DCGM.temperature),
+      runQuery(DCGM.powerUsage),
+    ]).then(([memUsed, utilization, temperature, powerUsage]) => {
+      if (!cancelled) setPromData({ memUsed, utilization, temperature, powerUsage });
+    }).catch(() => {
+      if (!cancelled) setPromData(null);
+    }).finally(() => {
+      if (!cancelled) setPromLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [clusterId, fromDate, toDate]);
+
+  const toggleDay = (date: string) => {
+    setExpandedDays((prev) => {
+      const next = new Set(prev);
+      next.has(date) ? next.delete(date) : next.add(date);
+      return next;
+    });
+  };
+
+  function clearFilters() {
+    setClusterId("__all__"); setSelectedPartitions([]); setSelectedStatuses([]);
+    setFilterUserId("__all__"); setFromDate(daysAgo(30)); setToDate(today());
   }
 
-  const diffDays = Math.round(
-    (new Date(toDate).getTime() - new Date(fromDate).getTime()) / (1000 * 60 * 60 * 24),
+  const activeFilterCount = [
+    clusterId !== "__all__",
+    selectedPartitions.length > 0,
+    selectedStatuses.length > 0,
+    filterUserId !== "__all__",
+  ].filter(Boolean).length;
+
+  const diffDays = Math.ceil(
+    (new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86400000,
   );
   const tickInterval = diffDays <= 7 ? 0 : diffDays <= 30 ? 4 : 13;
 
   const chartData = (data?.dailyJobHistory ?? []).map((d) => ({
-    label: fmtDate(d.date),
-    completed: d.completed,
-    failed: d.failed,
-    cancelled: d.cancelled,
-    gpuHours: d.gpuHours,
-    cpuHours: d.cpuHours,
+    label: fmtDate(d.date), completed: d.completed, failed: d.failed,
+    cancelled: d.cancelled, gpuHours: d.gpuHours, cpuHours: d.cpuHours,
   }));
-  const hasJobs = chartData.some((d) => d.completed + d.failed + d.cancelled > 0);
+  const hasJobs    = chartData.some((d) => d.completed + d.failed + d.cancelled > 0);
   const hasCompute = chartData.some((d) => d.gpuHours > 0 || d.cpuHours > 0);
 
-  const weekLabel = data ? fmtWeekLabel(data.period.from, data.period.to) : "";
+  const weekLabel  = data ? fmtWeekLabel(data.period.from, data.period.to) : "";
   const reportTitle = data ? `${data.clusterName} Weekly Report (${weekLabel})` : "";
+  const bullets    = data ? summaryBullets(data) : [];
   const activeJobIds = (data?.currentlyRunning ?? []).map((j) => j.slurmJobId).filter(Boolean) as number[];
 
-  // Partition → nodes tooltip info
+  const selectedUserName = filterUserId !== "__all__"
+    ? (filterOptions.users.find((u) => u.id === filterUserId)?.unixUsername ?? filterUserId)
+    : undefined;
+
   const partitionNodeInfo = selectedPartitions.length > 0
     ? selectedPartitions.flatMap((p) => {
         const nodes = filterOptions.partitionNodes[p];
@@ -435,104 +842,87 @@ export default function ReportsPage() {
       }).join(" | ")
     : null;
 
-  const selectedUserName = filterUserId !== "__all__"
-    ? filterOptions.users.find((u) => u.id === filterUserId)?.unixUsername ?? filterUserId
-    : undefined;
-
-  const vllmSectionNum = 3;
+  const vllmSectionNum   = 3;
   const clusterSectionNum = (data?.vllmJobs.length ?? 0) > 0 ? vllmSectionNum + 1 : vllmSectionNum;
 
   return (
     <div className="space-y-4">
 
-      {/* ── Screen UI (hidden in print) ─────────────────────────────── */}
+      {/* ════════ SCREEN UI (hidden in print) ════════════════════════════ */}
       <div className="print:hidden space-y-4">
 
-        {/* Header row */}
+        {/* Header */}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold">Reports</h1>
             <p className="text-muted-foreground">Historical job statistics</p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => window.print()} disabled={loading || !data}>
-            <Printer className="h-4 w-4 mr-2" />
-            Export PDF
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline" size="sm"
+              onClick={async () => {
+                if (!data) return;
+                setDocxExporting(true);
+                await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName).catch(() => {});
+                setDocxExporting(false);
+              }}
+              disabled={loading || !data || docxExporting}
+            >
+              <FileText className="h-4 w-4 mr-2" />
+              {docxExporting ? "Generating…" : "Export DOCX"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => window.print()} disabled={loading || !data}>
+              <Printer className="h-4 w-4 mr-2" />
+              Export PDF
+            </Button>
+          </div>
         </div>
 
         {/* Filter bar */}
         <Card className="px-4 py-3">
           <div className="space-y-3">
-            {/* Date range row */}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted-foreground font-medium w-10">From</span>
-              <input
-                type="date"
-                value={fromDate}
-                max={toDate}
+              <input type="date" value={fromDate} max={toDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="h-8 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+                className="h-8 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" />
               <span className="text-xs text-muted-foreground font-medium">To</span>
-              <input
-                type="date"
-                value={toDate}
-                min={fromDate}
-                max={today()}
-                onChange={(e) => setToDate(e.target.value)}
-                className="h-8 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-              />
+              <input type="date" value={toDate} min={fromDate} max={today()}
+                onChange={(e) => setToDate(capToday(e.target.value))}
+                className="h-8 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring" />
               <div className="flex flex-wrap gap-1 ml-1">
                 {DATE_PRESETS.map((p) => (
-                  <button
-                    key={p.label}
-                    onClick={() => { setFromDate(p.from()); setToDate(p.to()); }}
-                    className="h-7 rounded px-2 text-xs border border-border hover:bg-accent hover:text-accent-foreground transition-colors"
-                  >
+                  <button key={p.label}
+                    onClick={() => { setFromDate(p.from()); setToDate(capToday(p.to())); }}
+                    className="h-7 rounded px-2 text-xs border border-border hover:bg-accent hover:text-accent-foreground transition-colors">
                     {p.label}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Dimension filters row */}
             <div className="flex flex-wrap items-center gap-2">
-              {/* Cluster */}
               {data && data.clusters.length > 0 && (
-                <Select value={clusterId} onValueChange={(v) => {
-                  setClusterId(v);
-                  setSelectedPartitions([]); // reset partition when cluster changes
-                }}>
+                <Select value={clusterId} onValueChange={setClusterId}>
                   <SelectTrigger className="h-8 w-auto min-w-36 text-sm font-normal">
                     <span className="text-muted-foreground text-xs mr-1">Cluster:</span>
                     <SelectValue placeholder="All" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__all__">All clusters</SelectItem>
-                    {data.clusters.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                    ))}
+                    {data.clusters.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               )}
 
-              {/* Partition */}
-              <MultiSelect
-                label="Partition"
+              <MultiSelect label="Partition"
                 options={filterOptions.partitions.map((p) => ({ value: p, label: p }))}
-                selected={selectedPartitions}
-                onChange={setSelectedPartitions}
-              />
+                selected={selectedPartitions} onChange={setSelectedPartitions} />
 
-              {/* Status */}
-              <MultiSelect
-                label="Status"
+              <MultiSelect label="Status"
                 options={ALL_STATUSES.map((s) => ({ value: s, label: s }))}
-                selected={selectedStatuses}
-                onChange={(v) => setSelectedStatuses(v as JobStatus[])}
-              />
+                selected={selectedStatuses} onChange={(v) => setSelectedStatuses(v as JobStatus[])} />
 
-              {/* User (admin — populated from filter options) */}
               {filterOptions.users.length > 1 && (
                 <Select value={filterUserId} onValueChange={setFilterUserId}>
                   <SelectTrigger className="h-8 w-auto min-w-36 text-sm font-normal">
@@ -542,48 +932,31 @@ export default function ReportsPage() {
                   <SelectContent>
                     <SelectItem value="__all__">All users</SelectItem>
                     {filterOptions.users.map((u) => (
-                      <SelectItem key={u.id} value={u.id}>
-                        {u.unixUsername ?? u.name ?? u.id}
-                      </SelectItem>
+                      <SelectItem key={u.id} value={u.id}>{u.unixUsername ?? u.name ?? u.id}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               )}
 
-              {/* Clear all */}
-              {activeFilters > 0 && (
-                <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground gap-1" onClick={clearAll}>
+              {activeFilterCount > 0 && (
+                <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground gap-1" onClick={clearFilters}>
                   <X className="h-3 w-3" />
-                  Clear filters
-                  <Badge variant="secondary" className="ml-1 h-4 px-1 text-[10px]">{activeFilters}</Badge>
+                  Clear
+                  <Badge variant="secondary" className="ml-1 h-4 px-1 text-[10px]">{activeFilterCount}</Badge>
                 </Button>
               )}
             </div>
 
-            {/* Node info (informational — derived from partition selection) */}
             {partitionNodeInfo && (
               <p className="text-xs text-muted-foreground">
-                <span className="font-medium">Nodes in selected partition(s):</span> {partitionNodeInfo}
-              </p>
-            )}
-            {selectedPartitions.length > 0 && !partitionNodeInfo && (
-              <p className="text-xs text-muted-foreground">
-                Node assignment data not available in cluster config for selected partition(s).
+                <span className="font-medium">Nodes in partition(s):</span> {partitionNodeInfo}
               </p>
             )}
           </div>
         </Card>
 
-        {error && (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            {error}
-          </div>
-        )}
-        {loading && !data && (
-          <div className="flex items-center justify-center py-20 text-muted-foreground text-sm">
-            Loading report…
-          </div>
-        )}
+        {error && <div className="rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>}
+        {loading && !data && <div className="flex items-center justify-center py-20 text-muted-foreground text-sm">Loading report…</div>}
 
         {data && (
           <>
@@ -591,46 +964,32 @@ export default function ReportsPage() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
               <StatCard label="Total jobs" value={data.summary.totalJobs} />
               <StatCard label="Completed" value={data.summary.completed} tone="positive" />
-              <StatCard
-                label="Failed / Cancelled"
+              <StatCard label="Failed / Cancelled"
                 value={data.summary.failed + data.summary.cancelled}
                 tone={data.summary.failed + data.summary.cancelled > 0 ? "negative" : "muted"}
                 sub={data.summary.failed + data.summary.cancelled > 0
-                  ? `${data.summary.failed} failed, ${data.summary.cancelled} cancelled`
-                  : undefined}
-              />
-              <StatCard
-                label="Success rate"
+                  ? `${data.summary.failed} failed, ${data.summary.cancelled} cancelled` : undefined} />
+              <StatCard label="Success rate"
                 value={data.summary.successRate !== null ? `${data.summary.successRate}%` : "—"}
                 tone={data.summary.successRate === null ? "muted"
                   : data.summary.successRate >= 80 ? "positive"
                   : data.summary.successRate >= 50 ? "warning" : "negative"}
                 sub={data.summary.completed + data.summary.failed + data.summary.cancelled > 0
-                  ? `${data.summary.completed}/${data.summary.completed + data.summary.failed + data.summary.cancelled} finished`
-                  : undefined}
-              />
-              <StatCard
-                label="GPU-hours"
+                  ? `${data.summary.completed}/${data.summary.completed + data.summary.failed + data.summary.cancelled} finished` : undefined} />
+              <StatCard label="GPU-hours"
                 value={data.summary.gpuHours > 0 ? data.summary.gpuHours.toFixed(1) : "0"}
-                sub={`${data.summary.cpuHours.toFixed(0)} CPU-hours`}
-              />
-              <StatCard
-                label="Median duration"
+                sub={`${data.summary.cpuHours.toFixed(0)} CPU-hours`} />
+              <StatCard label="Median duration"
                 value={data.summary.medianDurationSec !== null ? fmtDuration(data.summary.medianDurationSec) : "—"}
-                sub={data.summary.avgDurationSec !== null ? `avg ${fmtDuration(data.summary.avgDurationSec)}` : undefined}
-              />
+                sub={data.summary.avgDurationSec !== null ? `avg ${fmtDuration(data.summary.avgDurationSec)}` : undefined} />
             </div>
 
-            {/* Charts */}
+            {/* Aggregate charts */}
             <div className="grid gap-4 lg:grid-cols-2">
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium">Daily job activity</CardTitle>
-                </CardHeader>
+                <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Daily job activity</CardTitle></CardHeader>
                 <CardContent>
-                  {!hasJobs ? (
-                    <p className="py-8 text-center text-sm text-muted-foreground">No finished jobs in this period.</p>
-                  ) : (
+                  {!hasJobs ? <p className="py-8 text-center text-sm text-muted-foreground">No finished jobs in this period.</p> : (
                     <div className="h-52 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -639,7 +998,7 @@ export default function ReportsPage() {
                           <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12 }} />
                           <Legend wrapperStyle={{ fontSize: 11 }} />
                           <Area type="monotone" dataKey="completed" name="Completed" stackId="1" stroke="var(--chart-2)" fill="var(--chart-2)" fillOpacity={0.25} strokeWidth={2} />
-                          <Area type="monotone" dataKey="failed" name="Failed" stackId="1" stroke="var(--destructive)" fill="var(--destructive)" fillOpacity={0.25} strokeWidth={2} />
+                          <Area type="monotone" dataKey="failed"    name="Failed"    stackId="1" stroke="var(--destructive)" fill="var(--destructive)" fillOpacity={0.25} strokeWidth={2} />
                           <Area type="monotone" dataKey="cancelled" name="Cancelled" stackId="1" stroke="var(--chart-1)" fill="var(--chart-1)" fillOpacity={0.25} strokeWidth={2} />
                         </AreaChart>
                       </ResponsiveContainer>
@@ -647,15 +1006,10 @@ export default function ReportsPage() {
                   )}
                 </CardContent>
               </Card>
-
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium">Compute consumed</CardTitle>
-                </CardHeader>
+                <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Compute consumed</CardTitle></CardHeader>
                 <CardContent>
-                  {!hasCompute ? (
-                    <p className="py-8 text-center text-sm text-muted-foreground">No compute usage recorded.</p>
-                  ) : (
+                  {!hasCompute ? <p className="py-8 text-center text-sm text-muted-foreground">No compute usage recorded.</p> : (
                     <div className="h-52 w-full">
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -676,9 +1030,7 @@ export default function ReportsPage() {
             {/* Per-cluster table */}
             {data.perCluster.length > 0 && (
               <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm font-medium">By cluster</CardTitle>
-                </CardHeader>
+                <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">By cluster</CardTitle></CardHeader>
                 <CardContent>
                   <Table>
                     <TableHeader>
@@ -695,7 +1047,7 @@ export default function ReportsPage() {
                     <TableBody>
                       {data.perCluster.map((c) => {
                         const total = c.completed + c.failed + c.cancelled;
-                        const rate = total > 0 ? Math.round((c.completed / total) * 100) : null;
+                        const rate  = total > 0 ? Math.round((c.completed / total) * 100) : null;
                         return (
                           <TableRow key={c.clusterName}>
                             <TableCell className="font-mono font-medium">{c.clusterName}</TableCell>
@@ -713,30 +1065,122 @@ export default function ReportsPage() {
                 </CardContent>
               </Card>
             )}
+
+            {/* Daily breakdown (expandable per-day sections) */}
+            <div className="space-y-2">
+              <h2 className="text-lg font-semibold">Daily breakdown</h2>
+              {promLoading && <p className="text-xs text-muted-foreground">Loading Prometheus data…</p>}
+              {clusterId === "__all__" && <p className="text-xs text-muted-foreground">Select a specific cluster to see GPU metrics.</p>}
+
+              {data.dailyJobHistory.map((day, i) => {
+                const expanded = expandedDays.has(day.date);
+                const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, 1024) : null; // MiB→GiB
+                const utilCd = promData ? buildDayChartData(promData.utilization, day.date) : null;
+                const tempCd = promData ? buildDayChartData(promData.temperature, day.date) : null;
+                const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date) : null;
+                const memIds  = promData ? gpuIds(promData.memUsed) : [];
+                const utilIds = promData ? gpuIds(promData.utilization) : [];
+                const tempIds = promData ? gpuIds(promData.temperature) : [];
+                const powIds  = promData ? gpuIds(promData.powerUsage) : [];
+
+                return (
+                  <Card key={day.date}>
+                    <button className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-accent/30 transition-colors"
+                      onClick={() => toggleDay(day.date)}>
+                      {expanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
+                      <span className="font-medium text-sm">{i + 1}. {day.dayLabel}</span>
+                      <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                        {day.completed > 0 && <span className="text-chart-2 mr-2">{day.completed} completed</span>}
+                        {day.failed > 0 && <span className="text-destructive mr-2">{day.failed} failed</span>}
+                        {day.cancelled > 0 && <span className="mr-2">{day.cancelled} cancelled</span>}
+                        {day.jobs.length === 0 && <span>no new jobs</span>}
+                      </span>
+                    </button>
+
+                    {expanded && (
+                      <CardContent className="border-t pt-4 space-y-4">
+                        {/* Summary placeholder */}
+                        <div>
+                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Summary</p>
+                          <p className="text-sm italic text-muted-foreground px-3 py-2 rounded bg-muted/40">
+                            &lt;PLEASE INSERT SUMMARY FOR {day.dayLabel}&gt;
+                          </p>
+                        </div>
+
+                        {/* GPU charts */}
+                        {(promData !== null || clusterId !== "__all__") && (
+                          <div className="grid gap-4 md:grid-cols-2">
+                            {[
+                              { label: "GPU Memory Used",        cd: memCd,  ids: memIds,  unit: " GiB" },
+                              { label: "GPU Utilization",        cd: utilCd, ids: utilIds, unit: "%" },
+                              { label: "GPU Average Temperature",cd: tempCd, ids: tempIds, unit: "°C" },
+                              { label: "GPU Power Usage",        cd: powCd,  ids: powIds,  unit: " W" },
+                            ].map(({ label, cd, ids, unit }) => (
+                              <div key={label}>
+                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">{label}</p>
+                                <GPUChart chartData={cd} ids={ids} unit={unit} />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Job history */}
+                        <div>
+                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Slurm Job History</p>
+                          {day.jobs.length === 0 ? (
+                            <p className="text-sm italic text-muted-foreground">
+                              No completed/cancelled/running jobs started this day.
+                              {activeJobIds.length > 0 && ` Still active: ${activeJobIds.join(", ")}.`}
+                            </p>
+                          ) : (
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead>ID</TableHead><TableHead>JobName</TableHead>
+                                  <TableHead>User</TableHead><TableHead>State</TableHead>
+                                  <TableHead>Start</TableHead><TableHead>End</TableHead><TableHead>Elapsed</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {day.jobs.map((j, ji) => (
+                                  <TableRow key={ji}>
+                                    <TableCell className="font-mono text-xs">{j.slurmJobId ?? "—"}</TableCell>
+                                    <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.jobName}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.unixUsername ?? "—"}</TableCell>
+                                    <TableCell className="text-xs">{j.state}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.startTime}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.endTime || "—"}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.elapsedLabel}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          )}
+                        </div>
+                      </CardContent>
+                    )}
+                  </Card>
+                );
+              })}
+            </div>
           </>
         )}
       </div>
 
-      {/* ── Print-only document ─────────────────────────────────────── */}
+      {/* ════════ PRINT-ONLY DOCUMENT ══════════════════════════════════ */}
       {data && (
-        <div
-          className="hidden print:block report-document"
-          style={{ fontFamily: "Arial, sans-serif", color: "#111", lineHeight: 1.55 }}
-        >
+        <div className="hidden print:block report-document"
+          style={{ fontFamily: "Arial, sans-serif", color: "#111", lineHeight: 1.55 }}>
+
           <h1 style={{ fontSize: "22px", fontWeight: "bold", borderBottom: "2px solid #111", paddingBottom: "8px", marginBottom: "20px" }}>
             {reportTitle}
           </h1>
 
-          <PMetaTable
-            cluster={data.clusterName}
-            week={weekLabel}
-            filters={{ partitions: selectedPartitions, statuses: selectedStatuses, userName: selectedUserName }}
-          />
+          <PMetaTable cluster={data.clusterName} week={weekLabel}
+            partitions={selectedPartitions} statuses={selectedStatuses} userName={selectedUserName} />
 
-          <h2 style={{ fontSize: "17px", fontWeight: "bold", marginTop: "28px", marginBottom: "12px" }}>
-            Weekly summary
-          </h2>
-          <PSummaryBox text={buildSummaryText(data)} />
+          <h2 style={{ fontSize: "17px", fontWeight: "bold", marginTop: "28px", marginBottom: "12px" }}>Weekly summary</h2>
+          <PSummaryBullets bullets={bullets} />
 
           <h3 style={{ fontSize: "14px", fontWeight: "bold", marginTop: "18px", marginBottom: "8px" }}>1. Users this week</h3>
           <PUsersTable users={data.topUsers} />
@@ -746,19 +1190,22 @@ export default function ReportsPage() {
 
           {data.vllmJobs.length > 0 && (
             <>
-              <h3 style={{ fontSize: "14px", fontWeight: "bold", marginTop: "18px", marginBottom: "8px" }}>{vllmSectionNum}. Model serving (vLLM)</h3>
+              <h3 style={{ fontSize: "14px", fontWeight: "bold", marginTop: "18px", marginBottom: "8px" }}>
+                {vllmSectionNum}. Model serving (vLLM)
+              </h3>
               <PVllmTable jobs={data.vllmJobs} />
             </>
           )}
 
           {data.perCluster.length > 1 && (
             <>
-              <h3 style={{ fontSize: "14px", fontWeight: "bold", marginTop: "18px", marginBottom: "8px" }}>{clusterSectionNum}. By cluster</h3>
+              <h3 style={{ fontSize: "14px", fontWeight: "bold", marginTop: "18px", marginBottom: "8px" }}>
+                {clusterSectionNum}. By cluster
+              </h3>
               <table style={TABLE}>
                 <thead><tr>
-                  <th style={TH}>Cluster</th><th style={TH}>Completed</th>
-                  <th style={TH}>Failed</th><th style={TH}>Cancelled</th>
-                  <th style={TH}>GPU-hours</th><th style={TH}>CPU-hours</th>
+                  <th style={TH}>Cluster</th><th style={TH}>Completed</th><th style={TH}>Failed</th>
+                  <th style={TH}>Cancelled</th><th style={TH}>GPU-hours</th><th style={TH}>CPU-hours</th>
                 </tr></thead>
                 <tbody>{data.perCluster.map((c) => (
                   <tr key={c.clusterName}>
@@ -778,22 +1225,49 @@ export default function ReportsPage() {
             Daily Summary
           </h2>
 
-          {data.dailyJobHistory.map((day, i) => (
-            <div key={day.date} style={{ marginTop: "24px" }}>
-              <h3 style={{ fontSize: "15px", fontWeight: "bold", marginBottom: "10px" }}>{i + 1}. {day.dayLabel}</h3>
-              <h4 style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "6px" }}>a. Summary</h4>
-              <PSummaryBox text={buildDaySummaryText(day, activeJobIds)} />
-              <h4 style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "6px" }}>b. Slurm Job History</h4>
-              {day.jobs.length === 0 ? (
-                <p style={{ color: "#555", fontSize: "13px", fontStyle: "italic", marginBottom: "12px" }}>
-                  No completed/cancelled/running jobs started this day.
-                  {activeJobIds.length > 0 && ` Still active: ${activeJobIds.join(", ")}.`}
-                </p>
-              ) : (
-                <PJobHistoryTable jobs={day.jobs} />
-              )}
-            </div>
-          ))}
+          {data.dailyJobHistory.map((day, i) => {
+            const memCd  = promData ? buildDayChartData(promData.memUsed,     day.date, 1024) : null;
+            const utilCd = promData ? buildDayChartData(promData.utilization, day.date) : null;
+            const tempCd = promData ? buildDayChartData(promData.temperature, day.date) : null;
+            const powCd  = promData ? buildDayChartData(promData.powerUsage,  day.date) : null;
+            const memIds  = promData ? gpuIds(promData.memUsed) : [];
+            const utilIds = promData ? gpuIds(promData.utilization) : [];
+            const tempIds = promData ? gpuIds(promData.temperature) : [];
+            const powIds  = promData ? gpuIds(promData.powerUsage) : [];
+
+            return (
+              <div key={day.date} style={{ marginTop: "24px" }}>
+                <h3 style={{ fontSize: "15px", fontWeight: "bold", marginBottom: "10px" }}>
+                  {i + 1}. {day.dayLabel}
+                </h3>
+
+                <h4 style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "6px" }}>a. Summary</h4>
+                <table style={TABLE}><tbody>
+                  <tr>
+                    <td style={{ ...TH, width: "110px", verticalAlign: "top" }}>Summary</td>
+                    <td style={{ ...TD, color: "#888", fontStyle: "italic" }}>
+                      &lt;PLEASE INSERT SUMMARY FOR {day.dayLabel}&gt;
+                    </td>
+                  </tr>
+                </tbody></table>
+
+                <PGPUChart label="GPU Memory Used"          chartData={memCd}  ids={memIds}  unit=" GiB" />
+                <PGPUChart label="GPU Utilization"          chartData={utilCd} ids={utilIds} unit="%" />
+                <PGPUChart label="GPU Avg Temperature"      chartData={tempCd} ids={tempIds} unit="°C" />
+                <PGPUChart label="GPU Power Usage"          chartData={powCd}  ids={powIds}  unit=" W" />
+
+                <h4 style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "6px" }}>b. Slurm Job History</h4>
+                {day.jobs.length === 0 ? (
+                  <p style={{ color: "#555", fontSize: "13px", fontStyle: "italic", marginBottom: "12px" }}>
+                    No completed/cancelled/running jobs started this day.
+                    {activeJobIds.length > 0 && ` Still active: ${activeJobIds.join(", ")}.`}
+                  </p>
+                ) : (
+                  <PJobHistoryTable jobs={day.jobs} />
+                )}
+              </div>
+            );
+          })}
 
           <p style={{ marginTop: "48px", fontSize: "11px", color: "#888", borderTop: "1px solid #ddd", paddingTop: "12px", textAlign: "right" }}>
             Generated by SlurmUI ·{" "}
