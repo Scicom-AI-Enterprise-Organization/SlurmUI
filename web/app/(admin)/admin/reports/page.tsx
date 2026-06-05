@@ -469,6 +469,94 @@ function PGPUChart({ label, chartData, ids, unit }: {
 
 // ── DOCX export ───────────────────────────────────────────────────────────
 
+// Render a line chart to a PNG using Canvas 2D — no external deps, works fully
+// client-side. Returns a Uint8Array ready to embed in a docx ImageRun.
+async function generateChartPng(
+  chartData: Record<string, string | number>[] | null,
+  ids: string[],
+  unit: string,
+): Promise<Uint8Array | null> {
+  if (!chartData || chartData.length === 0 || ids.length === 0) return null;
+
+  const W = 560, H = 175;
+  const PAD = { top: 16, right: 16, bottom: 38, left: 54 };
+  const cW = W - PAD.left - PAD.right;
+  const cH = H - PAD.top - PAD.bottom;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W * 2; canvas.height = H * 2; // @2x for sharpness
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(2, 2);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+
+  // Collect all numeric values for y-scale
+  const allVals: number[] = [];
+  for (const id of ids)
+    for (const row of chartData)
+      if (typeof row[id] === "number") allVals.push(row[id] as number);
+  if (!allVals.length) return null;
+
+  const yMax = Math.max(...allVals) * 1.1 || 1;
+  const n = chartData.length;
+  const px = (i: number) => PAD.left + (i / Math.max(n - 1, 1)) * cW;
+  const py = (v: number) => PAD.top + cH - (v / yMax) * cH;
+
+  // Grid + Y-axis labels
+  ctx.font = "9px Arial";
+  for (let g = 0; g <= 4; g++) {
+    const v = yMax - (g / 4) * yMax;
+    const y = PAD.top + (g / 4) * cH;
+    ctx.strokeStyle = "#e5e7eb"; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + cW, y); ctx.stroke();
+    ctx.fillStyle = "#9ca3af"; ctx.textAlign = "right";
+    ctx.fillText(`${v < 10 ? v.toFixed(1) : Math.round(v)}${unit}`, PAD.left - 4, y + 3);
+  }
+
+  // X-axis labels
+  const xStep = Math.max(1, Math.floor(n / 7));
+  ctx.fillStyle = "#9ca3af"; ctx.font = "8px Arial"; ctx.textAlign = "center";
+  for (let i = 0; i < n; i += xStep)
+    ctx.fillText(String(chartData[i].time ?? ""), px(i), PAD.top + cH + 12);
+
+  // Series lines
+  for (let si = 0; si < ids.length; si++) {
+    const id = ids[si];
+    ctx.strokeStyle = GPU_COLORS[si % GPU_COLORS.length];
+    ctx.lineWidth = 1.5; ctx.beginPath();
+    let first = true;
+    for (let i = 0; i < n; i++) {
+      const v = chartData[i][id];
+      if (typeof v !== "number") continue;
+      first ? ctx.moveTo(px(i), py(v)) : ctx.lineTo(px(i), py(v));
+      first = false;
+    }
+    ctx.stroke();
+  }
+
+  // Legend
+  ctx.font = "8px Arial"; ctx.textAlign = "left";
+  let lx = PAD.left;
+  const legendY = H - 8;
+  for (let si = 0; si < ids.length; si++) {
+    if (lx + 90 > W) break;
+    ctx.fillStyle = GPU_COLORS[si % GPU_COLORS.length];
+    ctx.fillRect(lx, legendY - 4, 14, 3);
+    ctx.fillStyle = "#374151";
+    const label = ids[si];
+    ctx.fillText(label, lx + 17, legendY);
+    lx += 17 + ctx.measureText(label).width + 12;
+  }
+
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      if (!blob) { resolve(null); return; }
+      blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf)));
+    }, "image/png");
+  });
+}
+
 async function exportDocx(
   data: ReportData,
   weekLabel: string,
@@ -476,11 +564,12 @@ async function exportDocx(
   selectedPartitions: string[],
   selectedStatuses: string[],
   selectedUserName: string | undefined,
+  promData: PromData,
 ) {
   // Dynamic import so docx isn't bundled unless needed
   const {
     Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-    HeadingLevel, WidthType, AlignmentType, BorderStyle,
+    HeadingLevel, WidthType, AlignmentType, BorderStyle, ImageRun,
   } = await import("docx");
 
   function cell(text: string, bold = false, shade = false) {
@@ -641,8 +730,19 @@ async function exportDocx(
       new Paragraph({ children: [] }),
     );
 
-    // GPU chart placeholder note
-    for (const label of ["GPU Memory Used", "GPU Utilization", "GPU Average Temperature", "GPU Power Usage"]) {
+    // GPU charts — render to PNG via Canvas and embed as images
+    const chartConfigs = [
+      { label: "GPU Memory Used",         series: promData?.memUsed,     divisor: 1024, unit: " GiB" },
+      { label: "GPU Utilization",         series: promData?.utilization, divisor: 1,    unit: "%" },
+      { label: "GPU Average Temperature", series: promData?.temperature, divisor: 1,    unit: "°C" },
+      { label: "GPU Power Usage",         series: promData?.powerUsage,  divisor: 1,    unit: " W" },
+    ];
+
+    for (const { label, series, divisor, unit } of chartConfigs) {
+      const cd   = series ? buildDayChartData(series, day.date, divisor) : null;
+      const ids  = series ? gpuIds(series) : [];
+      const png  = await generateChartPng(cd, ids, unit);
+
       children.push(
         new Table({
           width: { size: 100, type: WidthType.PERCENTAGE },
@@ -651,7 +751,11 @@ async function exportDocx(
             children: [
               cell(label, true, true),
               new TableCell({
-                children: [new Paragraph({ children: [new TextRun({ text: "[See web interface for chart]", color: "888888", italics: true, size: 20 })] })],
+                children: [new Paragraph({
+                  children: png
+                    ? [new ImageRun({ data: png, transformation: { width: 480, height: 150 } })]
+                    : [new TextRun({ text: "No Prometheus data available for this day.", color: "888888", italics: true, size: 20 })],
+                })],
                 margins: { top: 80, bottom: 80, left: 120, right: 120 },
               }),
             ],
@@ -863,7 +967,7 @@ export default function ReportsPage() {
               onClick={async () => {
                 if (!data) return;
                 setDocxExporting(true);
-                await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName).catch(() => {});
+                await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName, promData).catch(() => {});
                 setDocxExporting(false);
               }}
               disabled={loading || !data || docxExporting}
