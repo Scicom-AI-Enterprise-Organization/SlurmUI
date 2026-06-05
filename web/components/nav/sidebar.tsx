@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   BookOpen,
+  BarChart2,
   Briefcase,
   Code2,
   Cpu,
@@ -49,6 +50,7 @@ const ADMIN: Item[] = [
   { label: "Organization", href: "/admin/organization", icon: Users },
   { label: "GPU Providers", href: "/admin/gpu-providers", icon: Cpu },
   { label: "Audit log", href: "/admin/audit-log", icon: ScrollText },
+  { label: "Reports", href: "/admin/reports", icon: BarChart2 },
   { label: "Settings", href: "/admin/settings", icon: Settings },
 ];
 

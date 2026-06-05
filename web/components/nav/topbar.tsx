@@ -11,6 +11,7 @@ export type Crumb = { label: string; href?: string };
 const TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/jobs": "Jobs",
+  "/admin/reports": "Reports",
   "/explain": "Learn Slurm",
   "/profile": "Profile",
   "/profile/api-tokens": "API tokens",
