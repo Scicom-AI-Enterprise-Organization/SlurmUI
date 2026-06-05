@@ -753,7 +753,7 @@ async function exportDocx(
               new TableCell({
                 children: [new Paragraph({
                   children: png
-                    ? [new ImageRun({ data: png, transformation: { width: 480, height: 150 } })]
+                    ? [new ImageRun({ type: "png", data: png, transformation: { width: 480, height: 150 } })]
                     : [new TextRun({ text: "No Prometheus data available for this day.", color: "888888", italics: true, size: 20 })],
                 })],
                 margins: { top: 80, bottom: 80, left: 120, right: 120 },
