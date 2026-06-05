@@ -579,6 +579,7 @@ async function exportDocx(
   selectedStatuses: string[],
   selectedUserName: string | undefined,
   promData: PromData,
+  promMeta: MetricFamily,
 ) {
   // Dynamic import so docx isn't bundled unless needed
   const {
@@ -1000,7 +1001,7 @@ export default function ReportsPage() {
               onClick={async () => {
                 if (!data) return;
                 setDocxExporting(true);
-                await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName, promData).catch(() => {});
+                await exportDocx(data, weekLabel, bullets, selectedPartitions, selectedStatuses, selectedUserName, promData, promMeta).catch(() => {});
                 setDocxExporting(false);
               }}
               disabled={loading || !data || docxExporting || promLoading}
