@@ -243,7 +243,7 @@ function GPUChart({
           <YAxis tick={{ fontSize: 9 }} axisLine={false} tickLine={false} width={34} unit={unit} />
           <Tooltip
             contentStyle={{ fontSize: 10, padding: "4px 8px" }}
-            formatter={(v: number) => [`${v}${unit}`, undefined]}
+            formatter={(v) => [`${v}${unit}`]}
           />
           <Legend wrapperStyle={{ fontSize: 10 }} />
           {ids.map((id, i) => (
