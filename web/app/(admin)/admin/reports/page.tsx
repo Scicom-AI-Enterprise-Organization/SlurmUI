@@ -197,13 +197,24 @@ function promStep(fromDate: string, toDate: string): number {
   return 7200;                 // 2-h for 90d+
 }
 
+// Derive a stable, short, unique GPU label from a Prometheus series.
+// Priority: index (nvidia_smi exporter) → gpu (dcgm exporter) → positional fallback.
+function gpuLabel(s: PromSeries, fallbackIdx: number): string {
+  const v = s.metric.index ?? s.metric.gpu;
+  if (v !== undefined) return `GPU ${v}`;
+  // uuid is a long string — shorten to last 4 hex chars for readability
+  if (s.metric.uuid) return `GPU ${s.metric.uuid.slice(-4)}`;
+  return `GPU ${fallbackIdx}`;
+}
+
 function buildDayChartData(series: PromSeries[], dateStr: string, divisor = 1) {
-  const dayStart = Math.floor(new Date(dateStr + "T00:00:00").getTime() / 1000);
+  // Use UTC day boundaries so data aligns regardless of browser timezone.
+  const dayStart = Math.floor(new Date(dateStr + "T00:00:00Z").getTime() / 1000);
   const dayEnd   = dayStart + 86400;
 
   const gpus = series
-    .map((s) => ({
-      id: `GPU ${s.metric.gpu ?? s.metric.uuid ?? "?"}`,
+    .map((s, si) => ({
+      id: gpuLabel(s, si),
       points: s.values
         .filter(([t]) => t >= dayStart && t < dayEnd)
         .map(([t, v]) => ({ ts: t, value: +(parseFloat(v) / divisor).toFixed(2) })),
@@ -212,12 +223,16 @@ function buildDayChartData(series: PromSeries[], dateStr: string, divisor = 1) {
 
   if (!gpus.length) return null;
 
-  const allTs = [...new Set(gpus.flatMap((g) => g.points.map((p) => p.ts)))].sort((a, b) => a - b);
+  // Deduplicate series with the same label (shouldn't happen, but guard it)
+  const seen = new Set<string>();
+  const uniqueGpus = gpus.filter((g) => { if (seen.has(g.id)) return false; seen.add(g.id); return true; });
+
+  const allTs = [...new Set(uniqueGpus.flatMap((g) => g.points.map((p) => p.ts)))].sort((a, b) => a - b);
   return allTs.map((ts) => {
     const row: Record<string, string | number> = {
       time: new Date(ts * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
     };
-    for (const g of gpus) {
+    for (const g of uniqueGpus) {
       const pt = g.points.find((p) => p.ts === ts);
       if (pt) row[g.id] = pt.value;
     }
@@ -226,7 +241,7 @@ function buildDayChartData(series: PromSeries[], dateStr: string, divisor = 1) {
 }
 
 function gpuIds(series: PromSeries[]) {
-  return series.map((s) => `GPU ${s.metric.gpu ?? s.metric.uuid ?? "?"}`);
+  return series.map((s, i) => gpuLabel(s, i));
 }
 
 // ── GPUChart (shared screen + print) ─────────────────────────────────────
@@ -235,7 +250,7 @@ function GPUChart({
   chartData,
   ids,
   unit,
-  height = 140,
+  height = 180,
 }: {
   chartData: ReturnType<typeof buildDayChartData>;
   ids: string[];
@@ -259,7 +274,7 @@ function GPUChart({
             contentStyle={{ fontSize: 10, padding: "4px 8px" }}
             formatter={(v) => [`${v}${unit}`]}
           />
-          <Legend wrapperStyle={{ fontSize: 10 }} />
+          <Legend wrapperStyle={{ fontSize: 9 }} layout="horizontal" />
           {ids.map((id, i) => (
             <Line key={id} dataKey={id} stroke={GPU_COLORS[i % GPU_COLORS.length]}
               dot={false} strokeWidth={1.5} isAnimationActive={false} />
@@ -456,19 +471,18 @@ function PGPUChart({ label, chartData, ids, unit }: {
           <td style={{ ...TH, width: "130px", verticalAlign: "top" }}>{label}</td>
           <td style={{ ...TD, padding: "4px" }}>
             {chartData ? (
-              <div style={{ height: 130, width: "100%" }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                    <XAxis dataKey="time" tick={{ fontSize: 8 }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 8 }} axisLine={false} tickLine={false} width={30} unit={unit} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} />
-                    {ids.map((id, i) => (
-                      <Line key={id} dataKey={id} stroke={GPU_COLORS[i % GPU_COLORS.length]}
-                        dot={false} strokeWidth={1} isAnimationActive={false} />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+              // Fixed pixel dimensions — ResponsiveContainer needs a rendered
+              // parent width which is 0 in the hidden print:block context.
+              <LineChart width={520} height={140} data={chartData}
+                margin={{ top: 4, right: 8, left: 0, bottom: 20 }}>
+                <XAxis dataKey="time" tick={{ fontSize: 8 }} interval="preserveStartEnd" axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 8 }} axisLine={false} tickLine={false} width={34} unit={unit} />
+                <Legend wrapperStyle={{ fontSize: 8 }} />
+                {ids.map((id, i) => (
+                  <Line key={id} dataKey={id} stroke={GPU_COLORS[i % GPU_COLORS.length]}
+                    dot={false} strokeWidth={1} isAnimationActive={false} />
+                ))}
+              </LineChart>
             ) : (
               <span style={{ fontSize: "11px", color: "#888", fontStyle: "italic" }}>
                 No Prometheus data available for this day.
