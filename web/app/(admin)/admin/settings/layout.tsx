@@ -1,53 +1,8 @@
-"use client";
-
-import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { cn } from "@/lib/utils";
-import { Key, GitBranch, Bell, GitCommit } from "lucide-react";
-
-const sections = [
-  { href: "/admin/settings/ssh-keys", label: "SSH Keys", icon: Key },
-  { href: "/admin/settings/alerts", label: "Alerts", icon: Bell },
-  { href: "/admin/settings/git-sync", label: "Git Sync", icon: GitBranch },
-  { href: "/admin/settings/gitops-jobs", label: "Git Jobs", icon: GitCommit },
-];
-
+// Each subsection under /admin/settings/ (ssh-keys, alerts, git-sync,
+// gitops-jobs) is now a direct destination from the main sidebar — the
+// old sub-sidebar + "Settings" wrapper title duplicated what's already
+// there, so this file becomes a thin pass-through. Each subpage owns its
+// own heading + chrome.
 export default function SettingsLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Settings</h1>
-        <p className="text-muted-foreground mt-1">Global admin configuration</p>
-      </div>
-
-      <div className="grid gap-6 md:grid-cols-[200px_1fr]">
-        {/* Sub sidebar */}
-        <nav className="space-y-1 self-start sticky top-4">
-          {sections.map((s) => {
-            const Icon = s.icon;
-            const active = pathname === s.href || pathname.startsWith(s.href + "/");
-            return (
-              <Link
-                key={s.href}
-                href={s.href}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
-                  active
-                    ? "bg-muted text-foreground font-medium"
-                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                )}
-              >
-                <Icon className="h-4 w-4" />
-                {s.label}
-              </Link>
-            );
-          })}
-        </nav>
-
-        <div className="min-w-0">{children}</div>
-      </div>
-    </div>
-  );
+  return <>{children}</>;
 }

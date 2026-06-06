@@ -6,7 +6,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -32,7 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Bell, Plus, Pencil, Trash2, Loader2, Send, AlertTriangle, CheckCircle2,
+  Plus, Pencil, Trash2, Loader2, Send, AlertTriangle, CheckCircle2,
 } from "lucide-react";
 
 type ChannelType = "slack" | "teams" | "generic";
@@ -246,34 +245,33 @@ export function AlertsSettings() {
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Bell className="h-4 w-4" />
-          Alerts
-          <Badge variant="outline" className="font-normal">
-            {channels.length} channel{channels.length === 1 ? "" : "s"}
-          </Badge>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">
-          Route audit-log events to Slack, Teams, or any webhook. Each channel is
-          filtered by a list of events (supports <code>cluster.*</code> wildcards).
-          Empty event list = receive everything.
-        </p>
-
-        <div className="flex justify-end">
-          <Button onClick={openAdd}>
-            <Plus className="mr-2 h-4 w-4" /> Add channel
-          </Button>
+    // Page-level shape mirrors /admin/gpu-providers — h1 + description
+    // on the left, primary action button on the right, no wrapping Card.
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Alerts</h1>
+          <p className="text-muted-foreground">
+            Route audit-log events to Slack, Teams, or any webhook. Each channel
+            is filtered by a list of events (supports{" "}
+            <code className="font-mono">cluster.*</code> wildcards). Empty
+            event list = receive everything.
+          </p>
         </div>
+        <Button onClick={openAdd}>
+          <Plus className="mr-2 h-4 w-4" /> Add channel
+        </Button>
+      </div>
 
+      <div className="space-y-4">
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading...</p>
         ) : channels.length === 0 ? (
-          <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-            No alert channels yet.
+          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-12">
+            <p className="text-lg text-muted-foreground">No alert channels yet</p>
+            <Button variant="outline" className="mt-4" onClick={openAdd}>
+              Add your first channel
+            </Button>
           </div>
         ) : (
           <div className="rounded-md border">
@@ -330,7 +328,7 @@ export function AlertsSettings() {
             </Table>
           </div>
         )}
-      </CardContent>
+      </div>
 
       {/* Add / edit dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
@@ -557,6 +555,6 @@ export function AlertsSettings() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   );
 }

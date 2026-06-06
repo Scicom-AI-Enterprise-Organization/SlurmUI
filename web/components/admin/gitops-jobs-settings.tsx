@@ -2,16 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { GitCommit, Loader2, RefreshCw, Upload, History } from "lucide-react";
+import { Loader2, RefreshCw, Upload, History } from "lucide-react";
 
 interface Config {
   enabled: boolean;
@@ -202,11 +202,24 @@ export function GitopsJobsSettings() {
   const isHttps = cfg.repoUrl.startsWith("http://") || cfg.repoUrl.startsWith("https://");
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <GitCommit className="h-4 w-4" />
-          Git Jobs
+    // Page-level shape mirrors /admin/gpu-providers — h1 + description
+    // on the left, status badges on the right.
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Git Jobs</h1>
+          <p className="text-muted-foreground">
+            Two modes against the same repo. <b>Reconcile</b> scans
+            <code className="mx-1 font-mono">jobs/**/*.yaml</code> and submits
+            / cancels to match; off by default — flip the switch to start
+            the cron. <b className="ml-1">Mirror running jobs</b> pushes a
+            snapshot of every live job into{" "}
+            <code className="mx-1 font-mono">running/</code> so the repo
+            doubles as a read-only view of cluster state. Mirror runs on
+            demand regardless of the reconciler toggle.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           {cfg.enabled ? (
             <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
               Auto-reconcile on
@@ -218,20 +231,15 @@ export function GitopsJobsSettings() {
             <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Last ok</Badge>
           )}
           {cfg.lastStatus === "failed" && <Badge variant="destructive">Last failed</Badge>}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <p className="text-muted-foreground">
-          Two modes against the same repo. <b>Reconcile</b> scans
-          <code className="mx-1">jobs/**/*.yaml</code> and submits / cancels to match;
-          off by default — flip the switch to start the cron.
-          <b className="ml-1">Mirror running jobs</b> pushes a snapshot of every live
-          job into <code className="mx-1">running/</code> so the repo doubles as a
-          read-only view of cluster state. Mirror runs on demand regardless of the
-          reconciler toggle.
-        </p>
+        </div>
+      </div>
 
-        <div className="flex items-center justify-between rounded-md border p-3">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Auto-reconcile</CardTitle>
+        </CardHeader>
+        <CardContent>
+        <div className="flex items-center justify-between text-sm">
           <div>
             <Label htmlFor="gj-enabled" className="font-medium">Auto-reconcile</Label>
             <p className="text-xs text-muted-foreground">
@@ -245,7 +253,14 @@ export function GitopsJobsSettings() {
             onCheckedChange={(c) => setCfg({ ...cfg, enabled: c })}
           />
         </div>
+        </CardContent>
+      </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Repository</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm">
         <div className="grid gap-4 md:grid-cols-[1fr_140px_120px_120px]">
           <div className="space-y-2">
             <Label htmlFor="gj-url">Repository URL</Label>
@@ -385,8 +400,10 @@ spec:
             file → cancel + drop. Unchanged files are skipped (content-hashed).
           </p>
         </details>
+        </CardContent>
+      </Card>
 
-        <div className="flex items-center justify-between pt-2">
+      <div className="flex items-center justify-between pt-2 text-sm">
           <div className="text-xs text-muted-foreground">
             {cfg.lastReconcileAt ? (
               <>
@@ -422,17 +439,18 @@ spec:
               Reconcile now
             </Button>
           </div>
-        </div>
+      </div>
 
-        <div className="space-y-3 pt-4 border-t">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <History className="h-4 w-4" /> Last runs
-            </div>
-            <Button variant="ghost" size="sm" onClick={() => fetchLastRuns()}>
-              <RefreshCw className="h-3 w-3" />
-            </Button>
-          </div>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <History className="h-4 w-4" /> Last runs
+          </CardTitle>
+          <Button variant="ghost" size="sm" onClick={() => fetchLastRuns()}>
+            <RefreshCw className="h-3 w-3" />
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
           <LastRunBlock label="Reconcile" run={lastReconcile} />
           <LastRunBlock label="Mirror running jobs" run={lastMirror} />
 
@@ -487,8 +505,8 @@ spec:
               />
             </details>
           </div>
-        </div>
-      </CardContent>
+        </CardContent>
+      </Card>
 
       <Dialog open={logOpen} onOpenChange={setLogOpen}>
         <DialogContent className="max-w-3xl">
@@ -529,7 +547,7 @@ spec:
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   );
 }
 

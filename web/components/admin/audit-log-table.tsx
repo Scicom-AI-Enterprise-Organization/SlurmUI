@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -182,7 +183,7 @@ export function AuditLogTable({
       </div>
 
       {/* Table */}
-      <div className="rounded-md border">
+      <Card className="overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow>
@@ -223,7 +224,7 @@ export function AuditLogTable({
             )}
           </TableBody>
         </Table>
-      </div>
+      </Card>
 
       {/* Pagination */}
       {pagination.totalPages > 1 && (

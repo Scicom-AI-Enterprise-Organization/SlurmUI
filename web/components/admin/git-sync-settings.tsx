@@ -2,12 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -15,7 +15,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { GitBranch, Loader2, RefreshCw, AlertTriangle, Download, Server, ChevronDown, ChevronUp } from "lucide-react";
+import { Loader2, RefreshCw, AlertTriangle, Download, Server, ChevronDown, ChevronUp } from "lucide-react";
 
 interface Config {
   enabled: boolean;
@@ -157,27 +157,34 @@ export function GitSyncSettings() {
   const isHttps = cfg.repoUrl.startsWith("http://") || cfg.repoUrl.startsWith("https://");
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <GitBranch className="h-4 w-4" />
-          Git sync
-          {cfg.lastSyncStatus === "success" && (
-            <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-              Last sync ok
-            </Badge>
-          )}
-          {cfg.lastSyncStatus === "failed" && (
-            <Badge variant="destructive">Last sync failed</Badge>
-          )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <p className="text-muted-foreground">
-          Export clusters, their settings, attached SSH key metadata, and recent
-          job history to a git repo as YAML files. Close your eyes and the repo
-          becomes a migration target for a fresh SlurmUI deployment.
-        </p>
+    // Page-level shape mirrors /admin/gpu-providers. The "last sync"
+    // status badge moves to the right side of the header so it doesn't
+    // clutter the title, but still surfaces freshness at a glance.
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Git Sync</h1>
+          <p className="text-muted-foreground">
+            Export clusters, their settings, attached SSH key metadata, and
+            recent job history to a git repo as YAML files. The repo becomes
+            a migration target for a fresh SlurmUI deployment.
+          </p>
+        </div>
+        {cfg.lastSyncStatus === "success" && (
+          <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+            Last sync ok
+          </Badge>
+        )}
+        {cfg.lastSyncStatus === "failed" && (
+          <Badge variant="destructive">Last sync failed</Badge>
+        )}
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Repository</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm">
 
         <div className="grid gap-4 md:grid-cols-[1fr_140px_120px]">
           <div className="space-y-2">
@@ -378,7 +385,14 @@ https://x-token-auth:<app-password>@bitbucket.org/your-org/state.git`}</pre>
             />
           </div>
         </div>
+        </CardContent>
+      </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Export options</CardTitle>
+        </CardHeader>
+        <CardContent>
         <div className="rounded-md border border-yellow-500/40 bg-yellow-500/5 p-3 space-y-2">
           <div className="flex items-center gap-2 text-sm font-medium text-yellow-700 dark:text-yellow-400">
             <AlertTriangle className="h-4 w-4" />
@@ -396,8 +410,10 @@ https://x-token-auth:<app-password>@bitbucket.org/your-org/state.git`}</pre>
             </Label>
           </div>
         </div>
+        </CardContent>
+      </Card>
 
-        <div className="flex items-center justify-between pt-2">
+      <div className="flex items-center justify-between pt-2 text-sm">
           <div className="text-xs text-muted-foreground">
             {cfg.lastSyncAt ? (
               <>
@@ -427,8 +443,7 @@ https://x-token-auth:<app-password>@bitbucket.org/your-org/state.git`}</pre>
               Sync now
             </Button>
           </div>
-        </div>
-      </CardContent>
+      </div>
 
       {/* Sync log dialog */}
       <Dialog open={logDialog} onOpenChange={setLogDialog}>
@@ -505,6 +520,6 @@ https://x-token-auth:<app-password>@bitbucket.org/your-org/state.git`}</pre>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   );
 }

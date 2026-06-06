@@ -1011,7 +1011,8 @@ export default function ReportsPage() {
           </div>
           <div className="flex items-center gap-2">
             <Button
-              variant="outline" size="sm"
+              size="sm"
+              className="bg-blue-600 text-white hover:bg-blue-700"
               onClick={async () => {
                 if (!data) return;
                 setDocxExporting(true);
@@ -1023,7 +1024,12 @@ export default function ReportsPage() {
               <FileText className="h-4 w-4 mr-2" />
               {docxExporting ? "Generating…" : promLoading ? "Loading GPU data…" : "Export DOCX"}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => window.print()} disabled={loading || !data}>
+            <Button
+              size="sm"
+              className="bg-blue-600 text-white hover:bg-blue-700"
+              onClick={() => window.print()}
+              disabled={loading || !data}
+            >
               <Printer className="h-4 w-4 mr-2" />
               Export PDF
             </Button>

@@ -2,12 +2,12 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { KeyRound, Copy, Check, Trash2, Plus } from "lucide-react";
+import { Clock, Copy, Check, Trash2, Plus } from "lucide-react";
 
 interface SshKeyRecord {
   id: string;
@@ -73,70 +73,106 @@ export function SshKeySettings({ initialKeys }: SshKeySettingsProps) {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <KeyRound className="h-5 w-5 text-muted-foreground" />
-            <CardTitle className="text-base">SSH Keys</CardTitle>
-          </div>
-          <Badge variant="outline">{keys.length} key{keys.length !== 1 ? "s" : ""}</Badge>
+    // Page-level layout mirrors /admin/gpu-providers — h1 + description
+    // on the left, primary action button on the right, no wrapping Card.
+    // Each list row + the inline add form are bordered blocks (not Cards)
+    // so the page reads as a flat list of items rather than nested cards.
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">SSH Keys</h1>
+          <p className="text-muted-foreground">
+            SSH keys for connecting to cluster nodes during agent deployment
+            and setup. Each cluster is assigned a specific key.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">
-          SSH keys are used to connect to cluster nodes during agent deployment and setup.
-          Each cluster is assigned a specific key.
-        </p>
+        {/* Hidden while the inline add form is open so the user doesn't
+            see a redundant trigger above the live form. */}
+        {!showAdd && (
+          <Button onClick={() => setShowAdd(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add SSH Key
+          </Button>
+        )}
+      </div>
 
-        {/* Key list */}
+      <div className="space-y-4">
+        {/* Generate-a-key helper — at the top so a new admin sees the
+            command right away and can paste a freshly-generated key
+            into the form without scrolling. */}
+        <div className="rounded-md border bg-muted/40 px-4 py-3 space-y-1">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Generate a key
+          </p>
+          <pre className="text-xs font-mono">
+            ssh-keygen -t ed25519 -C aura-cluster-key -f ~/.ssh/aura_cluster_key
+          </pre>
+        </div>
+
+        {/* Key list — empty state matches GPU providers' empty-state
+            (centred, larger padding, dashed border). */}
         {keys.length === 0 && !showAdd && (
-          <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-            No SSH keys configured. Add one to start creating clusters.
+          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed p-12">
+            <p className="text-lg text-muted-foreground">No SSH keys yet</p>
+            <Button variant="outline" className="mt-4" onClick={() => setShowAdd(true)}>
+              Add your first key
+            </Button>
           </div>
         )}
 
-        {keys.map((key) => (
-          <div key={key.id} className="rounded-md border p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-sm">{key.name}</span>
-                {key._count.clusters > 0 && (
-                  <Badge variant="secondary" className="text-xs">
-                    {key._count.clusters} cluster{key._count.clusters !== 1 ? "s" : ""}
-                  </Badge>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() => handleCopy(key.id, key.publicKey)}
-                  title="Copy public key"
-                >
-                  {copiedId === key.id ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-destructive"
-                  onClick={() => handleDelete(key.id)}
-                  disabled={deletingId === key.id || key._count.clusters > 0}
-                  title={key._count.clusters > 0 ? "In use by clusters" : "Delete key"}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <pre className="rounded bg-muted px-3 py-2 text-xs font-mono break-all whitespace-pre-wrap">
-              {key.publicKey}
-            </pre>
+        {keys.length > 0 && (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {keys.map((key) => (
+              <Card key={key.id} className="transition-colors hover:border-primary/60 hover:shadow-md">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-base font-semibold truncate">{key.name}</CardTitle>
+                  {key._count.clusters > 0 ? (
+                    <Badge variant="secondary" className="text-xs shrink-0">
+                      {key._count.clusters} cluster{key._count.clusters !== 1 ? "s" : ""}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs shrink-0">Unused</Badge>
+                  )}
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" />
+                    <span>Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                  </div>
+                  <pre className="rounded bg-muted px-2 py-1.5 text-[11px] font-mono break-all whitespace-pre-wrap line-clamp-3">
+                    {key.publicKey}
+                  </pre>
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => handleCopy(key.id, key.publicKey)}
+                      title="Copy public key"
+                    >
+                      {copiedId === key.id ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-destructive"
+                      onClick={() => handleDelete(key.id)}
+                      disabled={deletingId === key.id || key._count.clusters > 0}
+                      title={key._count.clusters > 0 ? "In use by clusters" : "Delete key"}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
-        ))}
+        )}
 
-        {/* Add key form */}
-        {showAdd ? (
+        {/* Add key form — `&&` because the trigger button now lives in
+            the card header, not here, so we don't need a sibling branch
+            to render when `!showAdd`. */}
+        {showAdd && (
           <div className="rounded-md border p-4 space-y-3">
             <div className="space-y-2">
               <Label htmlFor="key-name" className="text-sm font-medium">Key Name</Label>
@@ -168,22 +204,8 @@ export function SshKeySettings({ initialKeys }: SshKeySettingsProps) {
               </Button>
             </div>
           </div>
-        ) : (
-          <Button variant="outline" onClick={() => setShowAdd(true)}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add SSH Key
-          </Button>
         )}
-
-        <div className="rounded-md border bg-muted/40 px-4 py-3 space-y-1">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-            Generate a key
-          </p>
-          <pre className="text-xs font-mono">
-            ssh-keygen -t ed25519 -C aura-cluster-key -f ~/.ssh/aura_cluster_key
-          </pre>
-        </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
