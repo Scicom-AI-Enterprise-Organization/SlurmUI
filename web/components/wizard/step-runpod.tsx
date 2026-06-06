@@ -61,9 +61,13 @@ interface StepRunpodProps {
   onChange: (data: RunpodBasics) => void;
   gpuProviders: GpuProviderOption[];
   sshKeys: SshKeyOption[];
+  // true = Instant Cluster (pre-baked slurm-node image, no image field, no
+  // Bootstrap). false/undefined = legacy RunPod GPU pod (editable image + manual
+  // Bootstrap).
+  instant?: boolean;
 }
 
-export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpodProps) {
+export function StepRunpod({ data, onChange, gpuProviders, sshKeys, instant = false }: StepRunpodProps) {
   const [gpuTypes, setGpuTypes] = useState<GpuTypeOption[]>([]);
   const [gpusLoading, setGpusLoading] = useState(false);
   const [gpusError, setGpusError] = useState<string | null>(null);
@@ -137,9 +141,11 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
 
       <Card>
         <CardHeader>
-          <CardTitle>RunPod pod</CardTitle>
+          <CardTitle>{instant ? "Instant cluster pod" : "RunPod pod"}</CardTitle>
           <CardDescription>
-            A single pod is rented and used as the whole cluster — controller and worker in one node.
+            {instant
+              ? "We rent one GPU pod that is the whole cluster. The image already has Slurm, munge and accounting set up, so once the pod boots you can submit jobs. No Bootstrap step. The controller and worker are the same node."
+              : "We rent one pod and use it as the whole cluster. The controller and worker are the same node."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -201,15 +207,27 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
             </div>
             <div className="space-y-2">
               <Label>Cloud type</Label>
-              <Select value={data.cloudType} onValueChange={(v) => update("cloudType", v)}>
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="COMMUNITY">Community (cheaper)</SelectItem>
-                  <SelectItem value="SECURE">Secure (verified hosts)</SelectItem>
-                </SelectContent>
-              </Select>
+              {instant ? (
+                <>
+                  <div className="flex h-9 items-center rounded-md border bg-muted/50 px-3 text-sm text-muted-foreground">
+                    Secure (verified hosts)
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Instant clusters always use Secure cloud and a host with CUDA&nbsp;12.8 or newer,
+                    since the image ships CUDA&nbsp;12.8.
+                  </p>
+                </>
+              ) : (
+                <Select value={data.cloudType} onValueChange={(v) => update("cloudType", v)}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="COMMUNITY">Community (cheaper)</SelectItem>
+                    <SelectItem value="SECURE">Secure (verified hosts)</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
             </div>
           </div>
 
@@ -226,8 +244,8 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
                 onChange={(e) => update("containerDiskGb", e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Temporary — wiped every time the pod restarts. Holds the OS and anything outside
-                the volume mount.
+                Temporary storage, wiped every time the pod restarts. Holds the OS and anything
+                outside the volume mount.
               </p>
             </div>
             <div className="space-y-2">
@@ -241,7 +259,7 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
                 onChange={(e) => update("volumeGb", e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Persistent — survives pod restarts. Set 0 for no volume.
+                Persistent storage that survives pod restarts. Set 0 for no volume.
               </p>
             </div>
             <div className="space-y-2">
@@ -260,21 +278,28 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="rp-image">Image</Label>
-            <Input
-              id="rp-image"
-              value={data.imageName}
-              onChange={(e) => update("imageName", e.target.value)}
-              className="font-mono text-xs"
-            />
+          {instant ? (
             <p className="text-xs text-muted-foreground">
-              The Docker image the pod runs. Keep the default unless you know what you&apos;re doing —
-              RunPod&apos;s official images start an SSH server on boot and install the key Aura sends,
-              which is how Aura gets access to the pod. A custom image without that can never be
-              reached.
+              The pod runs SlurmUI&apos;s pre-baked Slurm image, picked for you. On boot it starts SSH,
+              trusts the key below, and sets up Slurm by itself, so there&apos;s no Bootstrap step.
             </p>
-          </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="rp-image">Image</Label>
+              <Input
+                id="rp-image"
+                value={data.imageName}
+                onChange={(e) => update("imageName", e.target.value)}
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                The Docker image the pod runs. Keep the default unless you know what you&apos;re doing —
+                RunPod&apos;s official images start an SSH server on boot and install the key Aura sends,
+                which is how Aura gets access to the pod. A custom image without that can never be
+                reached.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -283,8 +308,8 @@ export function StepRunpod({ data, onChange, gpuProviders, sshKeys }: StepRunpod
           <CardTitle>SSH access</CardTitle>
           <CardDescription>
             Aura manages the cluster by logging into the pod over SSH. Pick which of your SSH keys
-            it should log in with — when the pod boots, RunPod authorises that key automatically,
-            so there&apos;s nothing to set up on the pod and no &quot;Test SSH&quot; step here.
+            it should use. When the pod boots, RunPod authorises that key for you, so there&apos;s
+            nothing to set up on the pod and no &quot;Test SSH&quot; step here.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">

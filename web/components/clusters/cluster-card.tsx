@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClusterStatusBadge } from "./cluster-status-badge";
-import { Server, Clock, Hash } from "lucide-react";
+import { Server, Clock, Hash, Zap } from "lucide-react";
 
 interface ClusterCardProps {
   id: string;
@@ -10,6 +10,8 @@ interface ClusterCardProps {
   status: "PROVISIONING" | "ACTIVE" | "DEGRADED" | "OFFLINE";
   jobCount: number;
   createdAt: string;
+  // RunPod instant cluster — shows a yellow lightning bolt before the name.
+  instant?: boolean;
 }
 
 export function ClusterCard({
@@ -19,12 +21,21 @@ export function ClusterCard({
   status,
   jobCount,
   createdAt,
+  instant = false,
 }: ClusterCardProps) {
   return (
     <Link href={`/admin/clusters/${id}`}>
       <Card className="cursor-pointer transition-colors hover:border-primary/60 hover:shadow-md">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-lg font-semibold">{name}</CardTitle>
+          <CardTitle className="flex items-center gap-1.5 text-lg font-semibold">
+            {instant && (
+              <Zap
+                className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-500"
+                aria-label="Instant cluster"
+              />
+            )}
+            {name}
+          </CardTitle>
           <ClusterStatusBadge status={status} />
         </CardHeader>
         <CardContent>

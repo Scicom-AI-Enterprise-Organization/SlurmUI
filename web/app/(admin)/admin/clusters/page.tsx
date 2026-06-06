@@ -57,6 +57,7 @@ export default async function ClustersPage() {
               status={effectiveClusterStatus(cluster) as any}
               jobCount={cluster._count.jobs}
               createdAt={cluster.createdAt.toISOString()}
+              instant={((cluster.config as Record<string, unknown> | null)?.runpod as { instant?: boolean } | undefined)?.instant === true}
             />
           ))}
         </div>

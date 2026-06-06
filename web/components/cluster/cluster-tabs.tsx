@@ -29,9 +29,16 @@ interface Health {
 interface ClusterTabsProps {
   clusterId: string;
   isActive: boolean;
+  // Single-node RunPod instant clusters: these multi-node-only tabs (Storages =
+  // cross-node NFS, Reservations = node-subset gating) stay VISIBLE but are
+  // unclickable, with a tooltip explaining why.
+  instant?: boolean;
 }
 
-export function ClusterTabs({ clusterId, isActive: initialIsActive }: ClusterTabsProps) {
+// Tabs that don't apply on a single-node instant cluster — shown disabled.
+const INSTANT_BLOCKED = new Set(["storage", "reservations"]);
+
+export function ClusterTabs({ clusterId, isActive: initialIsActive, instant = false }: ClusterTabsProps) {
   const pathname = usePathname();
   const base = `/admin/clusters/${clusterId}`;
   // SSR seeds isActive from cluster.status; the DB column lags the live SSH
@@ -68,14 +75,15 @@ export function ClusterTabs({ clusterId, isActive: initialIsActive }: ClusterTab
       {tabs.map((tab) => {
         const href = `${base}/${tab.slug}`;
         const isActive = pathname === href || pathname.startsWith(href + "/");
-        const disabled = tab.requiresActive && !clusterIsActive;
+        const instantBlocked = instant && INSTANT_BLOCKED.has(tab.slug);
+        const disabled = (tab.requiresActive && !clusterIsActive) || instantBlocked;
 
         if (disabled) {
           return (
             <span
               key={tab.slug}
               className="relative px-4 py-2 text-sm font-medium text-muted-foreground/40 cursor-not-allowed"
-              title="Bootstrap the cluster first"
+              title={instantBlocked ? "Not available in RunPod instant cluster" : "Bootstrap the cluster first"}
             >
               {tab.label}
             </span>

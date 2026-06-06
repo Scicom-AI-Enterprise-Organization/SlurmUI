@@ -9,7 +9,8 @@
 
 import { prisma } from "./prisma";
 import { getRunPodPod, extractRunPodSshEndpoint } from "./gpu-provider";
-import { sshExecSimple, buildSshTargetFromCluster } from "./ssh-exec";
+import { sshExecSimple, buildSshTargetFromCluster, type SshTarget } from "./ssh-exec";
+import { seedControllerAsNode, seedDefaultPartition } from "./bootstrap-seed";
 
 const POLL_INTERVAL_MS = 5_000;
 // RunPod cold pulls of the pytorch image can take a while.
@@ -148,6 +149,13 @@ export async function runRunpodProvision(taskId: string, clusterId: string) {
             : `[aura] Warning: could not self-authorise the pod's root key: ${selfKey.stderr.slice(0, 200)}`,
         );
 
+        // Instant cluster: the pre-baked slurm-node image already brought Slurm
+        // up on boot, so skip the apt Bootstrap step — finalize and mark ACTIVE.
+        if (rp.instant) {
+          await finalizeInstantCluster(taskId, clusterId, target);
+          return;
+        }
+
         await appendLog(taskId, "[aura] Pod is ready. Run Bootstrap from the cluster's Configuration tab to install Slurm.");
         await finishTask(taskId, true);
         return;
@@ -165,4 +173,59 @@ export async function runRunpodProvision(taskId: string, clusterId: string) {
     await appendLog(taskId, `[aura] Provisioning crashed: ${err?.message ?? err}`);
     await finishTask(taskId, false);
   }
+}
+
+// Finalize an instant (pre-baked slurm-node image) RunPod cluster: wait for the
+// pod's slurmctld to answer, mirror the controller into cluster.config as a
+// tracked node, seed the default partition, and flip the cluster ACTIVE. No apt
+// bootstrap — the image self-configured Slurm on boot.
+const SLURM_READY_ATTEMPTS = 18; // ~90s; slurmctld comes up shortly after sshd
+const SLURM_READY_INTERVAL_MS = 5_000;
+
+async function finalizeInstantCluster(taskId: string, clusterId: string, target: SshTarget) {
+  await appendLog(taskId, "[aura] Instant image detected — waiting for Slurm (slurmctld) to come up...");
+
+  let slurmUp = false;
+  for (let attempt = 1; attempt <= SLURM_READY_ATTEMPTS; attempt++) {
+    const ping = await sshExecSimple(target, "scontrol ping >/dev/null 2>&1 && echo __SLURM_UP__ || true");
+    if (ping.success && ping.stdout.includes("__SLURM_UP__")) { slurmUp = true; break; }
+    if (attempt < SLURM_READY_ATTEMPTS) {
+      await appendLog(taskId, `[aura] slurmctld not up yet (attempt ${attempt}/${SLURM_READY_ATTEMPTS}) — retrying in ${SLURM_READY_INTERVAL_MS / 1000}s...`);
+      await sleep(SLURM_READY_INTERVAL_MS);
+    }
+  }
+
+  if (!slurmUp) {
+    await appendLog(taskId, "[aura] slurmctld did not come up in time. The pod is reachable over SSH but Slurm isn't answering — check the pod's entrypoint logs, or run Bootstrap from the Configuration tab.");
+    await finishTask(taskId, false);
+    return;
+  }
+
+  // slurmctld is up, but the compute node (slurmd) also has to register before
+  // jobs can run. On a single-node pod slurmd needs cgroup access; if the pod is
+  // too locked-down it stays UNKNOWN/DOWN and jobs would pend forever — so check
+  // and surface a clear diagnostic rather than silently marking ACTIVE.
+  let nodeReady = false;
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const si = await sshExecSimple(target, "sinfo -h -o '%t' 2>/dev/null");
+    if (si.success && /\b(idle|mix|alloc|comp)/.test(si.stdout)) { nodeReady = true; break; }
+    await sleep(5_000);
+  }
+  if (nodeReady) {
+    await appendLog(taskId, "[aura] Compute node registered with slurmctld and is idle.");
+  } else {
+    await appendLog(taskId, "[aura] WARNING: slurmctld is up but the compute node hasn't registered (still UNKNOWN/DOWN). slurmd usually needs cgroup write access on the pod — if jobs stay PENDING, the pod may be too restricted. Marking the cluster ACTIVE so you can inspect it on the Nodes tab.");
+  }
+
+  await appendLog(taskId, "[aura] Registering the controller node and default partition...");
+  try {
+    await seedControllerAsNode({ clusterId, taskId, sshTarget: target });
+    await seedDefaultPartition(clusterId);
+  } catch (e: any) {
+    await appendLog(taskId, `[aura] Warning: post-Slurm seeding hit an error: ${e?.message ?? e}`);
+  }
+
+  await prisma.cluster.update({ where: { id: clusterId }, data: { status: "ACTIVE" } });
+  await appendLog(taskId, "[aura] Instant cluster ready — Slurm is running and the cluster is ACTIVE. No bootstrap needed.");
+  await finishTask(taskId, true);
 }

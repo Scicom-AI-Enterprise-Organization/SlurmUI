@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { createRunPodPod, DEFAULT_RUNPOD_IMAGE } from "@/lib/gpu-provider";
+import { createRunPodPod, DEFAULT_RUNPOD_IMAGE, DEFAULT_SLURM_NODE_IMAGE, SLURM_NODE_CUDA_VERSIONS } from "@/lib/gpu-provider";
 import { runRunpodProvision } from "@/lib/runpod-provision";
 
 // POST /api/clusters/runpod — create a single-node cluster backed by a
@@ -24,9 +24,33 @@ export async function POST(req: NextRequest) {
     containerDiskGb = 50,
     volumeGb = 50,
     volumeMountPath = "/workspace",
-    imageName = DEFAULT_RUNPOD_IMAGE,
+    imageName,
+    // "Instant cluster": launch from the pre-baked slurm-node image so the pod
+    // comes up with Slurm already running (no separate apt Bootstrap step) and
+    // the cluster goes ACTIVE directly. Opt-in (the wizard's "Instant Cluster"
+    // tile sends instant=true). Default OFF preserves the legacy "RunPod GPU
+    // pod" flow: bare runpod/pytorch image + manual Bootstrap.
+    instant = false,
     sshKeyId,
   } = await req.json();
+
+  // Server picks the image: an explicit imageName wins, otherwise instant pods
+  // get the slurm-node image and legacy pods get runpod/pytorch.
+  const effectiveImage =
+    typeof imageName === "string" && imageName.trim()
+      ? imageName.trim()
+      : instant
+        ? DEFAULT_SLURM_NODE_IMAGE
+        : DEFAULT_RUNPOD_IMAGE;
+  // Private ECR pulls need a RunPod registry credential id; public images don't.
+  const containerRegistryAuthId = process.env.RUNPOD_REGISTRY_AUTH_ID || undefined;
+
+  // Instant clusters are forced onto SECURE cloud (verified hosts) and onto
+  // hosts that support CUDA >= 12.8 (the slurm-node image bundles CUDA 12.8).
+  // The legacy "RunPod GPU pod" path keeps the user's cloud choice and no CUDA
+  // filter (any CUDA host).
+  const effectiveCloudType = instant ? "SECURE" : cloudType;
+  const allowedCudaVersions = instant ? SLURM_NODE_CUDA_VERSIONS : undefined;
 
   if (!name || typeof name !== "string" || name.trim() === "") {
     return NextResponse.json({ error: "name is required" }, { status: 400 });
@@ -76,14 +100,16 @@ export async function POST(req: NextRequest) {
   try {
     podId = await createRunPodPod(provider.apiKey, {
       name: podName,
-      imageName,
+      imageName: effectiveImage,
       gpuTypeId,
       gpuCount: count,
-      cloudType,
+      cloudType: effectiveCloudType,
       containerDiskInGb: diskGb,
       volumeInGb: volGb,
       volumeMountPath: mountPath,
       publicKey: sshKey.publicKey,
+      containerRegistryAuthId,
+      allowedCudaVersions,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message ?? "RunPod pod create failed" }, { status: 502 });
@@ -108,12 +134,19 @@ export async function POST(req: NextRequest) {
           podId,
           gpuTypeId,
           gpuCount: count,
-          cloudType,
-          imageName,
+          cloudType: effectiveCloudType,
+          imageName: effectiveImage,
+          instant: !!instant,
+          ...(allowedCudaVersions ? { allowedCudaVersions } : {}),
           containerDiskGb: diskGb,
           volumeGb: volGb,
           volumeMountPath: mountPath,
         },
+        // Fixed Slurm/munge IDs baked into the slurm-node image, recorded so a
+        // future add-node from the same image stays UID-aligned.
+        ...(instant
+          ? { slurm_uid: 5001, slurm_gid: 5001, munge_uid: 5002, munge_gid: 5002 }
+          : {}),
       },
     },
   });

@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { Server, Settings, Briefcase } from "lucide-react";
+import { Server, Settings, Briefcase, Zap } from "lucide-react";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 interface LayoutProps {
@@ -32,12 +32,21 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
     notFound();
   }
 
+  const instant =
+    ((cluster.config as Record<string, unknown> | null)?.runpod as { instant?: boolean } | undefined)?.instant === true;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-3">
             <InlineRename clusterId={id} initialName={cluster.name} />
+            {instant && (
+              <Zap
+                className="h-5 w-5 shrink-0 fill-yellow-400 text-yellow-500"
+                aria-label="Instant cluster"
+              />
+            )}
             <LiveClusterStatusBadge
               clusterId={id}
               initialStatus={cluster.status}
@@ -104,6 +113,7 @@ export default async function ClusterTabsLayout({ params, children }: LayoutProp
           const eff = effectiveClusterStatus(cluster);
           return eff === "ACTIVE" || eff === "DEGRADED";
         })()}
+        instant={((cluster.config as Record<string, unknown> | null)?.runpod as { instant?: boolean } | undefined)?.instant === true}
       />
       {children}
     </div>

@@ -71,7 +71,7 @@ export async function GET(req: NextRequest) {
       orderBy: { createdAt: "desc" },
       skip,
       take: limit,
-      include: { cluster: { select: { name: true } } },
+      include: { cluster: { select: { name: true, config: true } } },
     }),
     prisma.job.count({ where }),
     prisma.job.findMany({
@@ -89,7 +89,15 @@ export async function GET(req: NextRequest) {
   const nameRe = /#SBATCH\s+(?:--job-name|-J)[=\s]+(\S+)/;
   const withName = jobs.map((j) => {
     const m = j.script?.match(nameRe);
-    return { ...j, name: m ? m[1] : null };
+    // Reshape cluster to { name, instant } so the jobs table can show the
+    // instant-cluster bolt without shipping the whole config blob per row.
+    const cfg = j.cluster?.config as Record<string, unknown> | null;
+    const instant = (cfg?.runpod as { instant?: boolean } | undefined)?.instant === true;
+    return {
+      ...j,
+      name: m ? m[1] : null,
+      cluster: j.cluster ? { name: j.cluster.name, instant } : j.cluster,
+    };
   });
 
   const availablePartitions = partitionsRaw.map((p) => p.partition).filter(Boolean).sort();

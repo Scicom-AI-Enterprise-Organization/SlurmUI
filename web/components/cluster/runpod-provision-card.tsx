@@ -16,6 +16,9 @@ interface RunpodInfo {
   // Absent on clusters created before volume support landed.
   volumeGb?: number;
   volumeMountPath?: string;
+  // True for "instant cluster" pods launched from the pre-baked slurm-node
+  // image — Slurm comes up on boot and the cluster goes ACTIVE without Bootstrap.
+  instant?: boolean;
 }
 
 interface TaskSnapshot {
@@ -117,8 +120,18 @@ export function RunpodProvisionCard({ runpod, initialTask }: RunpodProvisionCard
 
         {task?.status === "success" && (
           <p className="text-xs text-muted-foreground">
-            The pod accepts SSH from Aura. Use the <span className="font-medium">Bootstrap</span> button
-            above to install Slurm on it. Deleting this cluster terminates the pod.
+            {runpod.instant ? (
+              <>
+                The pod is up with Slurm pre-installed and the cluster is{" "}
+                <span className="font-medium">ACTIVE</span> — no Bootstrap step needed. You can submit
+                jobs now. Deleting this cluster terminates the pod.
+              </>
+            ) : (
+              <>
+                The pod accepts SSH from Aura. Use the <span className="font-medium">Bootstrap</span>{" "}
+                button above to install Slurm on it. Deleting this cluster terminates the pod.
+              </>
+            )}
           </p>
         )}
       </CardContent>

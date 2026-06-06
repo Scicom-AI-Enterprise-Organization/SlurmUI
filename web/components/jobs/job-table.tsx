@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Repeat2, Loader2, XCircle } from "lucide-react";
+import { Repeat2, Loader2, XCircle, Zap } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -26,7 +26,7 @@ interface Job {
   status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
   createdAt: string;
   name?: string | null;
-  cluster?: { name: string };
+  cluster?: { name: string; instant?: boolean };
   experimentRunUrl?: string | null;
 }
 
@@ -140,7 +140,14 @@ export function JobTable({ jobs, showCluster = false, onChange }: JobTableProps)
               </TableCell>
               <TableCell>{job.slurmJobId ?? "-"}</TableCell>
               {showCluster && (
-                <TableCell>{job.cluster?.name ?? job.clusterId.slice(0, 8)}</TableCell>
+                <TableCell>
+                  <span className="inline-flex items-center gap-1.5">
+                    {job.cluster?.instant && (
+                      <Zap className="h-3.5 w-3.5 shrink-0 fill-yellow-400 text-yellow-500" aria-label="Instant cluster" />
+                    )}
+                    {job.cluster?.name ?? job.clusterId.slice(0, 8)}
+                  </span>
+                </TableCell>
               )}
               <TableCell>{job.partition}</TableCell>
               <TableCell>

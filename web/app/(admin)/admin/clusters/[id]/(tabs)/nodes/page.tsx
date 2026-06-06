@@ -65,6 +65,9 @@ export default function NodesPage() {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [clusterStatus, setClusterStatus] = useState<string>("");
+  // Single-node RunPod instant cluster — the pod IS the whole cluster, so there
+  // are no separate worker machines to add.
+  const [clusterInstant, setClusterInstant] = useState<boolean>(false);
   const [clusterBastion, setClusterBastion] = useState<boolean>(false);
   const [clusterHealth, setClusterHealth] = useState<{
     lastProbeAt?: string;
@@ -256,6 +259,7 @@ export default function NodesPage() {
         setClusterStatus(d.status ?? "");
         setClusterHealth((d.config?.health as typeof clusterHealth) ?? null);
         setClusterBastion(!!d.sshBastion);
+        setClusterInstant(((d.config?.runpod as { instant?: boolean } | undefined)?.instant) === true);
       })
       .catch(() => {});
   }, [clusterId]);
@@ -1087,8 +1091,14 @@ export default function NodesPage() {
           </Button>
           <div className="relative">
             <Button
-              disabled={clusterStatus === "PROVISIONING"}
-              title={clusterStatus === "PROVISIONING" ? "Bootstrap is still in progress" : undefined}
+              disabled={clusterStatus === "PROVISIONING" || clusterInstant}
+              title={
+                clusterInstant
+                  ? "Single-node instant cluster — the pod is the whole cluster, so there are no worker nodes to add"
+                  : clusterStatus === "PROVISIONING"
+                    ? "Bootstrap is still in progress"
+                    : undefined
+              }
               onClick={() => setAddMenuOpen((v) => !v)}
             >
               <Plus className="mr-2 h-4 w-4" />

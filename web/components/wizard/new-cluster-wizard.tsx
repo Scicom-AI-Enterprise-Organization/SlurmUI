@@ -14,10 +14,12 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
-import { Loader2, Server, Cpu } from "lucide-react";
+import { Loader2, Server, Cpu, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type HostSource = "ssh" | "runpod";
+// "runpod" = legacy bare GPU pod (manual Bootstrap). "instant" = pre-baked
+// slurm-node image, ready without Bootstrap. Both post to /api/clusters/runpod.
+type HostSource = "ssh" | "runpod" | "instant";
 
 interface NewClusterWizardProps {
   sshKeys: SshKeyOption[];
@@ -116,11 +118,18 @@ export function NewClusterWizard({ sshKeys, gpuProviders }: NewClusterWizardProp
           gpuProviderId: runpod.gpuProviderId,
           gpuTypeId: runpod.gpuTypeId,
           gpuCount: parseInt(runpod.gpuCount) || 1,
-          cloudType: runpod.cloudType,
+          // Instant clusters are forced to Secure cloud (the server also enforces
+          // this + a CUDA 12.8+ host filter).
+          cloudType: source === "instant" ? "SECURE" : runpod.cloudType,
           containerDiskGb: parseInt(runpod.containerDiskGb) || 50,
           volumeGb: parseInt(runpod.volumeGb) || 0,
           volumeMountPath: runpod.volumeMountPath || "/workspace",
-          imageName: runpod.imageName,
+          // Instant: server launches the pre-baked slurm-node image (Slurm up on
+          // boot) and marks the cluster ACTIVE — no Bootstrap, image chosen
+          // server-side. Legacy "runpod" tile keeps the bare pod + manual
+          // Bootstrap and passes the user-chosen image.
+          instant: source === "instant",
+          ...(source === "instant" ? {} : { imageName: runpod.imageName }),
           sshKeyId: runpod.sshKeyId,
         }),
       });
@@ -202,7 +211,7 @@ export function NewClusterWizard({ sshKeys, gpuProviders }: NewClusterWizardProp
     <>
       <div className="space-y-6">
         {/* Host source */}
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-3">
           <button
             type="button"
             onClick={() => setSource("ssh")}
@@ -233,12 +242,28 @@ export function NewClusterWizard({ sshKeys, gpuProviders }: NewClusterWizardProp
               Rent a GPU pod from a connected provider — single node for now.
             </p>
           </button>
+          <button
+            type="button"
+            onClick={() => setSource("instant")}
+            className={cn(
+              "instant-glow rounded-lg p-4 text-left transition-transform duration-200 hover:-translate-y-0.5",
+              source === "instant" ? "ring-2 ring-primary/70" : "",
+            )}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              <Zap className="h-4 w-4 text-fuchsia-500" />
+              Instant Cluster
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              A GPU pod that boots fully cluster-ready within minutes, zero bootstrap required
+            </p>
+          </button>
         </div>
 
         {source === "ssh" ? (
           <StepBasics data={basics} onChange={setBasics} sshKeys={sshKeys} onSshTestChange={setSshTestStatus} />
         ) : (
-          <StepRunpod data={runpod} onChange={setRunpod} gpuProviders={gpuProviders} sshKeys={sshKeys} />
+          <StepRunpod data={runpod} onChange={setRunpod} gpuProviders={gpuProviders} sshKeys={sshKeys} instant={source === "instant"} />
         )}
 
         <div className="flex items-center justify-end gap-2">

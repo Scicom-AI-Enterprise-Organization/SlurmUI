@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { Server, Send } from "lucide-react";
+import { Server, Send, Zap } from "lucide-react";
 
 // Listing — render fresh every request. Cluster status badges flip
 // between ACTIVE / DEGRADED / OFFLINE constantly; a cached HTML render
@@ -52,11 +52,17 @@ export default async function UserClustersPage() {
             const config = cluster.config as Record<string, unknown>;
             const partitions = (config.slurm_partitions ?? []) as Array<{ name: string }>;
             const nodeGroups = (config.slurm_hosts_entries ?? []) as Array<{ hostname: string }>;
+            const instant = (config.runpod as { instant?: boolean } | undefined)?.instant === true;
 
             return (
               <Card key={cluster.id}>
                 <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-lg">{cluster.name}</CardTitle>
+                  <CardTitle className="flex items-center gap-1.5 text-lg">
+                    {instant && (
+                      <Zap className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-500" aria-label="Instant cluster" />
+                    )}
+                    {cluster.name}
+                  </CardTitle>
                   <ClusterStatusBadge status={cluster.status} />
                 </CardHeader>
                 <CardContent className="space-y-4">

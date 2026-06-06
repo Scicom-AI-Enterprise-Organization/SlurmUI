@@ -6,7 +6,7 @@ import { ClusterStatusBadge } from "@/components/clusters/cluster-status-badge";
 import { PagedJobs } from "@/components/jobs/paged-jobs";
 import { Separator } from "@/components/ui/separator";
 import Link from "next/link";
-import { Server } from "lucide-react";
+import { Server, Zap } from "lucide-react";
 import { effectiveClusterStatus } from "@/lib/cluster-health";
 
 // Listing — render fresh every request. Cross-cluster job status
@@ -59,6 +59,7 @@ export default async function JobsPage() {
               const config = cluster.config as Record<string, unknown>;
               const partitions = (config.slurm_partitions ?? []) as Array<{ name: string }>;
               const nodeGroups = (config.slurm_hosts_entries ?? []) as Array<{ hostname: string }>;
+              const instant = (config.runpod as { instant?: boolean } | undefined)?.instant === true;
 
               return (
                 <Link
@@ -68,7 +69,12 @@ export default async function JobsPage() {
                 >
                   <Card className="h-full cursor-pointer hover:border-primary/60 transition-colors">
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                      <CardTitle className="text-base">{cluster.name}</CardTitle>
+                      <CardTitle className="flex items-center gap-1.5 text-base">
+                        {instant && (
+                          <Zap className="h-3.5 w-3.5 shrink-0 fill-yellow-400 text-yellow-500" aria-label="Instant cluster" />
+                        )}
+                        {cluster.name}
+                      </CardTitle>
                       <ClusterStatusBadge status={cluster.status} />
                     </CardHeader>
                     <CardContent>

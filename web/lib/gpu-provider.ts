@@ -116,6 +116,23 @@ export async function listRunPodGpuTypes(apiKey: string): Promise<GpuTypeInfo[]>
 // which is the whole SSH contract we rely on.
 export const DEFAULT_RUNPOD_IMAGE = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404";
 
+// Pre-baked Slurm-node image for "instant cluster" RunPod pods. Built from
+// docker/slurm-node (FROM runpod/pytorch + slurm-wlm/munge/mariadb/chrony with
+// fixed UIDs and a self-configuring entrypoint), so the pod comes up with Slurm
+// already running, no apt bootstrap step. Built and pushed MANUALLY to ECR
+// Public (anonymous pull, so RunPod needs no registry credentials); see
+// docker/slurm-node/README.md. Override with AURA_SLURM_NODE_IMAGE if needed.
+export const DEFAULT_SLURM_NODE_IMAGE =
+  process.env.AURA_SLURM_NODE_IMAGE ??
+  "public.ecr.aws/o6x1g6b0/slurm-node:latest";
+
+// The slurm-node image is built FROM runpod/pytorch cu1281 → it bundles CUDA
+// 12.8. A RunPod GPU host must therefore have a driver supporting CUDA >= 12.8
+// for the container to run. RunPod's allowedCudaVersions filters by the host's
+// supported CUDA version; list 12.8 and newer (CUDA is backward-compatible, so
+// a 12.9/13.0 host runs a 12.8 container — don't exclude them).
+export const SLURM_NODE_CUDA_VERSIONS = ["13.0", "12.9", "12.8"];
+
 export interface CreateRunPodPodOpts {
   name: string;
   imageName: string;
@@ -129,6 +146,13 @@ export interface CreateRunPodPodOpts {
   volumeInGb: number; // 0 = no persistent volume
   volumeMountPath: string;
   publicKey: string; // OpenSSH public key appended to authorized_keys by start.sh
+  // Optional RunPod container-registry credential id, needed to pull a PRIVATE
+  // image (e.g. the slurm-node image from private ECR). Created once in the
+  // RunPod account and referenced by id. Omit for public images (anonymous pull).
+  containerRegistryAuthId?: string;
+  // Optional list of acceptable host CUDA versions (e.g. ["13.0","12.9","12.8"]).
+  // Restricts the pod to hosts whose driver supports one of these. Omit = any.
+  allowedCudaVersions?: string[];
 }
 
 // Create a pod with SSH exposed. "22/tcp" asks RunPod for a public TCP port
@@ -154,6 +178,12 @@ export async function createRunPodPod(apiKey: string, opts: CreateRunPodPodOpts)
       supportPublicIp: true,
       ports: ["22/tcp"],
       env: { PUBLIC_KEY: opts.publicKey },
+      ...(opts.containerRegistryAuthId
+        ? { containerRegistryAuthId: opts.containerRegistryAuthId }
+        : {}),
+      ...(opts.allowedCudaVersions?.length
+        ? { allowedCudaVersions: opts.allowedCudaVersions }
+        : {}),
     }),
     signal: AbortSignal.timeout(30_000),
     cache: "no-store",
