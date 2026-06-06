@@ -21,6 +21,8 @@ import { startHeartbeatMonitor } from "./lib/heartbeat";
 import { startHealthMonitor } from "./lib/health-monitor";
 import { startGitopsJobsMonitor } from "./lib/gitops-jobs";
 import { tryHandleJobProxyUpgrade } from "./lib/job-proxy-ws";
+import { randomUUID } from "crypto";
+import { recordHttpRequest, markInFlight } from "./lib/http-metrics";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
@@ -42,8 +44,46 @@ const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
   const server = createServer(async (req, res) => {
+    // API-layer instrumentation: time every request and record status code +
+    // latency once the response is flushed. `process.hrtime.bigint` is
+    // monotonic (immune to wall-clock jumps). We attach a request id so a
+    // metric spike and its matching Loki log line can be correlated.
+    const start = process.hrtime.bigint();
+    const method = req.method ?? "GET";
+    const parsedUrl = parse(req.url!, true);
+    const pathname = parsedUrl.pathname ?? "/";
+    const requestId =
+      (req.headers["x-request-id"] as string | undefined) ?? randomUUID();
+    res.setHeader("x-request-id", requestId);
+    markInFlight(method);
+
+    let recorded = false;
+    const finish = () => {
+      if (recorded) return; // finish + close can both fire
+      recorded = true;
+      const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+      // Skip Next's HMR/static asset noise — not part of the API layer and
+      // would bloat cardinality. Keep everything else (pages + /api/*).
+      if (pathname.startsWith("/_next/")) return;
+      const fwd = req.headers["x-forwarded-for"];
+      const ip =
+        (Array.isArray(fwd) ? fwd[0] : fwd?.split(",")[0]?.trim()) ??
+        req.socket.remoteAddress ??
+        null;
+      recordHttpRequest({
+        method,
+        pathname,
+        status: res.statusCode,
+        durationMs,
+        requestId,
+        ip,
+        bytes: Number(res.getHeader("content-length")) || undefined,
+      });
+    };
+    res.on("finish", finish);
+    res.on("close", finish);
+
     try {
-      const parsedUrl = parse(req.url!, true);
       await handle(req, res, parsedUrl);
     } catch (err) {
       console.error("Error handling request:", err);

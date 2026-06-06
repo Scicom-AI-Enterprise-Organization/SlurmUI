@@ -1,0 +1,2 @@
+# Optional bearer token for scraping /api/metrics — never commit secrets.
+metrics_token

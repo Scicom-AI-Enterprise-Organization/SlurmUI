@@ -1,6 +1,13 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getAllHealth } from "@/lib/health-monitor";
+import { httpRegistry } from "@/lib/http-metrics";
+
+// The custom server (server.ts) lives in the same Node process and populates
+// httpRegistry on every request, so we can read it here. Under `next dev`'s
+// worker model the route may run in a different worker than server.ts — in
+// that case the registry is simply empty for this scrape, which is harmless.
+export const dynamic = "force-dynamic";
 
 /**
  * Prometheus metrics endpoint.
@@ -606,7 +613,12 @@ export async function GET(req: NextRequest) {
       [{ value: (Date.now() - scrapeStart) / 1000 }]
     );
 
-    return new Response(lines.join("\n"), {
+    // Append the API-layer (RED) metrics + Node runtime metrics recorded by
+    // the request wrapper in server.ts. prom-client emits its own
+    // # HELP/# TYPE headers, so just concatenate.
+    const httpMetrics = await httpRegistry.metrics();
+
+    return new Response(lines.join("\n") + "\n" + httpMetrics, {
       headers: {
         "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
         "Cache-Control": "no-store",

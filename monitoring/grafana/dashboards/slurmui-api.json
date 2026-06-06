@@ -1,0 +1,258 @@
+{
+  "uid": "slurmui-api-layer",
+  "title": "SlurmUI — API Layer (Metrics & Logs)",
+  "tags": ["slurmui", "api", "red"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "route",
+        "label": "Route",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+        "query": "label_values(slurmui_http_request_duration_seconds_count, route)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "method",
+        "label": "Method",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+        "query": "label_values(slurmui_http_requests_total, method)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "sort": 1
+      },
+      {
+        "name": "status_class",
+        "label": "Status class",
+        "type": "custom",
+        "query": "2xx,3xx,4xx,5xx",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "log_status",
+        "label": "Log status (regex)",
+        "type": "textbox",
+        "query": ".+",
+        "current": { "text": ".+", "value": ".+" }
+      },
+      {
+        "name": "min_latency_ms",
+        "label": "Min latency (ms)",
+        "type": "textbox",
+        "query": "0",
+        "current": { "text": "0", "value": "0" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview (RED)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "Request rate",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(slurmui_http_requests_total{route=~\"$route\",method=~\"$method\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Error rate (4xx+5xx)",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * sum(rate(slurmui_http_requests_total{status_class=~\"4xx|5xx\",route=~\"$route\",method=~\"$method\"}[$__rate_interval])) / clamp_min(sum(rate(slurmui_http_requests_total{route=~\"$route\",method=~\"$method\"}[$__rate_interval])), 1)"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "p95 latency",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 3 } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(slurmui_http_request_duration_seconds_bucket{route=~\"$route\",method=~\"$method\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "5xx rate",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.001 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(slurmui_http_requests_total{status_class=\"5xx\",route=~\"$route\",method=~\"$method\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by status code",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } } },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{status}}",
+          "expr": "sum by (status) (rate(slurmui_http_requests_total{route=~\"$route\",method=~\"$method\",status_class=~\"$status_class\"}[$__rate_interval]))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Latency percentiles (p50 / p90 / p99)",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(slurmui_http_request_duration_seconds_bucket{route=~\"$route\",method=~\"$method\"}[$__rate_interval])))"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "p90",
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(slurmui_http_request_duration_seconds_bucket{route=~\"$route\",method=~\"$method\"}[$__rate_interval])))"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(slurmui_http_request_duration_seconds_bucket{route=~\"$route\",method=~\"$method\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "By route",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 }
+    },
+    {
+      "type": "table",
+      "title": "Top routes by request rate",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{route}}",
+          "expr": "topk(25, sum by (route) (rate(slurmui_http_requests_total{method=~\"$method\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Top error routes (4xx / 5xx)",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "expr": "topk(25, sum by (route, status) (rate(slurmui_http_requests_total{status_class=~\"4xx|5xx\",method=~\"$method\"}[$__rate_interval])))"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "p95 latency by route (top 10)",
+      "datasource": { "type": "prometheus", "uid": "slurmui-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{route}}",
+          "expr": "topk(10, histogram_quantile(0.95, sum by (le, route) (rate(slurmui_http_request_duration_seconds_bucket{method=~\"$method\"}[$__rate_interval]))))"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Logs (filterable)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+    },
+    {
+      "type": "logs",
+      "title": "Request logs — filter by status (Log status regex) and Min latency",
+      "datasource": { "type": "loki", "uid": "slurmui-loki" },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 32 },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=\"slurmui\", kind=\"http_access\", statusClass=~\"$status_class\", method=~\"$method\"} | json | status=~`$log_status` | durationMs > $min_latency_ms"
+        }
+      ]
+    }
+  ]
+}
