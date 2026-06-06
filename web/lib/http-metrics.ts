@@ -16,38 +16,69 @@ import {
 } from "prom-client";
 import pino from "pino";
 
-// Dedicated registry so HTTP metrics live next to the existing hand-built
-// business metrics in /api/metrics. We expose its output by appending it
-// to that route's body.
-export const httpRegistry = new Registry();
+// CRITICAL: this module is bundled TWICE into the production image — once by
+// esbuild into server.mjs (the custom server that records requests) and once
+// by Next/webpack into the /api/metrics route bundle (which serializes the
+// registry). Those are two copies of this file in ONE Node process, so a bare
+// `new Registry()` here yields two independent registries: server.mjs would
+// .inc() one while the route serializes the other — the route's HTTP series
+// stay empty forever (default metrics still appear because collectDefaultMetrics
+// auto-populates in BOTH copies). The fix is a process-global singleton cache
+// on globalThis (shared across every bundle in the process): the first copy to
+// load creates the registry + metrics; the second reuses them.
+const GLOBAL_KEY = "__slurmui_http_metrics__";
+type HttpMetricsSingleton = {
+  registry: Registry;
+  httpRequestsTotal: Counter<string>;
+  httpRequestDuration: Histogram<string>;
+  httpRequestsInFlight: Counter<string>;
+};
+const globalScope = globalThis as typeof globalThis & {
+  [GLOBAL_KEY]?: HttpMetricsSingleton;
+};
 
-// Process/event-loop/GC/heap metrics — cheap and invaluable for spotting
-// event-loop stalls behind latency spikes.
-collectDefaultMetrics({ register: httpRegistry, prefix: "slurmui_" });
+const singleton: HttpMetricsSingleton =
+  globalScope[GLOBAL_KEY] ??
+  (globalScope[GLOBAL_KEY] = (() => {
+    // Dedicated registry so HTTP metrics live next to the existing hand-built
+    // business metrics in /api/metrics. We expose its output by appending it
+    // to that route's body.
+    const registry = new Registry();
 
-const httpRequestsTotal = new Counter({
-  name: "slurmui_http_requests_total",
-  help: "Total HTTP requests handled, by method, normalized route, and status code",
-  labelNames: ["method", "route", "status", "status_class"] as const,
-  registers: [httpRegistry],
-});
+    // Process/event-loop/GC/heap metrics — cheap and invaluable for spotting
+    // event-loop stalls behind latency spikes.
+    collectDefaultMetrics({ register: registry, prefix: "slurmui_" });
 
-const httpRequestDuration = new Histogram({
-  name: "slurmui_http_request_duration_seconds",
-  help: "HTTP request latency in seconds, by method, normalized route, and status code",
-  labelNames: ["method", "route", "status", "status_class"] as const,
-  // Tuned for an interactive web/API app: sub-10ms static hits up to
-  // multi-second SSH/Prometheus-proxy calls.
-  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
-  registers: [httpRegistry],
-});
+    return {
+      registry,
+      httpRequestsTotal: new Counter({
+        name: "slurmui_http_requests_total",
+        help: "Total HTTP requests handled, by method, normalized route, and status code",
+        labelNames: ["method", "route", "status", "status_class"] as const,
+        registers: [registry],
+      }),
+      httpRequestDuration: new Histogram({
+        name: "slurmui_http_request_duration_seconds",
+        help: "HTTP request latency in seconds, by method, normalized route, and status code",
+        labelNames: ["method", "route", "status", "status_class"] as const,
+        // Tuned for an interactive web/API app: sub-10ms static hits up to
+        // multi-second SSH/Prometheus-proxy calls.
+        buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+        registers: [registry],
+      }),
+      httpRequestsInFlight: new Counter({
+        name: "slurmui_http_requests_in_flight_total",
+        help: "Counter of requests entering the handler (paired with _total to spot drops)",
+        labelNames: ["method"] as const,
+        registers: [registry],
+      }),
+    };
+  })());
 
-const httpRequestsInFlight = new Counter({
-  name: "slurmui_http_requests_in_flight_total",
-  help: "Counter of requests entering the handler (paired with _total to spot drops)",
-  labelNames: ["method"] as const,
-  registers: [httpRegistry],
-});
+export const httpRegistry = singleton.registry;
+const httpRequestsTotal = singleton.httpRequestsTotal;
+const httpRequestDuration = singleton.httpRequestDuration;
+const httpRequestsInFlight = singleton.httpRequestsInFlight;
 
 // Structured request logger. Pino writes newline-delimited JSON to stdout;
 // Promtail tails the container's stdout and ships to Loki, where LogQL can
