@@ -33,7 +33,9 @@ RUN npm install --no-save esbuild && \
       --external:next --external:next/* \
       --external:next-auth --external:next-auth/* \
       --external:@auth/prisma-adapter --external:@prisma/client \
-      --external:ws --external:nats --external:node-pty
+      --external:ws --external:nats --external:node-pty \
+      --external:prom-client --external:pino --external:pino/* \
+      --external:thread-stream --external:sonic-boom
 
 # next has no `exports` field, so `import "next/server"` from next-auth's ESM
 # files fails under Node's strict ESM resolver. Rewrite those imports in-place
