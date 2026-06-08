@@ -214,8 +214,8 @@ function gpuLabel(s: PromSeries, fallbackIdx: number): string {
 }
 
 function buildDayChartData(series: PromSeries[], dateStr: string, divisor = 1) {
-  // Use UTC day boundaries so data aligns regardless of browser timezone.
-  const dayStart = Math.floor(new Date(dateStr + "T00:00:00Z").getTime() / 1000);
+  // Local midnight boundaries so the chart starts at 00:00 in the browser's timezone.
+  const dayStart = Math.floor(new Date(dateStr + "T00:00:00").getTime() / 1000);
   const dayEnd   = dayStart + 86400;
 
   const gpus = series
