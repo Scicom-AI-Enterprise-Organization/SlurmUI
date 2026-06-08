@@ -105,25 +105,31 @@ const METRIC_FAMILIES: Record<"dcgm" | "nvidia_smi", MetricFamily> = {
   },
 };
 
-// ── Date helpers ──────────────────────────────────────────────────────────
+// ── Date helpers (all in the browser's local timezone) ────────────────────
 
-function today() { return new Date().toISOString().slice(0, 10); }
+function localIso(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function today() { return localIso(new Date()); }
 function daysAgo(n: number) {
-  const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
+  const d = new Date(); d.setDate(d.getDate() - n); return localIso(d);
 }
 function weekStart(offset = 0) {
   const d = new Date();
   const day = d.getDay();
   d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day) + offset * 7);
-  return d.toISOString().slice(0, 10);
+  return localIso(d);
 }
 function monthStart(offset = 0) {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset);
-  return d.toISOString().slice(0, 10);
+  return localIso(d);
 }
 function monthEnd(offset = 0) {
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offset + 1); d.setDate(0);
-  return d.toISOString().slice(0, 10);
+  return localIso(d);
 }
 function capToday(s: string) { return s > today() ? today() : s; }
 
@@ -877,7 +883,8 @@ export default function ReportsPage() {
   // Fetch report data
   const fetchReport = useCallback(async () => {
     setLoading(true); setError(null);
-    const params = new URLSearchParams({ from: fromDate, to: toDate });
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const params = new URLSearchParams({ from: fromDate, to: toDate, tz });
     if (clusterId !== "__all__") params.set("clusterId", clusterId);
     if (selectedPartitions.length) params.set("partitions", selectedPartitions.join(","));
     if (selectedStatuses.length) params.set("statuses", selectedStatuses.join(","));
