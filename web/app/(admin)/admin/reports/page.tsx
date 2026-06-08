@@ -158,10 +158,12 @@ function fmtDate(iso: string) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 function fmtWeekLabel(fromIso: string, toIso: string) {
-  // Parse as local midnight (append T00:00:00) so the day read back via
-  // getDate()/toLocaleDateString() matches the client's calendar day.
-  const from = new Date(fromIso + "T00:00:00");
-  const to   = new Date(toIso + "T00:00:00");
+  // fromIso/toIso are full ISO instants (server's .toISOString() of the client's
+  // local-midnight boundaries). new Date() parses them directly; getDate() /
+  // toLocaleDateString() then render in the browser's TZ = the correct local day.
+  // Do NOT append "T00:00:00" here — that only applies to bare "YYYY-MM-DD" inputs.
+  const from = new Date(fromIso);
+  const to   = new Date(toIso);
   const toLabel = to.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
   return `${from.getDate()} to ${toLabel}`;
 }
