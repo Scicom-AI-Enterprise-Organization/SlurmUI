@@ -95,22 +95,37 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           token.keycloakId = user.keycloakId ?? "";
           token.userId = user.id!;
         } else {
-          // Keycloak (or other upstream OIDC) — upsert, role comes from IdP.
+          // Keycloak (or other upstream OIDC) — find-or-create, role comes from IdP.
+          // We match on keycloakId OR email so that accounts pre-created via an
+          // invite link (which have an email but no keycloakId yet) get linked
+          // rather than triggering a UNIQUE constraint failure on email.
           const role = user.role ?? "VIEWER";
-          const dbUser = await prisma.user.upsert({
-            where: { keycloakId: user.keycloakId ?? user.id! },
-            update: {
-              name: user.name,
-              email: user.email!,
-              role,
-            },
-            create: {
-              keycloakId: user.keycloakId ?? user.id!,
-              email: user.email!,
-              name: user.name,
-              role,
-            },
+          const keycloakId = user.keycloakId ?? user.id!;
+          let dbUser = await prisma.user.findFirst({
+            where: { OR: [{ keycloakId }, { email: user.email! }] },
           });
+          if (dbUser) {
+            dbUser = await prisma.user.update({
+              where: { id: dbUser.id },
+              data: { name: user.name, email: user.email!, role, keycloakId },
+            });
+          } else {
+            try {
+              dbUser = await prisma.user.create({
+                data: { keycloakId, email: user.email!, name: user.name, role },
+              });
+            } catch {
+              // Race: a concurrent login created the row between our findFirst and
+              // create. Look it up again and update.
+              dbUser = await prisma.user.findFirstOrThrow({
+                where: { OR: [{ keycloakId }, { email: user.email! }] },
+              });
+              dbUser = await prisma.user.update({
+                where: { id: dbUser.id },
+                data: { name: user.name, email: user.email!, role, keycloakId },
+              });
+            }
+          }
           token.role = role;
           token.keycloakId = dbUser.keycloakId;
           token.userId = dbUser.id;
