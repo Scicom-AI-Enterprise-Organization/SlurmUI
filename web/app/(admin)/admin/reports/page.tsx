@@ -158,8 +158,10 @@ function fmtDate(iso: string) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 function fmtWeekLabel(fromIso: string, toIso: string) {
-  const from = new Date(fromIso);
-  const to   = new Date(toIso);
+  // Parse as local midnight (append T00:00:00) so the day read back via
+  // getDate()/toLocaleDateString() matches the client's calendar day.
+  const from = new Date(fromIso + "T00:00:00");
+  const to   = new Date(toIso + "T00:00:00");
   const toLabel = to.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
   return `${from.getDate()} to ${toLabel}`;
 }
@@ -906,8 +908,12 @@ export default function ReportsPage() {
     if (clusterId === "__all__") { setPromData(null); return; }
     let cancelled = false;
     setPromLoading(true);
-    const start = Math.floor(new Date(fromDate).getTime() / 1000);
-    const end   = Math.floor(new Date(toDate).getTime() / 1000) + 86399;
+    // Parse as LOCAL midnight (append T00:00:00). A bare "YYYY-MM-DD" parses as
+    // UTC midnight, which for UTC+8 would start the query at 08:00 local — so the
+    // chart never gets 00:00-08:00 data. This window must match the local-midnight
+    // boundaries in buildDayChartData() so charts span the client's 00:00->23:59.
+    const start = Math.floor(new Date(fromDate + "T00:00:00").getTime() / 1000);
+    const end   = Math.floor(new Date(toDate + "T00:00:00").getTime() / 1000) + 86399;
     const step  = promStep(fromDate, toDate);
     const base  = `/api/clusters/${clusterId}/prometheus`;
 
