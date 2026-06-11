@@ -125,6 +125,15 @@ model Job {
   experimentTrackerId String?
   experimentRunId     String?
   experimentRunUrl    String?
+  // GPU/node allocation snapshot, captured once by the job watcher from
+  // `scontrol show job -d` when the job first reports RUNNING. nodeList is
+  // Slurm's compressed NodeList (e.g. "gpu[01-02]"); gresDetail is the
+  // per-node detail line(s) like "gpu:a100:2(IDX:0,1)" joined with ";";
+  // gpuIndices is the expanded IDX list ("0,1") — i.e. what Slurm exports
+  // as CUDA_VISIBLE_DEVICES inside the job.
+  nodeList   String?
+  gresDetail String?
+  gpuIndices String?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

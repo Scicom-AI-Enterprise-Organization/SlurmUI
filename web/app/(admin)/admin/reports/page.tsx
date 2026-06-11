@@ -27,6 +27,8 @@ type TopUser = { unixUsername: string | null; name: string | null; jobCount: num
 type RunningJob = {
   slurmJobId: number | null; jobName: string; unixUsername: string | null;
   state: string; startedAt: string; elapsedLabel: string;
+  partition: string; nodeList: string | null; gresDetail: string | null;
+  cudaVisibleDevices: string | null;
 };
 type VllmJob = {
   slurmJobId: number | null; jobName: string; unixUsername: string | null;
@@ -35,7 +37,17 @@ type VllmJob = {
 type DayJob = {
   slurmJobId: number | null; jobName: string; unixUsername: string | null;
   state: string; startTime: string; endTime: string; elapsedLabel: string;
+  partition: string; nodeList: string | null; gresDetail: string | null;
+  cudaVisibleDevices: string | null;
 };
+// "gpu:a100:2(IDX:0,1)" → shown as-is; the IDX list is what the job sees as
+// CUDA_VISIBLE_DEVICES. Falls back to the bare index list for older rows.
+function fmtGpuAlloc(j: { gresDetail: string | null; cudaVisibleDevices: string | null }): string {
+  if (j.gresDetail) return j.gresDetail;
+  if (j.cudaVisibleDevices) return `CUDA ${j.cudaVisibleDevices}`;
+  return "—";
+}
+
 type DayEntry = {
   date: string; dayLabel: string;
   completed: number; failed: number; cancelled: number;
@@ -408,6 +420,7 @@ function PRunningTable({ jobs }: { jobs: RunningJob[] }) {
     <table style={TABLE}>
       <thead><tr>
         <th style={TH}>Job</th><th style={TH}>User</th><th style={TH}>State</th>
+        <th style={TH}>Node</th><th style={TH}>GPUs</th>
         <th style={TH}>Started</th><th style={TH}>Elapsed</th>
       </tr></thead>
       <tbody>{jobs.map((j, i) => (
@@ -415,6 +428,8 @@ function PRunningTable({ jobs }: { jobs: RunningJob[] }) {
           <td style={{ ...TD, fontFamily: "monospace" }}>{j.jobName}{j.slurmJobId !== null ? ` (ID ${j.slurmJobId})` : ""}</td>
           <td style={{ ...TD, fontFamily: "monospace" }}>{j.unixUsername ?? "—"}</td>
           <td style={TD}>{j.state}</td>
+          <td style={{ ...TD, fontFamily: "monospace" }}>{j.nodeList ?? "—"}</td>
+          <td style={{ ...TD, fontFamily: "monospace" }}>{fmtGpuAlloc(j)}</td>
           <td style={TD}>{j.startedAt}</td>
           <td style={{ ...TD, fontFamily: "monospace" }}>{j.elapsedLabel}</td>
         </tr>
@@ -451,6 +466,9 @@ function PJobHistoryTable({ jobs }: { jobs: DayJob[] }) {
         <th style={{ ...TH, fontSize: "12px" }}>JobName</th>
         <th style={{ ...TH, fontSize: "12px" }}>User</th>
         <th style={{ ...TH, fontSize: "12px" }}>State</th>
+        <th style={{ ...TH, fontSize: "12px" }}>Partition</th>
+        <th style={{ ...TH, fontSize: "12px" }}>Node</th>
+        <th style={{ ...TH, fontSize: "12px" }}>GPUs</th>
         <th style={{ ...TH, fontSize: "12px", width: "46px" }}>Start</th>
         <th style={{ ...TH, fontSize: "12px", width: "46px" }}>End</th>
         <th style={{ ...TH, fontSize: "12px" }}>Elapsed</th>
@@ -461,6 +479,9 @@ function PJobHistoryTable({ jobs }: { jobs: DayJob[] }) {
           <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.jobName}</td>
           <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.unixUsername ?? "—"}</td>
           <td style={{ ...TD, fontSize: "12px" }}>{j.state}</td>
+          <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.partition}</td>
+          <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.nodeList ?? "—"}</td>
+          <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{fmtGpuAlloc(j)}</td>
           <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.startTime}</td>
           <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.endTime || "—"}</td>
           <td style={{ ...TD, fontSize: "12px", fontFamily: "monospace" }}>{j.elapsedLabel}</td>
@@ -710,10 +731,11 @@ async function exportDocx(
   children.push(sectionHeading("2. Currently running", HeadingLevel.HEADING_3));
   if (data.currentlyRunning.length) {
     children.push(dataTable(
-      ["Job", "User", "State", "Started", "Elapsed"],
+      ["Job", "User", "State", "Node", "GPUs", "Started", "Elapsed"],
       data.currentlyRunning.map((j) => [
         `${j.jobName}${j.slurmJobId !== null ? ` (ID ${j.slurmJobId})` : ""}`,
-        j.unixUsername ?? "—", j.state, j.startedAt, j.elapsedLabel,
+        j.unixUsername ?? "—", j.state, j.nodeList ?? "—", fmtGpuAlloc(j),
+        j.startedAt, j.elapsedLabel,
       ]),
     ), new Paragraph({ children: [] }));
   } else {
@@ -808,10 +830,11 @@ async function exportDocx(
     children.push(sectionHeading("Slurm Job History", HeadingLevel.HEADING_4));
     if (day.jobs.length) {
       children.push(dataTable(
-        ["ID", "JobName", "User", "State", "Start", "End", "Elapsed"],
+        ["ID", "JobName", "User", "State", "Partition", "Node", "GPUs", "Start", "End", "Elapsed"],
         day.jobs.map((j) => [
           String(j.slurmJobId ?? "—"), j.jobName, j.unixUsername ?? "—",
-          j.state, j.startTime, j.endTime || "—", j.elapsedLabel,
+          j.state, j.partition, j.nodeList ?? "—", fmtGpuAlloc(j),
+          j.startTime, j.endTime || "—", j.elapsedLabel,
         ]),
       ));
     } else {
@@ -1311,6 +1334,7 @@ export default function ReportsPage() {
                                 <TableRow>
                                   <TableHead>ID</TableHead><TableHead>JobName</TableHead>
                                   <TableHead>User</TableHead><TableHead>State</TableHead>
+                                  <TableHead>Partition</TableHead><TableHead>Node</TableHead><TableHead>GPUs</TableHead>
                                   <TableHead>Start</TableHead><TableHead>End</TableHead><TableHead>Elapsed</TableHead>
                                 </TableRow>
                               </TableHeader>
@@ -1321,6 +1345,9 @@ export default function ReportsPage() {
                                     <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.jobName}</TableCell>
                                     <TableCell className="font-mono text-xs">{j.unixUsername ?? "—"}</TableCell>
                                     <TableCell className="text-xs">{j.state}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.partition}</TableCell>
+                                    <TableCell className="font-mono text-xs">{j.nodeList ?? "—"}</TableCell>
+                                    <TableCell className="font-mono text-xs">{fmtGpuAlloc(j)}</TableCell>
                                     <TableCell className="font-mono text-xs">{j.startTime}</TableCell>
                                     <TableCell className="font-mono text-xs">{j.endTime || "—"}</TableCell>
                                     <TableCell className="font-mono text-xs">{j.elapsedLabel}</TableCell>

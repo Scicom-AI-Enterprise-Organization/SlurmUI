@@ -31,6 +31,22 @@ interface Job {
 // jobId -> true. Prevents duplicate watchers when two requests race.
 const running = new Map<string, boolean>();
 
+// Expand the IDX lists from a GRES detail string ("gpu:a100:2(IDX:0,2-3)")
+// into a flat, deduped index list ("0,2,3") — the same value Slurm exports
+// as CUDA_VISIBLE_DEVICES inside the job (with default GRES config).
+function parseGpuIndices(gresDetail: string | undefined): string {
+  if (!gresDetail) return "";
+  const out = new Set<number>();
+  for (const m of gresDetail.matchAll(/IDX:([\d,-]+)/g)) {
+    for (const part of m[1].split(",")) {
+      const [a, b] = part.split("-").map(Number);
+      if (Number.isNaN(a)) continue;
+      for (let i = a; i <= (Number.isNaN(b) || b === undefined ? a : b); i++) out.add(i);
+    }
+  }
+  return [...out].sort((x, y) => x - y).join(",");
+}
+
 function parseOutputHint(script: string, slurmJobId: number): string | null {
   const m = script.match(/#SBATCH\s+(?:--output|-o)[=\s]+(\S+)/);
   return m ? m[1].replace(/%j/g, String(slurmJobId)) : null;
@@ -95,8 +111,22 @@ fi
 (
   LAST=""
   GONE=0
+  ALLOC_SENT=""
   while true; do
     STATE=$(squeue -j $JOBID -h -o '%T %R' 2>/dev/null)
+    # Once the job is running, snapshot its allocation: which nodes, and the
+    # per-node GRES detail incl. GPU indices (the IDX list is what Slurm
+    # exports as CUDA_VISIBLE_DEVICES inside the job). Only available while
+    # the job is in the queue, so capture it here, exactly once.
+    if [ -z "$ALLOC_SENT" ] && [ "\${STATE%% *}" = "RUNNING" ]; then
+      DETAIL=$(scontrol show job -d $JOBID 2>/dev/null)
+      NODELIST=$(echo "$DETAIL" | grep -oP ' NodeList=\\K[^ ]+' | head -1)
+      GRESALLOC=$(echo "$DETAIL" | grep -oP 'GRES=\\K[^ ]*\\(IDX:[^)]*\\)' | paste -sd';' -)
+      if [ -n "$NODELIST" ] && [ "$NODELIST" != "(null)" ]; then
+        echo "__AURA_ALLOC__=$NODELIST|$GRESALLOC"
+        ALLOC_SENT=1
+      fi
+    fi
     if [ -z "$STATE" ]; then
       TERM=$(sacct -j $JOBID -n -o State%-20 2>/dev/null | head -1 | awk '{print $1}')
       case "$TERM" in
@@ -210,6 +240,18 @@ echo "__AURA_JOB_FINAL__=$FINAL"
       }
       if (line.startsWith("__AURA_ASSUMED_COMPLETE__=")) {
         assumedComplete = true;
+        return;
+      }
+      if (line.startsWith("__AURA_ALLOC__=")) {
+        const [nodeList, gres] = line.slice("__AURA_ALLOC__=".length).split("|");
+        prisma.job.update({
+          where: { id: job.id },
+          data: {
+            nodeList: nodeList || null,
+            gresDetail: gres || null,
+            gpuIndices: parseGpuIndices(gres) || null,
+          },
+        }).catch(() => {});
         return;
       }
       if (!statusFlipped) {

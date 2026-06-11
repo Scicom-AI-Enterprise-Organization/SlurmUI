@@ -151,6 +151,10 @@ export async function GET(request: NextRequest) {
         createdAt: true,
         updatedAt: true,
         userId: true,
+        partition: true,
+        nodeList: true,
+        gresDetail: true,
+        gpuIndices: true,
         cluster: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: "asc" },
@@ -170,6 +174,10 @@ export async function GET(request: NextRequest) {
         status: true,
         createdAt: true,
         userId: true,
+        partition: true,
+        nodeList: true,
+        gresDetail: true,
+        gpuIndices: true,
         cluster: { select: { name: true } },
       },
       orderBy: { createdAt: "asc" },
@@ -258,6 +266,10 @@ export async function GET(request: NextRequest) {
       state: j.status,
       startedAt: startLabel,
       elapsedLabel: fmtElapsed(elapsedSec),
+      partition: j.partition,
+      nodeList: j.nodeList,
+      gresDetail: j.gresDetail,
+      cudaVisibleDevices: j.gpuIndices,
     };
   });
 
@@ -297,6 +309,10 @@ export async function GET(request: NextRequest) {
       startTime: string;
       endTime: string;
       elapsedLabel: string;
+      partition: string;
+      nodeList: string | null;
+      gresDetail: string | null;
+      cudaVisibleDevices: string | null;
     }>;
   }> = [];
 
@@ -341,6 +357,10 @@ export async function GET(request: NextRequest) {
           startTime: fmtTimeInTZ(j.createdAt, tz),
           endTime: isTerminal ? fmtTimeInTZ(j.updatedAt, tz) : "",
           elapsedLabel: fmtElapsed(durSec),
+          partition: j.partition,
+          nodeList: j.nodeList,
+          gresDetail: j.gresDetail,
+          cudaVisibleDevices: j.gpuIndices,
         };
       }),
     });
