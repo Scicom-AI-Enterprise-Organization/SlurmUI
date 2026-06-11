@@ -102,7 +102,7 @@ export async function GET(request: NextRequest) {
         nodeList: true,
         gresDetail: true,
         gpuIndices: true,
-        cluster: { select: { name: true } },
+        cluster: { select: { id: true, name: true } },
       },
       orderBy: { createdAt: "asc" },
       take: 50,
@@ -195,6 +195,12 @@ export async function GET(request: NextRequest) {
       nodeList: j.nodeList,
       gresDetail: j.gresDetail,
       cudaVisibleDevices: j.gpuIndices,
+      // Machine-friendly fields for external consumers (GPU Platform Analytics)
+      clusterName: j.cluster?.name ?? null,
+      createdAt: j.createdAt.toISOString(),
+      gpus: parseJobGresCpus(j.script).gpus,
+      id: j.id,
+      clusterId: j.cluster?.id ?? null,
     };
   });
 
