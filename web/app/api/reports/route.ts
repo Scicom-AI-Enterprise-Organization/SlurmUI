@@ -236,9 +236,16 @@ export async function GET(request: NextRequest) {
       endTime: string;
       elapsedLabel: string;
       partition: string;
+      clusterName: string | null;
       nodeList: string | null;
       gresDetail: string | null;
       cudaVisibleDevices: string | null;
+      // Machine-friendly companions to the display strings above, so external
+      // consumers (GPU Platform Analytics) don't have to parse "HH:mm".
+      createdAt: string;
+      endedAt: string | null;
+      durationSec: number;
+      gpus: number;
     }>;
   }> = [];
 
@@ -285,9 +292,14 @@ export async function GET(request: NextRequest) {
           endTime: isTerminal ? fmtTimeInTZ(j.updatedAt, tz) : "",
           elapsedLabel: fmtElapsed(durSec),
           partition: j.partition,
+          clusterName: j.cluster?.name ?? null,
           nodeList: j.nodeList,
           gresDetail: j.gresDetail,
           cudaVisibleDevices: j.gpuIndices,
+          createdAt: j.createdAt.toISOString(),
+          endedAt: isTerminal ? j.updatedAt.toISOString() : null,
+          durationSec: Math.round(durSec),
+          gpus: parseJobGresCpus(j.script).gpus,
         };
       }),
     });
