@@ -246,6 +246,9 @@ export async function GET(request: NextRequest) {
       endedAt: string | null;
       durationSec: number;
       gpus: number;
+      // For deep links: /clusters/{clusterId}/jobs/{id}
+      id: string;
+      clusterId: string | null;
     }>;
   }> = [];
 
@@ -299,6 +302,8 @@ export async function GET(request: NextRequest) {
           createdAt: j.createdAt.toISOString(),
           endedAt: isTerminal ? j.updatedAt.toISOString() : null,
           durationSec: Math.round(durSec),
+          id: j.id,
+          clusterId: j.cluster?.id ?? null,
           gpus: parseJobGresCpus(j.script).gpus,
         };
       }),
