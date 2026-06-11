@@ -31,3 +31,5 @@ id_rsa*
 # a submodule. Ignored so an accidental `git add` doesn't re-create the
 # phantom-submodule gitlink.
 Enterprise-Template/
+# Local DB dumps — contain password hashes / SSH keys, never commit
+backups/
