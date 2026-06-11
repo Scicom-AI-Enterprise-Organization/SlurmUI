@@ -123,7 +123,10 @@ export async function GET(request: NextRequest) {
   const gpKey = process.env.GPUPLATFORM_API_KEY;
 
   // Slurm report (own API, caller's cookie) + all GPUPlatform kinds, concurrently.
-  const slurmUrl = new URL("/api/reports", request.nextUrl.origin);
+  // Self-call over loopback: behind the ingress, nextUrl.origin is the public
+  // https origin, which the pod can't dial back (TLS terminates at the
+  // ingress) — the server itself listens on plain HTTP on $PORT.
+  const slurmUrl = new URL("/api/reports", `http://127.0.0.1:${process.env.PORT || "3000"}`);
   searchParams.forEach((v, k) => slurmUrl.searchParams.set(k, v));
 
   const [slurmRes, ...gpResults] = await Promise.all([
