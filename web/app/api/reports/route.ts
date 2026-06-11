@@ -177,6 +177,7 @@ export async function GET(request: NextRequest) {
   // Currently running / pending jobs
   const currentlyRunning = runningJobs.map((j) => {
     const u = userMap.get(j.userId);
+    const usage = parseJobGresCpus(j.script);
     const elapsedSec = Math.round((now.getTime() - j.createdAt.getTime()) / 1000);
     const startDate = j.createdAt;
     const startLabel =
@@ -194,11 +195,11 @@ export async function GET(request: NextRequest) {
       partition: j.partition,
       nodeList: j.nodeList,
       gresDetail: j.gresDetail,
-      cudaVisibleDevices: j.gpuIndices,
+      cudaVisibleDevices: j.gpuIndices ?? usage.gpuDevices,
       // Machine-friendly fields for external consumers (GPU Platform Analytics)
       clusterName: j.cluster?.name ?? null,
       createdAt: j.createdAt.toISOString(),
-      gpus: parseJobGresCpus(j.script).gpus,
+      gpus: usage.gpus,
       id: j.id,
       clusterId: j.cluster?.id ?? null,
     };
@@ -288,6 +289,7 @@ export async function GET(request: NextRequest) {
       cpuHours: +dayCpu.toFixed(2),
       jobs: dayJobs.map((j) => {
         const u = userMap.get(j.userId);
+        const usage = parseJobGresCpus(j.script);
         const isTerminal =
           j.status === "COMPLETED" || j.status === "FAILED" || j.status === "CANCELLED";
         const durSec = Math.max(0, (j.updatedAt.getTime() - j.createdAt.getTime()) / 1000);
@@ -304,13 +306,13 @@ export async function GET(request: NextRequest) {
           clusterName: j.cluster?.name ?? null,
           nodeList: j.nodeList,
           gresDetail: j.gresDetail,
-          cudaVisibleDevices: j.gpuIndices,
+          cudaVisibleDevices: j.gpuIndices ?? usage.gpuDevices,
           createdAt: j.createdAt.toISOString(),
           endedAt: isTerminal ? j.updatedAt.toISOString() : null,
           durationSec: Math.round(durSec),
           id: j.id,
           clusterId: j.cluster?.id ?? null,
-          gpus: parseJobGresCpus(j.script).gpus,
+          gpus: usage.gpus,
         };
       }),
     });

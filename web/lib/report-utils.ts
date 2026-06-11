@@ -54,7 +54,11 @@ export function dateRangeStrings(fromStr: string, toStr: string): string[] {
 
 // ── Job-script parsers ────────────────────────────────────────────────────
 
-export function parseJobGresCpus(script: string): { gpus: number; cpus: number } {
+export function parseJobGresCpus(script: string): {
+  gpus: number;
+  cpus: number;
+  gpuDevices: string | null;
+} {
   const gpuPatterns: RegExp[] = [
     /#SBATCH\s+--gres=gpu(?::[^:\s]+)?:(\d+)/,
     /#SBATCH\s+--gpus[=\s]+(?:[a-z0-9_-]+:)?(\d+)/i,
@@ -67,8 +71,45 @@ export function parseJobGresCpus(script: string): { gpus: number; cpus: number }
     const m = script.match(re);
     if (m) gpus = Math.max(gpus, parseInt(m[1], 10) || 0);
   }
+
+  // Many scripts here never request gres (the nodes aren't gres-scheduled) —
+  // infer GPU usage from the workload itself.
+
+  // 1) An explicit CUDA_VISIBLE_DEVICES pin anywhere in the script
+  //    (export line, inline env, or a generated .env heredoc).
+  let gpuDevices: string | null = null;
+  const cvd = script.match(/CUDA_VISIBLE_DEVICES\s*=\s*["']?(\d+(?:\s*,\s*\d+)*)["']?/);
+  if (cvd) {
+    gpuDevices = cvd[1].replace(/\s+/g, "");
+    gpus = Math.max(gpus, gpuDevices.split(",").filter(Boolean).length);
+  }
+
+  // 2) Engine parallelism flags (vLLM / sglang / torchrun): tp × pp × dp.
+  const flag = (re: RegExp): number | null => {
+    const m = script.match(re);
+    return m ? parseInt(m[1], 10) || 1 : null;
+  };
+  const tp = flag(/--tensor-parallel-size[=\s]+(\d+)/) ?? flag(/\s-tp[=\s]+(\d+)/);
+  const pp = flag(/--pipeline-parallel-size[=\s]+(\d+)/);
+  const dp = flag(/--data-parallel-size[=\s]+(\d+)/);
+  const nproc = flag(/--nproc[_-]per[_-]node[=\s]+(\d+)/);
+  if (tp !== null || pp !== null || dp !== null) {
+    gpus = Math.max(gpus, (tp ?? 1) * (pp ?? 1) * (dp ?? 1));
+  }
+  if (nproc !== null) gpus = Math.max(gpus, nproc);
+
+  // 3) Clearly a GPU workload with no explicit count → assume 1.
+  if (
+    gpus === 0 &&
+    /vllm serve|--gpu-memory-utilization|gpu_memory_utilization|GPU_MEM_UTIL|torchrun|accelerate launch/i.test(
+      script,
+    )
+  ) {
+    gpus = 1;
+  }
+
   const cpt = script.match(/#SBATCH\s+(?:--cpus-per-task|-c)[=\s]+(\d+)/);
-  return { gpus, cpus: cpt ? parseInt(cpt[1], 10) || 1 : 1 };
+  return { gpus, cpus: cpt ? parseInt(cpt[1], 10) || 1 : 1, gpuDevices };
 }
 
 export function parseJobName(script: string, id: string): string {
