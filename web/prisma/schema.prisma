@@ -88,6 +88,9 @@ model Job {
   // `(clusterId, name)` index below is what makes the in-code uniqueness
   // check fast.
   name       String?
+  // Free-form human description of the job. Not collected anywhere yet —
+  // placeholder column so future UI/API can attach one without a migration.
+  description String?  @db.Text
   status     JobStatus @default(PENDING)
   exitCode   Int?
   output     String?   @db.Text
