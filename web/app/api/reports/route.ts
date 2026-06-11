@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getApiUser } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 import {
@@ -8,13 +8,15 @@ import {
 } from "@/lib/report-utils";
 
 export async function GET(request: NextRequest) {
-  const session = await auth();
-  if (!session?.user) {
+  // Session OR `Authorization: Bearer aura_…` — bearer lets external tools
+  // (the GPU Platform admin Analytics page) pull the same report the UI shows.
+  const user = await getApiUser(request);
+  if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const userId = session.user.id;
-  const isAdmin = (session.user as { role?: string }).role === "ADMIN";
+  const userId = user.id;
+  const isAdmin = user.role === "ADMIN";
   const scope = isAdmin ? {} : { userId };
 
   const { searchParams } = request.nextUrl;
